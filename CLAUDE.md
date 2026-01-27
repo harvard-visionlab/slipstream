@@ -154,43 +154,51 @@ slipstream/
 ├── .python-version             # Pinned to 3.11
 ├── CLAUDE.md                   # This file
 ├── pyproject.toml              # Project config (hatchling)
-├── README.md                   # User documentation
+├── README.md                   # User documentation (TODO)
 ├── slipstream/
-│   ├── __init__.py
-│   ├── dataset.py              # SlipstreamDataset (LitData wrapper)
-│   ├── loader.py               # PrefetchingDataLoader + SlipstreamLoader
-│   ├── ffcv_reader.py          # Native .ffcv file reader
-│   ├── cluster.py              # Cluster utilities (symlinks, cache)
+│   ├── __init__.py             # ✅ Package exports
+│   ├── dataset.py              # ✅ SlipstreamDataset (LitData wrapper)
+│   ├── loader.py               # ⬜ PrefetchingDataLoader + SlipstreamLoader
+│   ├── ffcv_reader.py          # ⬜ Native .ffcv file reader
 │   ├── decoders/
-│   │   ├── __init__.py
-│   │   ├── gpu.py              # nvImageCodec decoder
-│   │   └── cpu.py              # TurboJPEG decoder
-│   └── transforms/             # fastaugs port (TODO: cleanup)
+│   │   ├── __init__.py         # ✅ Created
+│   │   ├── gpu.py              # ⬜ nvImageCodec decoder
+│   │   └── cpu.py              # ⬜ TurboJPEG decoder
+│   └── transforms/             # ⬜ fastaugs port (TODO: cleanup)
 │       ├── __init__.py
 │       ├── functional.py
 │       └── transforms.py
 ├── tests/
-│   ├── __init__.py
-│   ├── test_loader.py          # 3-epoch tests (cold + warm)
-│   ├── test_decoders.py
-│   └── test_dataset.py
+│   ├── __init__.py             # ✅ Created
+│   ├── test_loader.py          # ⬜ 3-epoch tests (cold + warm)
+│   ├── test_decoders.py        # ⬜
+│   └── test_dataset.py         # ⬜
 ├── benchmarks/
-│   ├── __init__.py
-│   └── benchmark_loader.py
+│   ├── __init__.py             # ✅ Created
+│   └── benchmark_loader.py     # ⬜
 └── notebooks/
-    └── 00_environment_test.ipynb
+    ├── 00_environment_test.ipynb  # ✅ Environment verification
+    └── 01_dataset_basics.ipynb    # ✅ SlipstreamDataset tutorial
 ```
 
 ---
 
 ## Implementation Plan
 
-### Phase 1: Core Infrastructure ✅ (Partial)
+### Phase 1: Core Infrastructure ✅ COMPLETE
 
 1. ✅ Set up pyproject.toml with hatchling
 2. ✅ Create basic package structure
 3. ✅ Set up dev environment (uv, jupyterlab, nbstripout)
-4. ⬜ Port StreamingDatasetVisionlab → SlipstreamDataset
+4. ✅ Port StreamingDatasetVisionlab → SlipstreamDataset
+   - Intuitive API: `remote_dir`, `cache_dir`, `local_dir`
+   - Automatic field type detection
+   - Pipeline support for per-field transforms
+   - `decode_images` and `to_pil` options
+   - `SLIPSTREAM_CACHE_DIR` env var support
+   - Falls back to LitData's default caching (`~/.lightning/`)
+   - Cluster symlink setup (`ensure_lightning_symlink_on_cluster`)
+5. ✅ Create `01_dataset_basics.ipynb` tutorial notebook
 
 ### Phase 2: Loader Infrastructure
 
