@@ -7,73 +7,143 @@
 **Namespace**: `visionlab.slipstream`
 
 ```python
-from visionlab.slipstream import SlipstreamDataset, SlipstreamLoader
+from slipstream import SlipstreamDataset, SlipstreamLoader
 ```
 
-## Reference Implementation
+---
 
-The core `SlipstreamDataset` implementaton is based on the prototype work in our **visionlab.datasets** repo:
+## Design Decisions (Confirmed)
+
+These decisions were confirmed during project planning and should be followed:
+
+### Build System & Environment
+
+- **Build system**: `hatchling` (not setuptools) - simpler config, better namespace package support
+- **Python version**: `>=3.10`, development on **3.11** (pinned in `.python-version`)
+- **Package structure**: `slipstream/` folder directly (not `src/visionlab/slipstream/`)
+
+### Architecture
+
+- **Two-layer loader architecture**:
+  1. `PrefetchingDataLoader` - Raw I/O layer (480k img/s target)
+     - Pre-allocated memory banks (zero-copy)
+     - Background thread with `nogil=True` Numba
+     - Returns: `{data, sizes, heights, widths, indices}`
+  2. `SlipstreamLoader` - Training-ready layer
+     - Integrates PrefetchingDataLoader
+     - Adds GPU/CPU decoders
+     - Adds RandomResizedCrop, CenterCrop, normalization
+     - Returns: decoded GPU tensors `[B, C, H, W]`
+
+- **Dataset sources**: Start with LitData variant only, expand later
+  - Future: `SlipstreamDataset.from_litdata()`, `.from_imagefolder()`, `.from_huggingface()`
+
+- **Sample handling**: Work with any sample dict; if sample is a tuple, ask user for field names to return a dict
+
+### Decoders
+
+- **Device selection**: Optional `device` argument, auto-detect (CUDA if available) when `None`
+- **TurboJPEG**: Strictly required for the Numba decoding path (system dependency: `libturbojpeg`)
+- **GPU decoder**: nvImageCodec for fused decode + RandomResizedCrop
+
+### File Formats
+
+- **V2 metadata format**: Use exact same format as litdata-mmap for compatibility
+- **First-epoch generation**: Create optimized files during first epoch from any source dataset
+- **Dataset versioning**: Content-addressable hash for 1-to-1 mapping to source dataset
+  ```python
+  # Hash of: source_path + dataset_version + slipstream_format_version
+  dataset_id = hashlib.sha256(f"{source_path}:{dataset.version}:slipstream-v1").hexdigest()[:8]
+  # Filename: imagenet1k-val-{dataset_id}.slipstream
+  ```
+- **FFCV .beton support**: Yes, read existing .ffcv files directly via `FFCVFileDataset`
+  - Location: `/Users/gaa019/Documents/GitHub/litdata-mmap/src/litdata_mmap/ffcv_file_dataset.py`
+
+### RandomResizedCrop
+
+- **Standard**: Torchvision-compatible (10 attempts, rejection sampling)
+- **Optimized**: `DirectRandomResizedCrop` (or `AnalyticRandomResizedCrop`) - no loop needed
+  - Choose random ratio from range
+  - Choose long edge length from valid range
+  - Short edge determined by ratio
+  - Sample top-left coordinates from valid range directly
+
+### Cluster & Lab Infrastructure
+
+- **Include** `ensure_lightning_symlink_on_cluster()` for SLURM environments
+- **Default cache_dir**: Points to shared lab cache directory (lightning symlink)
+
+### Testing Strategy
+
+- **Do NOT port** litdata-mmap tests (too sprawling)
+- **Fresh test approach**:
+  - Always run 3 full epochs (1 cold, 2 warm) to verify mmap reduces I/O bottleneck
+  - Report: batch shape, device, images/s per epoch
+  - Separate tests for:
+    - I/O only (raw data pass through)
+    - Minimal decoding (decode + center-crop for uniform sizes)
+
+### Batch Augmentations (fastaugs)
+
+- **Location**: `/Users/gaa019/Documents/GitHub/lrm-ssl/lrm_ssl/datasets/dataloaders/fastaugs`
+- **Approach**: Direct port first, mark TODOs for cleanup/standardization/bug fixes
+- **Features**: 27 GPU-accelerated transforms, per-image randomization, parameter replay for SSL
+
+### Pipelines (for reference)
+
+- **Location**: `/Users/gaa019/Documents/GitHub/lrm-ssl/lrm_ssl/datasets/pipelines`
+- **Pattern**: OmegaConf/Hydra configuration-driven, two-stage (decode + batch)
+
+---
+
+## Reference Implementations
+
+### visionlab/datasets (StreamingDatasetVisionlab)
 
 ```
-'/Users/gaa019/Documents/GitHub/visionlab/datasets'
+/Users/gaa019/Documents/GitHub/visionlab/datasets/datasets/streaming_dataset.py
 ```
 
-The core `SlipstreamLoader` implementation is based on the prototype work in our **litdata-mmap** repo:
+Provides:
+- LitData StreamingDataset wrapper with pipelines
+- Automatic image decoding and field type detection
+- Cluster symlink setup for shared credentials
+- AWS S3 or S3-compatible (e.g., Wasabi) storage options
+
+### litdata-mmap (Core Loader)
 
 ```
 /Users/gaa019/Documents/GitHub/litdata-mmap
 ```
 
-### Key Files to Port
-
 | litdata-mmap File                       | slipstream Target                 | Purpose                                      |
 | --------------------------------------- | --------------------------------- | -------------------------------------------- |
-| `src/litdata_mmap/ffcv_style_loader.py` | `slipstream/slipstream_loader.py` | **SlipstreamLoader** - main high-perf loader |
+| `src/litdata_mmap/ffcv_style_loader.py` | `slipstream/loader.py`            | PrefetchingDataLoader + FFCVStyleDataset     |
 | `src/litdata_mmap/gpu_decoder.py`       | `slipstream/decoders/gpu.py`      | nvImageCodec GPU decoder                     |
-| `src/litdata_mmap/cpu_decoder.py`       | `slipstream/decoders/cpu.py`      | TurboJPEG CPU decoder                        |
-| `src/litdata_mmap/optimized_dataset.py` | `slipstream/dataset.py`           | FFCVStyleDataset base                        |
+| `src/litdata_mmap/turbo_decoder.py`     | `slipstream/decoders/cpu.py`      | TurboJPEG CPU decoder                        |
+| `src/litdata_mmap/ffcv_file_dataset.py` | `slipstream/ffcv_reader.py`       | Native .ffcv/.beton file reader              |
+| `src/litdata_mmap/optimized_dataset.py` | `slipstream/dataset.py`           | High-level dataset wrapper                   |
 
-### Performance Benchmarks (from litdata-mmap)
+### Benchmark Datasets
 
-For this "slipstream" repo, we need to ensure that we reproduce these metrics/benchmark results, otherwise we've lost something in translation.
+```python
+FFCV_VAL_PATH = "s3://visionlab-datasets/imagenet1k/pre-processed/s256-l512-jpgbytes-q100-ffcv/imagenet1k-s256-l512-jpg-q100-cs100-val-7ac6386e.ffcv"
+LITDATA_VAL_PATH = "s3://visionlab-datasets/imagenet1k/pre-processed/s256-l512-jpgbytes-q100-streaming/val/"
+```
 
-WE want to benchmark all steps of the pipleline, from Raw I/O only, to Raw I/O + decode (both CenterCrop and RandomResizedCrop). For RandomResizedCrop we want to implement both a torchvision-compatible version (current), and one with a slightly smarter sampling algorithm for choosing params (needs design + implementation + benchmarking)
+Benchmark environments: macOS laptop (CPU), GPU workstation, cluster
+
+---
+
+## Performance Targets
 
 | Metric           | FFCV        | SlipstreamLoader | Notes                    |
 | ---------------- | ----------- | ---------------- | ------------------------ |
 | Raw I/O          | ~350k img/s | **480k+ img/s**  | +37% faster              |
 | GPU Decode-Only  | ~11k img/s  | ~10k img/s       | Equivalent               |
 | GPU Decode + RRC | ~10k img/s  | **10.1k img/s**  | Equivalent               |
+| CPU Decode + RRC | -           | ~5.7k img/s      | TurboJPEG fallback       |
 | Cold Start       | baseline    | **20% faster**   | Parallel chunk downloads |
-
-### Decoder Recommendations
-
-| Environment      | Decoder                 | Performance                              |
-| ---------------- | ----------------------- | ---------------------------------------- |
-| **GPU Training** | nvImageCodec            | 10.1k img/s (decode + RandomResizedCrop) |
-| CPU-Only         | TurboJPEG               | 5.7k img/s (decode + RandomResizedCrop)  |
-| Multi-GPU        | nvImageCodec per device | Scales linearly                          |
-
-**Note**: nvImageCodec is optimal for GPU workflows because it performs decode + RandomResizedCrop in a single fused operation, avoiding CPU↔GPU memory transfers.
-
----
-
-## StreamingDataset Integration
-
-Include `StreamingDatasetVisionlab` from visionlab/datasets as the base streaming dataset, but rename as `SlipstreamDataset` and we'll make enhancements as needed (e.g., to support other dataset formats, e.g., torchvision.ImageFolder or huggingface datasets; basically any dataset that emits samples). It's possible the right way to do this is to have separate datasets (`SlipstreamLitDataset`, `SlipstreamImageFolder`, `SlipstreamHFDataset`, etc.) and then create a universal interface with `SlipstreamDataset`.
-
-The prototype `FFCVStyleDataset` needs to be merged with `visionab.datasets.StreamingDataset` to form our new `SlipstreamDataset`, and even better if we can make this work with any dataset.
-
-```
-/Users/gaa019/Documents/GitHub/visionlab/datasets/datasets/streaming_dataset.py
-```
-
-This provides:
-
-- LitData StreamingDataset wrapper with pipelines
-- Automatic image decoding and field type detection
-- Cluster symlink setup for shared credentials
-- AWS S3 or S3-compatible (e.g., Wasabi) storage options
 
 ---
 
@@ -81,212 +151,124 @@ This provides:
 
 ```
 slipstream/
+├── .python-version             # Pinned to 3.11
 ├── CLAUDE.md                   # This file
-├── pyproject.toml              # Project config
+├── pyproject.toml              # Project config (hatchling)
 ├── README.md                   # User documentation
-├── slipstream/                 # Maps to visionlab.slipstream
+├── slipstream/
 │   ├── __init__.py
-│   ├── slipstream_loader.py    # SlipstreamLoader (from ffcv_style_loader.py)
-│   ├── dataset.py              # FFCVStyleDataset base
-│   ├── streaming.py            # StreamingDatasetVisionlab
-│   └── decoders/
+│   ├── dataset.py              # SlipstreamDataset (LitData wrapper)
+│   ├── loader.py               # PrefetchingDataLoader + SlipstreamLoader
+│   ├── ffcv_reader.py          # Native .ffcv file reader
+│   ├── cluster.py              # Cluster utilities (symlinks, cache)
+│   ├── decoders/
+│   │   ├── __init__.py
+│   │   ├── gpu.py              # nvImageCodec decoder
+│   │   └── cpu.py              # TurboJPEG decoder
+│   └── transforms/             # fastaugs port (TODO: cleanup)
 │       ├── __init__.py
-│       ├── gpu.py              # nvImageCodec decoder
-│       └── cpu.py              # TurboJPEG decoder
+│       ├── functional.py
+│       └── transforms.py
 ├── tests/
-│   ├── test_slipstream_loader.py
+│   ├── __init__.py
+│   ├── test_loader.py          # 3-epoch tests (cold + warm)
 │   ├── test_decoders.py
-│   └── test_streaming.py
-└── benchmarks/
-    └── benchmark_loader.py
+│   └── test_dataset.py
+├── benchmarks/
+│   ├── __init__.py
+│   └── benchmark_loader.py
+└── notebooks/
+    └── 00_environment_test.ipynb
 ```
-
----
-
-## pyproject.toml Setup
-
-Follow the pattern from litdata-mmap, adapted for visionlab namespace:
-
-```toml
-[project]
-name = "visionlab-slipstream"
-version = "0.1.0"
-description = "High-performance data loading for PyTorch vision workloads"
-readme = "README.md"
-requires-python = ">=3.10,<3.11"
-
-dependencies = [
-    # Core (no version pinning like ffcv required)
-    "numpy",
-    "torch",
-    "torchvision",
-    "tqdm",
-    # Numba for JIT-compiled batch loading
-    "numba",
-    # LitData (use main branch to match visionlab-datasets)
-    "litdata@git+https://github.com/Lightning-AI/litdata.git@main",
-    # PyTurboJPEG for fast JPEG decoding
-    "PyTurboJPEG@git+https://github.com/lilohuang/PyTurboJPEG.git",
-    # AWS/S3 support
-    "boto3",
-    "fsspec[s3]"
-]
-
-[dependency-groups]
-dev = [
-    "pytest>=7.0.0",
-    "pytest-cov>=4.0.0",
-    "pytest-xdist",
-    "mypy>=1.0.0",
-    "ruff>=0.1.0",
-    "ipykernel",
-    "pandas",
-    "matplotlib",
-    "seaborn",
-]
-
-# GPU acceleration dependencies (nvImageCodec + CV-CUDA)
-# Install with: uv sync --group gpu
-gpu = [
-    "nvidia-nvimgcodec-cu12>=0.2.0",
-    "cvcuda-cu12>=0.5.0",
-]
-
-# Route torch to CUDA (Linux) or CPU (others)
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cu121", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { index = "pytorch-cpu",   marker = "sys_platform != 'linux' or platform_machine != 'x86_64'" },
-]
-torchvision = [
-    { index = "pytorch-cu121", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { index = "pytorch-cpu",   marker = "sys_platform != 'linux' or platform_machine != 'x86_64'" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cu121"
-url  = "https://download.pytorch.org/whl/cu121"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url  = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.metadata]
-allow-direct-references = true
-
-[tool.hatch.build.targets.wheel]
-packages = ["slipstream"]
-
-# Note: For visionlab.slipstream namespace, may need to adjust package structure
-# Option 1: Use slipstream/ folder directly (simpler)
-# Option 2: Use src/visionlab/slipstream/ with proper namespace packages
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-v --tb=short"
-
-[tool.mypy]
-python_version = "3.10"
-strict = true
-ignore_missing_imports = true
-
-[tool.ruff]
-line-length = 100
-target-version = "py310"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP"]
-```
-
-### Key Differences from litdata-mmap
-
-- **No FFCV dependency** - We replace FFCV with our own implementation
-- **No scipy pinning** - Not needed without ffcv
-- **GPU decoder optional** - Install with `uv sync --group gpu`
-- **visionlab namespace** - Imports as `visionlab.slipstream`
 
 ---
 
 ## Implementation Plan
 
-### Phase 1: Core Infrastructure
+### Phase 1: Core Infrastructure ✅ (Partial)
 
-1. Set up pyproject.toml with visionlab namespace
-2. Create basic package structure
-3. Port StreamingDatasetVisionlab from visionlab/datasets
+1. ✅ Set up pyproject.toml with hatchling
+2. ✅ Create basic package structure
+3. ✅ Set up dev environment (uv, jupyterlab, nbstripout)
+4. ⬜ Port StreamingDatasetVisionlab → SlipstreamDataset
 
-### Phase 2: FastLoader
+### Phase 2: Loader Infrastructure
 
-1. Port FFCVStyleDataset from litdata-mmap
-2. Port PrefetchingDataLoader
-3. Port decoders (GPU/CPU)
-4. Create FastLoader API wrapper
+1. ⬜ Port FFCVStyleDataset (V2 metadata format)
+2. ⬜ Port PrefetchingDataLoader (raw I/O layer)
+3. ⬜ Port CPU decoder (TurboJPEG)
+4. ⬜ Port GPU decoder (nvImageCodec)
+5. ⬜ Create SlipstreamLoader (training-ready layer)
+6. ⬜ Port FFCVFileDataset (.beton reader)
 
-### Phase 3: Testing & Benchmarks
+### Phase 3: Augmentations
 
-1. Unit tests for all components
-2. Benchmark suite comparing to FFCV
-3. Integration tests with real datasets
+1. ⬜ Port fastaugs (direct port)
+2. ⬜ TODO markers for cleanup/standardization
+3. ⬜ Implement DirectRandomResizedCrop
 
-### Phase 4: Documentation
+### Phase 4: Testing & Benchmarks
 
-1. README with usage examples
-2. API documentation
-3. Performance guide
+1. ⬜ 3-epoch test framework
+2. ⬜ I/O-only benchmarks
+3. ⬜ Decode + crop benchmarks
+4. ⬜ Comparison vs FFCV baseline
+
+### Phase 5: Documentation
+
+1. ⬜ README with usage examples
+2. ⬜ API documentation
+3. ⬜ Performance guide
 
 ---
 
-## Development Workflow
+## Development Commands
 
-### Code Quality
+```bash
+# Install dependencies
+uv sync --group dev
 
-- **Type hints**: All functions must have type annotations
-- **Tests**: Every feature needs tests
-- **Run checks before committing**:
-    ```bash
-    uv run pytest tests/ -v
-    uv run mypy slipstream/
-    uv run ruff check slipstream/ tests/
-    ```
+# Install with GPU support (Linux only)
+uv sync --group dev --group gpu
 
-### Commit Messages
+# Run tests
+uv run pytest tests/ -v
 
-Use conventional commits:
+# Run type checking
+uv run mypy slipstream/
 
-- `feat: description` for new features
-- `fix: description` for bug fixes
-- `test: description` for tests
-- `docs: description` for documentation
+# Run linting
+uv run ruff check slipstream/ tests/
+
+# Launch JupyterLab
+uv run jupyter lab
+```
 
 ---
 
 ## Key Technical Details
 
-### FastLoader Architecture
+### Loader Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     FastLoader API                          │
+│                   SlipstreamLoader API                       │
+│              (Training-ready interface)                      │
+├─────────────────────────────────────────────────────────────┤
+│  Decoders                                                   │
+│  ├── GPU: nvImageCodec (decode + RRC fused, 10.1k img/s)    │
+│  └── CPU: TurboJPEG (5.7k img/s)                            │
 ├─────────────────────────────────────────────────────────────┤
 │  PrefetchingDataLoader                                      │
 │  ├── Pre-allocated memory banks (zero-copy)                 │
-│  ├── Async I/O with ThreadPoolExecutor                      │
-│  └── Overlapped fetch/decode                                │
+│  ├── Background thread prefetching                          │
+│  └── Returns: {data, sizes, heights, widths, indices}       │
 ├─────────────────────────────────────────────────────────────┤
-│  FFCVStyleDataset                                           │
-│  ├── Memory-mapped chunk files                              │
-│  ├── Numba JIT batch loading (@njit parallel=True)          │
-│  └── OS page cache for warm epochs                          │
-├─────────────────────────────────────────────────────────────┤
-│  Decoders                                                   │
-│  ├── GPU: nvImageCodec (decode + RRC fused)                 │
-│  └── CPU: TurboJPEG (fallback)                              │
+│  FFCVStyleDataset / FFCVFileDataset                         │
+│  ├── Memory-mapped files (mmap)                             │
+│  ├── Numba JIT batch loading (@njit nogil=True parallel=True)│
+│  ├── V2 metadata: pre-stored JPEG dimensions                │
+│  └── OS page cache for warm epochs (480k+ img/s)            │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -296,53 +278,73 @@ Use conventional commits:
 2. **Warm Epochs (2+)**: mmap + OS page cache = zero-copy reads
 3. **GPU Decode**: nvImageCodec performs decode + RandomResizedCrop in one fused op
 4. **No Python GIL**: Numba JIT with `nogil=True` for true parallelism
+5. **V2 Metadata**: Pre-stored JPEG dimensions eliminate header parsing overhead
 
 ---
 
-## Dependencies NOT Included
+## Dependencies
 
-These are explicitly NOT dependencies (the whole point of slipstream):
+### Required
 
-- ❌ `ffcv` - Replaced by our implementation
-- ❌ `opencv-python` (old version) - Not needed
-- ❌ `numba` (old version) - Use latest
-- ❌ `numpy` (old version) - Use latest
+- `numpy`, `torch`, `torchvision`, `tqdm`
+- `numba` - JIT-compiled batch loading
+- `litdata` - Streaming dataset infrastructure
+- `PyTurboJPEG` - Fast JPEG decoding (requires system `libturbojpeg`)
+- `boto3`, `fsspec[s3]` - S3 support
+
+### Optional (GPU)
+
+- `nvidia-nvimgcodec-cu12` - GPU JPEG decoding
+- `cvcuda-cu12` - GPU image processing
+
+### System Dependencies
+
+```bash
+# macOS
+brew install libjpeg-turbo
+
+# Ubuntu
+apt-get install libturbojpeg0-dev
+```
 
 ---
 
 ## Usage Example (Target API)
 
 ```python
+from slipstream import SlipstreamDataset, SlipstreamLoader
 
-from visionlab.slipstream import StreamingDataset, FastStreamingDataLoader
-
-# TODO:
-# modify streaing dataset to convert s3_dir and cache_dir to: input_dir=Dir(path=cache_dir, url=input_dir)
-dataset = StreamingDataset(
-    s3_dir="s3://...",
-    cache_dir="..",
-    decode_images=False,   # convenience can automatically decode and convert to_pil when working in notebook
-    to_pil=False,
-    sample_pipelines={     # for training, use optimized decoders
-        "image": [RandomResizeCropDecoder], # or CenterCropDecoder, etc.
-    }
+# Create dataset (LitData-backed)
+dataset = SlipstreamDataset(
+    input_dir="s3://bucket/dataset/",
+    cache_dir="/local/cache",
+    decode_images=False,  # Raw bytes for loader
 )
 
-# Simple usage
-loader = FastStreamingDataLoader(
+# Create high-performance loader
+loader = SlipstreamLoader(
     dataset,
-    batch_size=batch_size,
-    num_workers=num_workers,
-    pin_memory=torch.cuda.is_available(),
-    persistent_workers=num_workers > 0,
-    batch_pipelines={
-        "image": ... # batch level piplines using "fastaugs" library
-    }
+    batch_size=256,
+    num_workers=8,
+    device="cuda",  # or None for auto-detect
+    crop_size=224,
+    crop_mode="random",  # or "center" for validation
 )
 
 for batch in loader:
     images = batch['image']  # [B, C, H, W] GPU tensor
     labels = batch['label']  # [B] tensor
     # Training...
-
 ```
+
+---
+
+## Commit Messages
+
+Use conventional commits:
+
+- `feat: description` for new features
+- `fix: description` for bug fixes
+- `test: description` for tests
+- `docs: description` for documentation
+- `refactor: description` for refactoring

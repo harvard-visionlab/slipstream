@@ -1,39 +1,40 @@
 """Slipstream: High-performance data loading for PyTorch vision workloads.
 
-Namespace: visionlab.slipstream
-
 This package provides FFCV-like performance without the FFCV dependency hassle,
 using modern dependencies and a more versatile architecture.
 
 Example:
-    from slipstream import SlipstreamDataset, SlipstreamLoader
+    from slipstream import SlipstreamDataset
 
+    # Simple usage with remote dataset
     dataset = SlipstreamDataset(
-        input_dir="s3://bucket/dataset/",
-        cache_dir="/local/cache",
+        remote_dir="s3://bucket/dataset/",
+        decode_images=True,
     )
 
-    loader = SlipstreamLoader(
-        dataset,
-        batch_size=256,
-        num_workers=8,
-    )
-
-    for batch in loader:
-        images = batch['image']  # [B, C, H, W] tensor
-        labels = batch['label']  # [B] tensor
+    for sample in dataset:
+        image = sample['image']  # PIL Image or tensor
+        label = sample['label']  # int
 """
 
 __version__ = "0.1.0"
 
-# Imports will be added as modules are implemented
-# from slipstream.dataset import SlipstreamDataset
-# from slipstream.loader import SlipstreamLoader, PrefetchingDataLoader
-# from slipstream.decoders import GPUDecoder, CPUDecoder
+from slipstream.dataset import (
+    SlipstreamDataset,
+    decode_image,
+    ensure_lightning_symlink_on_cluster,
+    get_default_cache_dir,
+    is_image_bytes,
+)
 
 __all__ = [
     "__version__",
-    # "SlipstreamDataset",
+    "SlipstreamDataset",
+    "decode_image",
+    "is_image_bytes",
+    "ensure_lightning_symlink_on_cluster",
+    "get_default_cache_dir",
+    # Future exports:
     # "SlipstreamLoader",
     # "PrefetchingDataLoader",
     # "GPUDecoder",
