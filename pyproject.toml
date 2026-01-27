@@ -1,0 +1,92 @@
+[project]
+name = "visionlab-slipstream"
+version = "0.1.0"
+description = "High-performance data loading for PyTorch vision workloads"
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    # Core (no version pinning like ffcv required)
+    "numpy",
+    "torch",
+    "torchvision",
+    "tqdm",
+    # Numba for JIT-compiled batch loading
+    "numba",
+    # LitData (use main branch to match visionlab-datasets)
+    "litdata@git+https://github.com/Lightning-AI/litdata.git@main",
+    # PyTurboJPEG for fast JPEG decoding
+    "PyTurboJPEG@git+https://github.com/lilohuang/PyTurboJPEG.git",
+    # AWS/S3 support
+    "boto3",
+    "fsspec[s3]",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-xdist",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+    "ipykernel",
+    "jupyterlab",
+    "pandas",
+    "matplotlib",
+    "seaborn",
+    "nbstripout",
+]
+
+# GPU acceleration dependencies (nvImageCodec + CV-CUDA)
+# Install with: uv sync --group gpu
+gpu = [
+    "nvidia-nvimgcodec-cu12>=0.2.0",
+    "cvcuda-cu12>=0.5.0",
+]
+
+# Route torch to CUDA (Linux) or CPU (others)
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu121", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { index = "pytorch-cpu", marker = "sys_platform != 'linux' or platform_machine != 'x86_64'" },
+]
+torchvision = [
+    { index = "pytorch-cu121", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { index = "pytorch-cpu", marker = "sys_platform != 'linux' or platform_machine != 'x86_64'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["slipstream"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
