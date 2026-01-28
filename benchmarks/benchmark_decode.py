@@ -229,6 +229,7 @@ def main():
     parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results (e.g., 'nolan-25')")
     parser.add_argument("--save", action="store_true", help="Save results to JSON file")
     parser.add_argument("--output", type=str, default=None, help="Output JSON path (implies --save)")
+    parser.add_argument("--skip-cpu", action="store_true", help="Skip CPU benchmarks (jump to GPU)")
     parser.add_argument("--skip-gpu", action="store_true", help="Skip GPU benchmarks")
     parser.add_argument("--skip-streaming", action="store_true", help="Skip slow StreamingDataLoader benchmark")
     parser.add_argument("--dct", action="store_true", help="Include DCT-space crop benchmarks (slower, for comparison)")
@@ -268,65 +269,66 @@ def main():
     results = []
 
     # CPU decoder benchmarks
-    from slipstream.decoders import CPUDecoder
+    if not args.skip_cpu:
+        from slipstream.decoders import CPUDecoder
 
-    cpu_decoder = CPUDecoder(num_workers=args.num_workers)
-    print(f"\nCPU Decoder: {cpu_decoder}")
+        cpu_decoder = CPUDecoder(num_workers=args.num_workers)
+        print(f"\nCPU Decoder: {cpu_decoder}")
 
-    # 1. CPU decode only
-    result = benchmark_decode(
-        cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
-        with_crop=None,
-    )
-    results.append(result)
-
-    # 2. CPU decode + RandomResizedCrop
-    result = benchmark_decode(
-        cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
-        with_crop="rrc", target_size=args.target_size,
-    )
-    results.append(result)
-
-    # 3. CPU decode + CenterCrop
-    result = benchmark_decode(
-        cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
-        with_crop="center", target_size=args.target_size,
-    )
-    results.append(result)
-
-    # DCT-space crop benchmarks (optional, slower for small images)
-    if args.dct:
-        # 4. CPU decode + RRC (DCT)
+        # 1. CPU decode only
         result = benchmark_decode(
             cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
-            with_crop="rrc_dct", target_size=args.target_size,
+            with_crop=None,
         )
         results.append(result)
 
-        # 5. CPU decode + CenterCrop (DCT)
+        # 2. CPU decode + RandomResizedCrop
         result = benchmark_decode(
             cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
-            with_crop="center_dct", target_size=args.target_size,
+            with_crop="rrc", target_size=args.target_size,
         )
         results.append(result)
 
-    # Experimental scaled decode benchmarks (optional, currently slower)
-    if args.scaled:
-        # 4. CPU decode + RandomResizedCrop (scaled)
+        # 3. CPU decode + CenterCrop
         result = benchmark_decode(
             cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
-            with_crop="rrc_fast", target_size=args.target_size,
+            with_crop="center", target_size=args.target_size,
         )
         results.append(result)
 
-        # 5. CPU decode + CenterCrop (scaled)
-        result = benchmark_decode(
-            cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
-            with_crop="center_fast", target_size=args.target_size,
-        )
-        results.append(result)
+        # DCT-space crop benchmarks (optional, slower for small images)
+        if args.dct:
+            # 4. CPU decode + RRC (DCT)
+            result = benchmark_decode(
+                cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
+                with_crop="rrc_dct", target_size=args.target_size,
+            )
+            results.append(result)
 
-    cpu_decoder.shutdown()
+            # 5. CPU decode + CenterCrop (DCT)
+            result = benchmark_decode(
+                cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
+                with_crop="center_dct", target_size=args.target_size,
+            )
+            results.append(result)
+
+        # Experimental scaled decode benchmarks (optional, currently slower)
+        if args.scaled:
+            # 4. CPU decode + RandomResizedCrop (scaled)
+            result = benchmark_decode(
+                cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
+                with_crop="rrc_fast", target_size=args.target_size,
+            )
+            results.append(result)
+
+            # 5. CPU decode + CenterCrop (scaled)
+            result = benchmark_decode(
+                cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
+                with_crop="center_fast", target_size=args.target_size,
+            )
+            results.append(result)
+
+        cpu_decoder.shutdown()
 
     # GPU decoder benchmarks (if available)
     if not args.skip_gpu and machine_info.cuda_available:

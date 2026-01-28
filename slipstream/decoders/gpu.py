@@ -422,8 +422,7 @@ class GPUDecoder:
         th, tw = target_size
 
         if self.use_cvcuda_resize and cvcuda is not None:
-            # CV-CUDA resize path
-            # API: cvcuda.resize(src, shape, interp) -> returns new cvcuda.Tensor
+            # CV-CUDA resize path using resize_into (writes to pre-allocated tensor)
             output = torch.zeros(
                 (batch_size, 3, th, tw),
                 dtype=torch.uint8,
@@ -434,16 +433,19 @@ class GPUDecoder:
                 # Convert CHW to HWC for CV-CUDA
                 hwc = tensor.permute(1, 2, 0).contiguous()
 
-                # Create cvcuda tensor wrapper
-                src_tensor = cvcuda.as_tensor(hwc, "HWC")
-
-                # Resize using CV-CUDA - returns new cvcuda.Tensor
-                resized_cvcuda = cvcuda.resize(
-                    src_tensor, (th, tw, 3), cvcuda.Interp.LINEAR
+                # Pre-allocate output tensor in HWC format
+                dst_hwc = torch.zeros(
+                    (th, tw, 3), dtype=torch.uint8, device=f"cuda:{self.device}"
                 )
 
-                # Convert cvcuda.Tensor back to torch via __cuda_array_interface__
-                dst_hwc = torch.as_tensor(resized_cvcuda, device=f"cuda:{self.device}")
+                # Wrap both tensors for CV-CUDA
+                src_cvcuda = cvcuda.as_tensor(hwc, "HWC")
+                dst_cvcuda = cvcuda.as_tensor(dst_hwc, "HWC")
+
+                # Resize into pre-allocated tensor (writes directly to dst_hwc)
+                cvcuda.resize_into(dst_cvcuda, src_cvcuda, cvcuda.Interp.LINEAR)
+
+                # Convert HWC back to CHW and store
                 output[i] = dst_hwc.permute(2, 0, 1)
 
             return output
