@@ -155,8 +155,7 @@ class GPUDecoder:
             )
 
         self.device = device
-        # Temporarily disable CV-CUDA to test if it's the bottleneck
-        self.use_cvcuda_resize = False  # use_cvcuda_resize and check_cvcuda_available()
+        self.use_cvcuda_resize = use_cvcuda_resize and check_cvcuda_available()
         self.max_batch_size = max_batch_size
 
         # Initialize nvImageCodec decoder
@@ -423,30 +422,38 @@ class GPUDecoder:
         th, tw = target_size
 
         if self.use_cvcuda_resize and cvcuda is not None:
-            # CV-CUDA resize path using resize_into (writes to pre-allocated tensor)
+            # CV-CUDA batched resize using ImageBatchVarShape
+            # This handles variable-sized inputs in a single batched operation
+
+            # Create input ImageBatchVarShape
+            src_batch = cvcuda.ImageBatchVarShape(batch_size)
+            hwc_tensors = []  # Keep references alive
+
+            for tensor in tensors:
+                # Convert CHW to HWC for CV-CUDA
+                hwc = tensor.permute(1, 2, 0).contiguous()
+                hwc_tensors.append(hwc)
+                # Create Image from tensor and add to batch
+                img = cvcuda.as_image(hwc, "HWC")
+                src_batch.pushback(img)
+
+            # All outputs are same size
+            out_sizes = [(tw, th)] * batch_size  # (width, height) format
+
+            # Batched resize - single operation for all images
+            dst_batch = cvcuda.resize(src_batch, out_sizes, cvcuda.Interp.LINEAR)
+
+            # Extract results back to torch tensor
             output = torch.zeros(
                 (batch_size, 3, th, tw),
                 dtype=torch.uint8,
                 device=f"cuda:{self.device}",
             )
 
-            for i, tensor in enumerate(tensors):
-                # Convert CHW to HWC for CV-CUDA
-                hwc = tensor.permute(1, 2, 0).contiguous()
-
-                # Pre-allocate output tensor in HWC format
-                dst_hwc = torch.zeros(
-                    (th, tw, 3), dtype=torch.uint8, device=f"cuda:{self.device}"
-                )
-
-                # Wrap both tensors for CV-CUDA
-                src_cvcuda = cvcuda.as_tensor(hwc, "HWC")
-                dst_cvcuda = cvcuda.as_tensor(dst_hwc, "HWC")
-
-                # Resize into pre-allocated tensor (writes directly to dst_hwc)
-                cvcuda.resize_into(dst_cvcuda, src_cvcuda, cvcuda.Interp.LINEAR)
-
-                # Convert HWC back to CHW and store
+            for i in range(batch_size):
+                # Get the resized image and convert to torch
+                dst_img = dst_batch[i]
+                dst_hwc = torch.as_tensor(dst_img.cuda(), device=f"cuda:{self.device}")
                 output[i] = dst_hwc.permute(2, 0, 1)
 
             return output
