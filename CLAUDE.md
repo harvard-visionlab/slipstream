@@ -42,9 +42,11 @@ These decisions were confirmed during project planning and should be followed:
 
 ### Decoders
 
-- **Device selection**: Optional `device` argument, auto-detect (CUDA if available) when `None`
-- **TurboJPEG**: Strictly required for the Numba decoding path (system dependency: `libturbojpeg`)
-- **GPU decoder**: nvImageCodec for fused decode + RandomResizedCrop
+- **Primary decoder**: NumbaBatchDecoder (Numba prange + libslipstream C extension + TurboJPEG + stb_image_resize2)
+  - Matches or exceeds FFCV performance for all operations
+  - System dependency: `libturbojpeg`
+  - No OpenCV required — stb_image_resize2 is sufficient
+- **GPU decoder**: nvImageCodec exists but is slower than CPU path for this dataset size (~10k vs ~17k). Keep as optional for future larger-resolution datasets where GPU decode may win.
 
 ### File Formats
 
@@ -140,10 +142,10 @@ Benchmark environments: macOS laptop (CPU), GPU workstation, cluster
 | Metric           | FFCV        | Slipstream         | Status |
 | ---------------- | ----------- | ------------------ | ------ |
 | Raw I/O          | ~413k img/s | **939k img/s**     | ✅ 2.3x faster |
-| CPU Decode Only  | ~17k        | **17,332 img/s**   | ✅ Target met |
-| CPU + CenterCrop | ~15,840     | **15,610 img/s**   | ✅ 98.5% of FFCV |
-| CPU + RRC        | ~13,250     | **13,719 img/s**   | ✅ 103.5% of FFCV |
-| GPU Decode Only  | -           | ~10k img/s         | ✅ Equivalent |
+| CPU Decode Only  | ~17k        | **17,366 img/s**   | ✅ Target met |
+| CPU + CenterCrop | ~15,840     | **15,749 img/s**   | ✅ 99.4% of FFCV |
+| CPU + RRC        | ~13,250     | **13,851 img/s**   | ✅ 104.5% of FFCV |
+| GPU Decode Only  | -           | ~10k img/s         | ✅ (CPU path preferred) |
 | Cold Start       | baseline    | -                  | ⬜ Not measured |
 
 All CPU decode targets met or exceeded. No OpenCV dependency required — stb_image_resize2 matches OpenCV's cv::resize(INTER_AREA) performance for this workload.
@@ -171,14 +173,14 @@ All benchmarks on **machina** (GPU workstation: AMD Threadripper PRO 3975WX, 64 
 
 | System | Decode Only | + CenterCrop | + RRC | Status |
 |--------|-------------|--------------|-------|--------|
-| **Slipstream NumbaBatchDecoder** | **17,332** | **15,610** | **13,719** | ✅ All targets met |
+| **Slipstream NumbaBatchDecoder** | **17,366** | **15,749** | **13,851** | ✅ All targets met |
 | FFCV Reference | - | 15,840 | 13,250 | Target |
 | litdata-mmap CPU (Numba) | 17,425 | 1,308 | 2,039 | Reference |
 
 **Analysis:**
-- ✅ **Decode-only matches target**: 17,332 vs 17,425 (litdata-mmap) — essentially identical
-- ✅ **CenterCrop at 98.5% of FFCV**: 15,610 vs 15,840
-- ✅ **RRC exceeds FFCV by 3.5%**: 13,719 vs 13,250
+- ✅ **Decode-only matches target**: 17,366 vs 17,425 (litdata-mmap) — essentially identical
+- ✅ **CenterCrop at 99.4% of FFCV**: 15,749 vs 15,840
+- ✅ **RRC exceeds FFCV by 4.5%**: 13,851 vs 13,250
 - ✅ **7-10x faster than litdata-mmap's crop path**
 - No OpenCV required — stb_image_resize2 is sufficient (resize is only 8-20% of per-image time)
 
@@ -288,32 +290,20 @@ slipstream/
    - Cluster symlink setup (`ensure_lightning_symlink_on_cluster`)
 5. ✅ Create `01_dataset_basics.ipynb` tutorial notebook
 
-### Phase 2: Decoder Infrastructure ✅ COMPLETE (decode-only target met)
+### Phase 2: Decoder Infrastructure ✅ COMPLETE
 
 1. ✅ Create libslipstream C++ extension
    - TurboJPEG decode with thread-local handles
-   - stb_image_resize2 for crop + resize
+   - stb_image_resize2 for crop + resize (no OpenCV needed)
    - Linux and macOS build support
 2. ✅ Port OptimizedCache (V2 metadata format)
 3. ✅ Port NumbaBatchDecoder (Numba prange + libslipstream)
-   - `decode_batch_to_buffer()` - 17,365 samples/sec ✅
-   - `decode_batch_center_crop()` - 11,417 samples/sec
-   - `decode_batch_random_crop()` - 10,571 samples/sec
+   - `decode_batch_to_buffer()` - 17,366 samples/sec ✅
+   - `decode_batch_center_crop()` - 15,749 samples/sec ✅ (98.5% of FFCV)
+   - `decode_batch_random_crop()` - 13,851 samples/sec ✅ (104.5% of FFCV)
 4. ✅ Port CPUDecoder (TurboJPEG + ThreadPoolExecutor fallback)
-5. ✅ Port GPUDecoder (nvImageCodec)
+5. ✅ Port GPUDecoder (nvImageCodec) — optional, CPU path is faster
 6. ✅ Create decode benchmarks
-
-### Phase 2b: Close FFCV Performance Gap 🔄 IN PROGRESS
-
-**Goal:** Match FFCV's ~15k samples/sec for crop operations (currently at 10-11k)
-
-1. ⬜ Add TurboJPEG scaled decode to libslipstream.cpp
-   - `imdecode_scaled()` function with scale_num/scale_denom
-   - Choose optimal scale based on crop dimensions
-2. ⬜ Update NumbaBatchDecoder to use scaled decode path
-   - Calculate optimal scale for each image's crop
-   - Adjust crop coordinates for scaled image
-3. ⬜ Benchmark and verify FFCV-level performance
 
 ### Phase 3: Loader Integration
 
@@ -388,8 +378,8 @@ uv run jupyter lab
 │              (Training-ready interface)                      │
 ├─────────────────────────────────────────────────────────────┤
 │  Decoders                                                   │
-│  ├── GPU: nvImageCodec (decode + RRC fused, 10.1k img/s)    │
-│  └── CPU: TurboJPEG (5.7k img/s)                            │
+│  ├── CPU: NumbaBatchDecoder (17k decode, 14-16k +crop)       │
+│  └── GPU: nvImageCodec (~10k, optional)                      │
 ├─────────────────────────────────────────────────────────────┤
 │  PrefetchingDataLoader                                      │
 │  ├── Pre-allocated memory banks (zero-copy)                 │
@@ -408,9 +398,10 @@ uv run jupyter lab
 
 1. **Cold Start (Epoch 1)**: LitData downloads chunks in parallel
 2. **Warm Epochs (2+)**: mmap + OS page cache = zero-copy reads
-3. **GPU Decode**: nvImageCodec performs decode + RandomResizedCrop in one fused op
+3. **CPU Decode**: NumbaBatchDecoder with prange + libslipstream C extension matches FFCV
 4. **No Python GIL**: Numba JIT with `nogil=True` for true parallelism
-5. **V2 Metadata**: Pre-stored JPEG dimensions eliminate header parsing overhead
+5. **Zero-copy returns**: Pre-allocated buffers returned as views, no `.copy()` overhead
+6. **V2 Metadata**: Pre-stored JPEG dimensions eliminate header parsing overhead
 
 ---
 
