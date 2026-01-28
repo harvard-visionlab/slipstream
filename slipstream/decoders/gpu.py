@@ -328,7 +328,7 @@ class GPUDecoder:
         widths: NDArray[np.uint32],
         rois: NDArray[np.int32],
         target_size: tuple[int, int],
-        use_native_roi: bool = True,
+        use_native_roi: bool = False,  # Disabled: full decode + crop is faster for small images
     ) -> torch.Tensor:
         """Decode batch with ROI (Region of Interest) for each image.
 
