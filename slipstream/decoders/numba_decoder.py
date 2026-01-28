@@ -856,7 +856,6 @@ class NumbaBatchDecoder:
         self._decode_crop_fn = _get_decode_crop_batch()
         self._fused_decode_crop_fn = _get_fused_decode_crop()
         self._jpeg_domain_crop_fn = _get_jpeg_domain_crop()
-        self._profiled_decode_crop_fn = _get_profiled_decode_crop()
 
         # Seed counter for random crops
         self._seed_counter = 0
@@ -1021,11 +1020,30 @@ class NumbaBatchDecoder:
     ) -> None:
         """Run the appropriate crop function based on crop_mode."""
         if self.crop_mode == "profiled":
-            self._profiled_decode_crop_fn(
-                data, sizes, heights, widths,
-                crop_params, temp_buffer, dest_buffer,
-                target_h, target_w,
-            )
+            # Profiled mode: use C function that times decode vs resize internally.
+            # NOT parallelized (serial loop) so timing is clean.
+            lib = load_library()
+            batch_size = len(sizes)
+            for i in range(batch_size):
+                size = int(sizes[i])
+                h = int(heights[i])
+                w = int(widths[i])
+                crop_x = int(crop_params[i, 0])
+                crop_y = int(crop_params[i, 1])
+                crop_w = int(crop_params[i, 2])
+                crop_h = int(crop_params[i, 3])
+
+                source = data[i, :size]
+                temp = temp_buffer[i, :h, :w, :]
+                dest = dest_buffer[i, :, :, :]
+
+                lib.decode_and_resize_profiled(
+                    source.ctypes.data, size,
+                    temp.ctypes.data, h, w,
+                    crop_y, crop_x, crop_h, crop_w,
+                    dest.ctypes.data, target_h, target_w,
+                )
+            return
         elif self.crop_mode == "jpeg_domain":
             self._jpeg_domain_crop_fn(
                 data, sizes, heights, widths,

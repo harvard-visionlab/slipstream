@@ -36,8 +36,8 @@ def main():
         cache = OptimizedCache.build(dataset, cache_path)
     print(f"Cache: {len(cache):,} samples\n")
 
-    # Create decoder in profiled mode
-    decoder = NumbaBatchDecoder(crop_mode="profiled")
+    # Create decoder in profiled mode (serial, not parallel - for clean timing)
+    decoder = NumbaBatchDecoder(num_threads=12, crop_mode="profiled")
     print(f"Decoder: {decoder}")
     print(f"OpenCV available: {decoder.has_opencv()}\n")
 
