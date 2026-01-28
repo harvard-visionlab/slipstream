@@ -5,13 +5,9 @@ Build with:
 
 Or from project root:
     uv run python libslipstream/setup.py build_ext --inplace
-
-For OpenCV support (enables resize_crop):
-    USE_OPENCV=1 python setup.py build_ext --inplace
 """
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 from setuptools import Extension, setup
@@ -20,9 +16,6 @@ from setuptools import Extension, setup
 script_dir = Path(__file__).parent.absolute()
 os.chdir(script_dir)
 
-# Check for OpenCV support
-use_opencv = os.environ.get("USE_OPENCV", "0") == "1"
-
 # Base configuration
 sources = ["libslipstream.cpp"]
 include_dirs = ["/usr/local/include", "/usr/include"]
@@ -30,32 +23,6 @@ library_dirs = ["/usr/local/lib", "/usr/lib", "/usr/lib/x86_64-linux-gnu"]
 libraries = ["turbojpeg"]
 extra_compile_args = ["-std=c++11", "-O3", "-fPIC"]
 extra_link_args = ["-Wl,-rpath,/usr/local/lib"]
-define_macros = []
-
-# Add OpenCV if requested
-if use_opencv:
-    libraries.append("opencv_core")
-    libraries.append("opencv_imgproc")
-    define_macros.append(("USE_OPENCV", "1"))
-    # Try pkg-config for OpenCV paths (works on most Linux systems)
-    try:
-        cv_cflags = subprocess.check_output(
-            ["pkg-config", "--cflags", "opencv4"], stderr=subprocess.DEVNULL
-        ).decode().strip().split()
-        cv_libs = subprocess.check_output(
-            ["pkg-config", "--libs-only-L", "opencv4"], stderr=subprocess.DEVNULL
-        ).decode().strip().split()
-        for flag in cv_cflags:
-            if flag.startswith("-I"):
-                include_dirs.append(flag[2:])
-        for flag in cv_libs:
-            if flag.startswith("-L"):
-                library_dirs.append(flag[2:])
-        print(f"Building with OpenCV support (pkg-config found)")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("Building with OpenCV support (pkg-config not found, using default paths)")
-else:
-    print("Building without OpenCV (stb_image_resize2 fallback)")
 
 # Linux-specific paths (libjpeg-turbo from package or manual install)
 if sys.platform == "linux":
@@ -88,10 +55,6 @@ elif sys.platform == "darwin":
     ])
     extra_link_args = [f"-Wl,-rpath,{homebrew_prefix}/lib"]
 
-    if use_opencv:
-        include_dirs.append(f"{homebrew_prefix}/opt/opencv/include/opencv4")
-        library_dirs.append(f"{homebrew_prefix}/opt/opencv/lib")
-
 # Define the C++ extension
 libslipstream = Extension(
     "_libslipstream",
@@ -101,7 +64,6 @@ libslipstream = Extension(
     libraries=libraries,
     extra_compile_args=extra_compile_args,
     extra_link_args=extra_link_args,
-    define_macros=define_macros,
 )
 
 setup(

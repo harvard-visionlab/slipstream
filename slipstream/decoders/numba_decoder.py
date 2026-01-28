@@ -28,15 +28,12 @@ Usage:
 
 from __future__ import annotations
 
-import ctypes
-from ctypes import CDLL, POINTER, c_bool, c_int, c_int64, c_uint32, c_uint64, c_void_p
+from ctypes import CDLL, POINTER, c_int, c_int64, c_uint32, c_uint64, c_void_p
 from multiprocessing import cpu_count
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
-import torch.nn.functional as F
 from numba import njit, prange, set_num_threads
 from numpy.typing import NDArray
 
@@ -54,9 +51,6 @@ __all__ = [
 _lib: CDLL | None = None
 _ctypes_imdecode_simple: Any = None
 _ctypes_resize_crop: Any = None
-_ctypes_decode_crop_resize: Any = None
-_ctypes_imdecode_crop: Any = None  # FFCV-style JPEG-domain crop
-_has_opencv: bool = False
 
 
 def _find_library() -> Path:
@@ -78,7 +72,7 @@ def _find_library() -> Path:
 
 def load_library() -> CDLL:
     """Load the libslipstream C++ library."""
-    global _lib, _ctypes_imdecode_simple, _ctypes_resize_crop, _ctypes_decode_crop_resize, _ctypes_imdecode_crop, _has_opencv
+    global _lib, _ctypes_imdecode_simple, _ctypes_resize_crop
     if _lib is not None:
         return _lib
 
@@ -112,63 +106,9 @@ def load_library() -> CDLL:
     ]
     _lib.resize_simple.restype = c_int
 
-    # decode_crop_resize - fused scaled decode + crop + resize (FFCV-style)
-    # decode_crop_resize(input, size, temp, output, src_h, src_w,
-    #                    crop_y, crop_x, crop_h, crop_w, target_h, target_w) -> int
-    _lib.decode_crop_resize.argtypes = [
-        c_void_p, c_uint64,  # input, size
-        c_void_p, c_void_p,  # temp, output
-        c_uint32, c_uint32,  # src_h, src_w
-        c_uint32, c_uint32, c_uint32, c_uint32,  # crop_y, crop_x, crop_h, crop_w
-        c_uint32, c_uint32,  # target_h, target_w
-    ]
-    _lib.decode_crop_resize.restype = c_int
-
-    # imdecode_crop - FFCV-style JPEG-domain crop (tjTransform + tjDecompress2)
-    _lib.imdecode_crop.argtypes = [
-        c_void_p, c_uint64,  # input, size
-        c_void_p, c_void_p,  # output, temp
-        c_uint32, c_uint32,  # src_h, src_w
-        c_uint32, c_uint32, c_uint32, c_uint32,  # crop_y, crop_x, crop_h, crop_w
-        c_uint32, c_uint32,  # target_h, target_w
-        c_int,  # hflip
-    ]
-    _lib.imdecode_crop.restype = c_int
-
-    # Profiling: decode_and_resize_profiled
-    _lib.decode_and_resize_profiled.argtypes = 12 * [c_int64]
-    _lib.decode_and_resize_profiled.restype = c_int
-
-    _lib.get_profile_stats.argtypes = [
-        POINTER(c_uint64), POINTER(c_uint64),
-        POINTER(c_uint64), POINTER(c_uint64),
-    ]
-    _lib.get_profile_stats.restype = None
-
-    _lib.reset_profile_stats.argtypes = []
-    _lib.reset_profile_stats.restype = None
-
-    _lib.has_opencv.argtypes = []
-    _lib.has_opencv.restype = c_int
-
-    # Detect OpenCV support
-    _has_opencv = bool(_lib.has_opencv())
-
-    # If OpenCV is available, bind resize_crop_cv with same signature as resize_crop
-    if _has_opencv:
-        _lib.resize_crop_cv.argtypes = [
-            c_int64, c_int64, c_int64,  # source_p, source_h, source_w
-            c_int64, c_int64, c_int64, c_int64,  # crop_y, crop_x, crop_h, crop_w
-            c_int64, c_int64, c_int64,  # dest_p, target_h, target_w
-        ]
-        _lib.resize_crop_cv.restype = c_int
-
     # Cache the ctypes functions for Numba
     _ctypes_imdecode_simple = _lib.imdecode_simple
-    # Use OpenCV resize if available, otherwise stb
-    _ctypes_resize_crop = _lib.resize_crop_cv if _has_opencv else _lib.resize_crop
-    _ctypes_decode_crop_resize = _lib.decode_crop_resize
-    _ctypes_imdecode_crop = _lib.imdecode_crop
+    _ctypes_resize_crop = _lib.resize_crop
 
     return _lib
 
@@ -227,120 +167,6 @@ def resize_crop_numba(
         source.ctypes.data, source_h, source_w,
         crop_y, crop_x, crop_h, crop_w,
         dest.ctypes.data, target_h, target_w,
-    )
-
-
-def decode_crop_resize_numba(
-    source: np.ndarray,
-    temp: np.ndarray,
-    dest: np.ndarray,
-    src_h: int,
-    src_w: int,
-    crop_y: int,
-    crop_x: int,
-    crop_h: int,
-    crop_w: int,
-    target_h: int,
-    target_w: int,
-) -> int:
-    """Numba-compatible fused decode + crop + resize wrapper.
-
-    This is the FFCV-style optimized path:
-    1. Choose optimal TurboJPEG scale factor based on crop size
-    2. Decode at that scale (fewer pixels!)
-    3. Crop from the smaller decoded image
-    4. Resize to target size
-
-    All done in one C function call for maximum efficiency.
-    """
-    global _ctypes_decode_crop_resize
-    if _ctypes_decode_crop_resize is None:
-        load_library()
-    return _ctypes_decode_crop_resize(
-        source.ctypes.data, source.size,
-        temp.ctypes.data, dest.ctypes.data,
-        src_h, src_w,
-        crop_y, crop_x, crop_h, crop_w,
-        target_h, target_w,
-    )
-
-
-_ctypes_decode_and_resize_profiled: Any = None
-
-
-def decode_and_resize_profiled_numba(
-    jpeg: np.ndarray,
-    temp: np.ndarray,
-    temp_h: int,
-    temp_w: int,
-    crop_y: int,
-    crop_x: int,
-    crop_h: int,
-    crop_w: int,
-    dest: np.ndarray,
-    target_h: int,
-    target_w: int,
-) -> int:
-    """Profiled decode + crop + resize. Accumulates timing stats."""
-    global _ctypes_decode_and_resize_profiled
-    if _ctypes_decode_and_resize_profiled is None:
-        load_library()
-        _ctypes_decode_and_resize_profiled = _lib.decode_and_resize_profiled
-    return _ctypes_decode_and_resize_profiled(
-        jpeg.ctypes.data, jpeg.size,
-        temp.ctypes.data, temp_h, temp_w,
-        crop_y, crop_x, crop_h, crop_w,
-        dest.ctypes.data, target_h, target_w,
-    )
-
-
-def imdecode_crop_numba(
-    source: np.ndarray,
-    temp: np.ndarray,
-    dest: np.ndarray,
-    src_h: int,
-    src_w: int,
-    crop_y: int,
-    crop_x: int,
-    crop_h: int,
-    crop_w: int,
-    target_h: int,
-    target_w: int,
-    hflip: int = 0,
-) -> int:
-    """Numba-compatible JPEG-domain crop wrapper.
-
-    This is FFCV's key optimization: tjTransform() crops in the JPEG domain
-    BEFORE decompression. This is much faster than decode-then-crop because:
-    1. Cropping compressed data is faster than cropping pixels
-    2. The resulting JPEG is smaller, so decompression is faster
-    3. MCU-aligned cropping happens at almost zero cost
-
-    The crop coordinates are automatically aligned to MCU boundaries (8 or 16 pixels).
-    A final pixel-level crop is done after decode to get exact coordinates.
-
-    Args:
-        source: JPEG bytes
-        temp: Temporary buffer for decoded image (must fit MCU-aligned crop)
-        dest: Output buffer [target_h, target_w, 3]
-        src_h, src_w: Original image dimensions
-        crop_y, crop_x, crop_h, crop_w: Crop region
-        target_h, target_w: Final output size after resize
-        hflip: Horizontal flip (0 or 1)
-
-    Returns:
-        0 on success, negative on error
-    """
-    global _ctypes_imdecode_crop
-    if _ctypes_imdecode_crop is None:
-        load_library()
-    return _ctypes_imdecode_crop(
-        source.ctypes.data, source.size,
-        dest.ctypes.data, temp.ctypes.data,
-        src_h, src_w,
-        crop_y, crop_x, crop_h, crop_w,
-        target_h, target_w,
-        hflip,
     )
 
 
@@ -491,175 +317,9 @@ def _create_decode_with_crop_function() -> Any:
     return Compiler.compile(decode_crop_batch)
 
 
-def _create_fused_decode_crop_function() -> Any:
-    """Create FFCV-style fused decode + crop + resize function.
-
-    This uses the C function that:
-    1. Chooses optimal TurboJPEG scale factor based on crop size
-    2. Decodes at that scale (fewer pixels!)
-    3. Crops from the smaller decoded image
-    4. Resizes to target size
-
-    This is ~30-50% faster than decode-then-crop for small crops.
-    """
-    fused_c = Compiler.compile(decode_crop_resize_numba)
-    my_range = Compiler.get_iterator()
-
-    def fused_decode_crop_batch(
-        jpeg_data: np.ndarray,  # [B, max_size] uint8
-        sizes: np.ndarray,  # [B] uint64
-        heights: np.ndarray,  # [B] uint32
-        widths: np.ndarray,  # [B] uint32
-        crop_params: np.ndarray,  # [B, 4] int32 (crop_x, crop_y, crop_w, crop_h)
-        temp_buffer: np.ndarray,  # [B, max_h, max_w, 3] uint8 (for scaled decode)
-        destination: np.ndarray,  # [B, target_h, target_w, 3] uint8
-        target_h: int,
-        target_w: int,
-    ) -> np.ndarray:
-        """Fused decode + crop + resize batch in parallel using prange."""
-        batch_size = len(sizes)
-        for i in my_range(batch_size):
-            size = int(sizes[i])
-            h = int(heights[i])
-            w = int(widths[i])
-
-            # Get source slice and temp buffer
-            source = jpeg_data[i, :size]
-            temp = temp_buffer[i, :, :, :]  # Full temp buffer for scaled decode
-
-            # Get crop parameters
-            crop_x = int(crop_params[i, 0])
-            crop_y = int(crop_params[i, 1])
-            crop_w = int(crop_params[i, 2])
-            crop_h = int(crop_params[i, 3])
-
-            # Fused decode + crop + resize
-            dest = destination[i, :, :, :]
-            fused_c(
-                source, temp, dest,
-                h, w,
-                crop_y, crop_x, crop_h, crop_w,
-                target_h, target_w,
-            )
-
-        return destination[:batch_size]
-
-    fused_decode_crop_batch.is_parallel = True
-    return Compiler.compile(fused_decode_crop_batch)
-
-
-def _create_jpeg_domain_crop_function() -> Any:
-    """Create FFCV-style JPEG-domain crop function using tjTransform.
-
-    This is FFCV's key optimization: tjTransform() crops in the JPEG domain
-    BEFORE decompression. This is much faster than decode-then-crop because:
-    1. Cropping compressed data is faster than cropping pixels
-    2. The resulting JPEG is smaller, so decompression is faster
-    3. Combined with scaled decode, this minimizes work
-
-    The crop coordinates are automatically aligned to MCU boundaries (8 or 16 pixels).
-    A final pixel-level crop is done after decode to get exact coordinates.
-    """
-    imdecode_crop_c = Compiler.compile(imdecode_crop_numba)
-    my_range = Compiler.get_iterator()
-
-    def jpeg_domain_crop_batch(
-        jpeg_data: np.ndarray,  # [B, max_size] uint8
-        sizes: np.ndarray,  # [B] uint64
-        heights: np.ndarray,  # [B] uint32
-        widths: np.ndarray,  # [B] uint32
-        crop_params: np.ndarray,  # [B, 4] int32 (crop_x, crop_y, crop_w, crop_h)
-        temp_buffer: np.ndarray,  # [B, max_h, max_w, 3] uint8 (for MCU-aligned decode)
-        destination: np.ndarray,  # [B, target_h, target_w, 3] uint8
-        target_h: int,
-        target_w: int,
-    ) -> np.ndarray:
-        """JPEG-domain crop batch in parallel using prange."""
-        batch_size = len(sizes)
-        for i in my_range(batch_size):
-            size = int(sizes[i])
-            h = int(heights[i])
-            w = int(widths[i])
-
-            # Get source slice and temp buffer
-            source = jpeg_data[i, :size]
-            temp = temp_buffer[i, :, :, :]  # Full temp buffer for MCU-aligned decode
-
-            # Get crop parameters
-            crop_x = int(crop_params[i, 0])
-            crop_y = int(crop_params[i, 1])
-            crop_w = int(crop_params[i, 2])
-            crop_h = int(crop_params[i, 3])
-
-            # JPEG-domain crop + scaled decode + final resize
-            dest = destination[i, :, :, :]
-            imdecode_crop_c(
-                source, temp, dest,
-                h, w,
-                crop_y, crop_x, crop_h, crop_w,
-                target_h, target_w,
-                0,  # hflip = False
-            )
-
-        return destination[:batch_size]
-
-    jpeg_domain_crop_batch.is_parallel = True
-    return Compiler.compile(jpeg_domain_crop_batch)
-
-
-def _create_profiled_decode_crop_function() -> Any:
-    """Profiled version of decode + crop + resize.
-
-    Uses the C function that times decode and resize separately.
-    Call decoder.get_profile_stats() after running to see results.
-    """
-    profiled_c = Compiler.compile(decode_and_resize_profiled_numba)
-    my_range = Compiler.get_iterator()
-
-    def profiled_decode_crop_batch(
-        jpeg_data: np.ndarray,
-        sizes: np.ndarray,
-        heights: np.ndarray,
-        widths: np.ndarray,
-        crop_params: np.ndarray,
-        temp_buffer: np.ndarray,
-        destination: np.ndarray,
-        target_h: int,
-        target_w: int,
-    ) -> np.ndarray:
-        batch_size = len(sizes)
-        for i in my_range(batch_size):
-            size = int(sizes[i])
-            h = int(heights[i])
-            w = int(widths[i])
-
-            source = jpeg_data[i, :size]
-            temp = temp_buffer[i, :h, :w, :]
-
-            crop_x = int(crop_params[i, 0])
-            crop_y = int(crop_params[i, 1])
-            crop_w = int(crop_params[i, 2])
-            crop_h = int(crop_params[i, 3])
-
-            dest = destination[i, :, :, :]
-            profiled_c(
-                source, temp, h, w,
-                crop_y, crop_x, crop_h, crop_w,
-                dest, target_h, target_w,
-            )
-
-        return destination[:batch_size]
-
-    profiled_decode_crop_batch.is_parallel = True
-    return Compiler.compile(profiled_decode_crop_batch)
-
-
 # Lazy-loaded compiled functions
 _decode_batch_compiled: Any = None
 _decode_crop_batch_compiled: Any = None
-_fused_decode_crop_compiled: Any = None
-_jpeg_domain_crop_compiled: Any = None
-_profiled_decode_crop_compiled: Any = None
 
 
 def _get_decode_batch() -> Any:
@@ -679,33 +339,6 @@ def _get_decode_crop_batch() -> Any:
         load_library()
         _decode_crop_batch_compiled = _create_decode_with_crop_function()
     return _decode_crop_batch_compiled
-
-
-def _get_fused_decode_crop() -> Any:
-    """Get or create the FFCV-style fused decode + crop function."""
-    global _fused_decode_crop_compiled
-    if _fused_decode_crop_compiled is None:
-        load_library()
-        _fused_decode_crop_compiled = _create_fused_decode_crop_function()
-    return _fused_decode_crop_compiled
-
-
-def _get_jpeg_domain_crop() -> Any:
-    """Get or create the JPEG-domain crop function (tjTransform)."""
-    global _jpeg_domain_crop_compiled
-    if _jpeg_domain_crop_compiled is None:
-        load_library()
-        _jpeg_domain_crop_compiled = _create_jpeg_domain_crop_function()
-    return _jpeg_domain_crop_compiled
-
-
-def _get_profiled_decode_crop() -> Any:
-    """Get or create the profiled decode + crop function."""
-    global _profiled_decode_crop_compiled
-    if _profiled_decode_crop_compiled is None:
-        load_library()
-        _profiled_decode_crop_compiled = _create_profiled_decode_crop_function()
-    return _profiled_decode_crop_compiled
 
 
 # =============================================================================
@@ -830,32 +463,21 @@ class NumbaBatchDecoder:
         )
     """
 
-    def __init__(self, num_threads: int = 0, use_scaled_decode: bool = True, crop_mode: str = "basic") -> None:
+    def __init__(self, num_threads: int = 0) -> None:
         """Initialize the decoder.
 
         Args:
             num_threads: Number of parallel decode threads. 0 = auto (cpu_count)
-            use_scaled_decode: Use FFCV-style scaled decode for crop operations.
-                This decodes at a smaller size when the crop is small, then resizes.
-                ~30-50% faster for RandomResizedCrop. Default: True.
-            crop_mode: Which crop implementation to use:
-                - "jpeg_domain": FFCV-style tjTransform (crop in compressed domain). Default.
-                - "scaled_decode": Scaled decode + pixel crop + stb resize.
-                - "basic": Full decode + pixel crop + stb resize.
         """
         if num_threads < 1:
             num_threads = cpu_count()
         self.num_threads = num_threads
-        self.use_scaled_decode = use_scaled_decode
-        self.crop_mode = crop_mode
         Compiler.set_num_threads(num_threads)
 
         # Ensure library and compiled function are ready
         load_library()
         self._decode_fn = _get_decode_batch()
         self._decode_crop_fn = _get_decode_crop_batch()
-        self._fused_decode_crop_fn = _get_fused_decode_crop()
-        self._jpeg_domain_crop_fn = _get_jpeg_domain_crop()
 
         # Seed counter for random crops
         self._seed_counter = 0
@@ -962,9 +584,6 @@ class NumbaBatchDecoder:
     ) -> NDArray[np.uint8]:
         """Decode batch with CenterCrop.
 
-        Uses FFCV-style scaled decode when use_scaled_decode=True for better
-        performance on small crops.
-
         Args:
             data: Padded JPEG data [B, max_size] uint8
             sizes: Actual JPEG sizes [B]
@@ -997,7 +616,7 @@ class NumbaBatchDecoder:
         dest_buffer = self._ensure_dest_buffer(batch_size, crop_size, crop_size)
 
         # Decode + crop + resize
-        self._run_crop_fn(
+        self._decode_crop_fn(
             data, sizes_u64, heights_u32, widths_u32,
             crop_params, temp_buffer, dest_buffer,
             crop_size, crop_size,
@@ -1005,63 +624,6 @@ class NumbaBatchDecoder:
 
         # Return view (no copy — caller should not hold reference across batches)
         return dest_buffer[:batch_size]
-
-    def _run_crop_fn(
-        self,
-        data: NDArray,
-        sizes: NDArray,
-        heights: NDArray,
-        widths: NDArray,
-        crop_params: NDArray,
-        temp_buffer: NDArray,
-        dest_buffer: NDArray,
-        target_h: int,
-        target_w: int,
-    ) -> None:
-        """Run the appropriate crop function based on crop_mode."""
-        if self.crop_mode == "profiled":
-            # Profiled mode: use C function that times decode vs resize internally.
-            # NOT parallelized (serial loop) so timing is clean.
-            lib = load_library()
-            batch_size = len(sizes)
-            for i in range(batch_size):
-                size = int(sizes[i])
-                h = int(heights[i])
-                w = int(widths[i])
-                crop_x = int(crop_params[i, 0])
-                crop_y = int(crop_params[i, 1])
-                crop_w = int(crop_params[i, 2])
-                crop_h = int(crop_params[i, 3])
-
-                source = data[i, :size]
-                temp = temp_buffer[i, :h, :w, :]
-                dest = dest_buffer[i, :, :, :]
-
-                lib.decode_and_resize_profiled(
-                    source.ctypes.data, size,
-                    temp.ctypes.data, h, w,
-                    crop_y, crop_x, crop_h, crop_w,
-                    dest.ctypes.data, target_h, target_w,
-                )
-            return
-        elif self.crop_mode == "jpeg_domain":
-            self._jpeg_domain_crop_fn(
-                data, sizes, heights, widths,
-                crop_params, temp_buffer, dest_buffer,
-                target_h, target_w,
-            )
-        elif self.crop_mode == "scaled_decode" or self.use_scaled_decode:
-            self._fused_decode_crop_fn(
-                data, sizes, heights, widths,
-                crop_params, temp_buffer, dest_buffer,
-                target_h, target_w,
-            )
-        else:
-            self._decode_crop_fn(
-                data, sizes, heights, widths,
-                crop_params, temp_buffer, dest_buffer,
-                target_h, target_w,
-            )
 
     def decode_batch_random_crop(
         self,
@@ -1073,12 +635,8 @@ class NumbaBatchDecoder:
         scale: tuple[float, float] = (0.08, 1.0),
         ratio: tuple[float, float] = (3.0 / 4.0, 4.0 / 3.0),
         destination: NDArray[np.uint8] | None = None,
-    ) -> torch.Tensor:
+    ) -> NDArray[np.uint8]:
         """Decode batch with RandomResizedCrop.
-
-        Uses FFCV-style scaled decode when use_scaled_decode=True. This is
-        especially beneficial for small crops (scale=0.08) where we can decode
-        at 1/2 or 1/4 size and still have enough pixels for the crop.
 
         Args:
             data: Padded JPEG data [B, max_size] uint8
@@ -1091,7 +649,7 @@ class NumbaBatchDecoder:
             destination: Unused (for API compatibility)
 
         Returns:
-            Tensor [B, 3, target_size, target_size] uint8
+            Array [B, target_size, target_size, 3] uint8
         """
         import math
 
@@ -1123,7 +681,7 @@ class NumbaBatchDecoder:
         dest_buffer = self._ensure_dest_buffer(batch_size, target_size, target_size)
 
         # Decode + crop + resize
-        self._run_crop_fn(
+        self._decode_crop_fn(
             data, sizes_u64, heights_u32, widths_u32,
             crop_params, temp_buffer, dest_buffer,
             target_size, target_size,
@@ -1133,42 +691,10 @@ class NumbaBatchDecoder:
         # Tensor conversion + permute to [B, C, H, W] should happen in the pipeline
         return dest_buffer[:batch_size]
 
-    def get_profile_stats(self) -> dict:
-        """Get profiling stats from the C++ layer.
-
-        Returns dict with decode_ms, resize_ms, decode_count, resize_count.
-        Call reset_profile_stats() between benchmarks.
-        """
-        lib = load_library()
-        decode_ns = c_uint64(0)
-        resize_ns = c_uint64(0)
-        decode_count = c_uint64(0)
-        resize_count = c_uint64(0)
-        lib.get_profile_stats(
-            ctypes.byref(decode_ns), ctypes.byref(resize_ns),
-            ctypes.byref(decode_count), ctypes.byref(resize_count),
-        )
-        return {
-            "decode_ms": decode_ns.value / 1e6,
-            "resize_ms": resize_ns.value / 1e6,
-            "decode_count": decode_count.value,
-            "resize_count": resize_count.value,
-        }
-
-    def reset_profile_stats(self) -> None:
-        """Reset profiling counters."""
-        load_library().reset_profile_stats()
-
-    @staticmethod
-    def has_opencv() -> bool:
-        """Check if OpenCV resize support was compiled in."""
-        return _has_opencv
-
     def shutdown(self) -> None:
         """Release resources (no-op for this implementation)."""
         self._temp_buffer = None
         self._dest_buffer = None
 
     def __repr__(self) -> str:
-        opencv_str = "+opencv" if _has_opencv else "+stb"
-        return f"NumbaBatchDecoder(num_threads={self.num_threads}, crop_mode={self.crop_mode!r}, resize={opencv_str})"
+        return f"NumbaBatchDecoder(num_threads={self.num_threads})"

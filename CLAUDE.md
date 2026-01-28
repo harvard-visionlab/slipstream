@@ -137,16 +137,16 @@ Benchmark environments: macOS laptop (CPU), GPU workstation, cluster
 
 ## Performance Targets
 
-| Metric           | FFCV        | Slipstream Current | Slipstream Target | Status |
-| ---------------- | ----------- | ------------------ | ----------------- | ------ |
-| Raw I/O          | ~413k img/s | **939k img/s**     | 480k+ img/s       | ✅ 2.3x faster |
-| CPU Decode Only  | -           | **17,365 img/s**   | 17k img/s         | ✅ Target met |
-| CPU + CenterCrop | ~15,840     | 11,417 img/s       | ~15k img/s        | ⚠️ 72% of FFCV |
-| CPU + RRC        | ~13,250     | 10,571 img/s       | ~13k img/s        | ⚠️ 80% of FFCV |
-| GPU Decode Only  | -           | ~10k img/s         | ~10k img/s        | ✅ Equivalent |
-| Cold Start       | baseline    | -                  | **20% faster**    | ⬜ Not measured |
+| Metric           | FFCV        | Slipstream         | Status |
+| ---------------- | ----------- | ------------------ | ------ |
+| Raw I/O          | ~413k img/s | **939k img/s**     | ✅ 2.3x faster |
+| CPU Decode Only  | ~17k        | **17,332 img/s**   | ✅ Target met |
+| CPU + CenterCrop | ~15,840     | **15,610 img/s**   | ✅ 98.5% of FFCV |
+| CPU + RRC        | ~13,250     | **13,719 img/s**   | ✅ 103.5% of FFCV |
+| GPU Decode Only  | -           | ~10k img/s         | ✅ Equivalent |
+| Cold Start       | baseline    | -                  | ⬜ Not measured |
 
-**Next optimization:** TurboJPEG scaled decode to close the crop performance gap.
+All CPU decode targets met or exceeded. No OpenCV dependency required — stb_image_resize2 matches OpenCV's cv::resize(INTER_AREA) performance for this workload.
 
 ---
 
@@ -171,15 +171,16 @@ All benchmarks on **machina** (GPU workstation: AMD Threadripper PRO 3975WX, 64 
 
 | System | Decode Only | + CenterCrop | + RRC | Status |
 |--------|-------------|--------------|-------|--------|
-| **Slipstream NumbaBatchDecoder** | **17,365** | **11,417** | **10,571** | ✅ Decode target met |
+| **Slipstream NumbaBatchDecoder** | **17,332** | **15,610** | **13,719** | ✅ All targets met |
 | FFCV Reference | - | 15,840 | 13,250 | Target |
 | litdata-mmap CPU (Numba) | 17,425 | 1,308 | 2,039 | Reference |
 
 **Analysis:**
-- ✅ **Decode-only matches target**: 17,365 vs 17,425 (litdata-mmap) - essentially identical
-- ⚠️ **CenterCrop at 72% of FFCV**: 11,417 vs 15,840
-- ⚠️ **RRC at 80% of FFCV**: 10,571 vs 13,250
-- ✅ **5-8x faster than litdata-mmap's crop path** (which has a bug or inefficiency)
+- ✅ **Decode-only matches target**: 17,332 vs 17,425 (litdata-mmap) — essentially identical
+- ✅ **CenterCrop at 98.5% of FFCV**: 15,610 vs 15,840
+- ✅ **RRC exceeds FFCV by 3.5%**: 13,719 vs 13,250
+- ✅ **7-10x faster than litdata-mmap's crop path**
+- No OpenCV required — stb_image_resize2 is sufficient (resize is only 8-20% of per-image time)
 
 ### GPU Decode + Transforms (nvImageCodec)
 
@@ -193,54 +194,20 @@ All benchmarks on **machina** (GPU workstation: AMD Threadripper PRO 3975WX, 64 
 
 ---
 
-## Path to FFCV-Level Performance
+## Performance Optimization History
 
-### Current Gap Analysis
+The gap between Slipstream and FFCV for crop operations was closed by eliminating unnecessary buffer copies.
 
-The remaining gap between Slipstream and FFCV for crop operations:
+### Key Finding: The Bottleneck Was Memory Copies, Not Resize
 
-| Operation | Slipstream | FFCV | Gap |
-|-----------|------------|------|-----|
-| Decode only | 17,365 | - | ✅ No gap |
-| + CenterCrop | 11,417 | 15,840 | 28% slower |
-| + RRC | 10,571 | 13,250 | 20% slower |
+Profiling revealed that JPEG decode is 80-92% of per-image C++ time, with resize only 8-20%. The performance gap was caused by unnecessary `.copy()` calls on large numpy buffers (37-200MB per batch) when returning results. FFCV returns views into pre-allocated buffers with zero copies.
 
-### Root Cause
+Approaches tried and rejected:
+- **TurboJPEG scaled decode** (`decode_crop_resize`): No benefit for 256-512px source images
+- **JPEG-domain crop** (`tjTransform`): 30% slower due to per-image malloc/free in prange
+- **OpenCV cv::resize(INTER_AREA)**: <1% difference vs stb_image_resize2
 
-**Current Slipstream approach:**
-```
-JPEG → decode full size → temp buffer → stb_image_resize2 (crop + resize) → output
-       (decode 262k pixels)              (resize from full image)
-```
-
-**FFCV approach:**
-```
-JPEG → scaled decode (1/2, 1/4, etc.) → smaller buffer → crop → resize → output
-       (decode 65k pixels at 1/2!)       (resize from smaller image)
-```
-
-FFCV uses **TurboJPEG scaled decode** to decode at a smaller size when the crop region is small. This is nearly free because JPEG's DCT naturally supports power-of-2 scaling during the IDCT step.
-
-### TurboJPEG Scaling Factors
-
-TurboJPEG supports these exact scale factors during decode (no extra cost):
-
-| Scale | Example | Pixels Decoded |
-|-------|---------|----------------|
-| 1/1 | 512→512 | 262,144 |
-| 1/2 | 512→256 | 65,536 (4x less!) |
-| 3/8 | 512→192 | 36,864 |
-| 1/4 | 512→128 | 16,384 (16x less!) |
-| 1/8 | 512→64 | 4,096 |
-
-### Implementation Plan for Scaled Decode
-
-1. **Add `imdecode_scaled()` to libslipstream.cpp** - decode with scale factor
-2. **Choose optimal scale** based on crop dimensions
-3. **Adjust crop coordinates** for scaled image
-4. **Resize from smaller decoded image**
-
-Expected improvement: ~25-40% faster crop operations, closing the gap with FFCV.
+The fix: return `dest_buffer[:batch_size]` (view) instead of `dest_buffer[:batch_size].copy()`.
 
 ### Build libslipstream
 
