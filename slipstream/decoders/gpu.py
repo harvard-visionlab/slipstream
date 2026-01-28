@@ -58,11 +58,10 @@ except ImportError:
 
 try:
     import cvcuda
-    import nvcv
     _CVCUDA_AVAILABLE = True
 except ImportError:
     cvcuda = None
-    nvcv = None
+    _CVCUDA_AVAILABLE = False
 
 
 def check_gpu_decoder_available() -> bool:
@@ -422,8 +421,8 @@ class GPUDecoder:
         batch_size = len(tensors)
         th, tw = target_size
 
-        if self.use_cvcuda_resize and cvcuda is not None and nvcv is not None:
-            # CV-CUDA resize path
+        if self.use_cvcuda_resize and cvcuda is not None:
+            # CV-CUDA resize path (using new API with cvcuda.as_tensor)
             output = torch.zeros(
                 (batch_size, 3, th, tw),
                 dtype=torch.uint8,
@@ -434,14 +433,14 @@ class GPUDecoder:
                 # Convert CHW to HWC for CV-CUDA
                 hwc = tensor.permute(1, 2, 0).contiguous()
 
-                # Create nvcv tensor wrapper
-                src_tensor = nvcv.as_tensor(hwc, "HWC")
+                # Create cvcuda tensor wrapper
+                src_tensor = cvcuda.as_tensor(hwc, "HWC")
 
                 # Create destination tensor
                 dst_hwc = torch.zeros(
                     (th, tw, 3), dtype=torch.uint8, device=f"cuda:{self.device}"
                 )
-                dst_tensor = nvcv.as_tensor(dst_hwc, "HWC")
+                dst_tensor = cvcuda.as_tensor(dst_hwc, "HWC")
 
                 # Resize using CV-CUDA
                 cvcuda.resize(src_tensor, dst_tensor, cvcuda.Interp.LINEAR)
