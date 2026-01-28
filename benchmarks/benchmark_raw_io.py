@@ -184,7 +184,8 @@ def main():
     parser.add_argument("--num-workers", type=int, default=8, help="Workers for StreamingDataLoader")
     parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results (e.g., 'nolan-25')")
     parser.add_argument("--skip-streaming", action="store_true", help="Skip slow StreamingDataLoader benchmark")
-    parser.add_argument("--output", type=str, default=None, help="Output JSON path")
+    parser.add_argument("--save", action="store_true", help="Save results to JSON file")
+    parser.add_argument("--output", type=str, default=None, help="Output JSON path (implies --save)")
     args = parser.parse_args()
 
     # Print machine info
@@ -271,11 +272,10 @@ def main():
     if streaming_rate > 0:
         print(f"SlipstreamLoader (threaded) is {threaded_rate/streaming_rate:.1f}x faster than StreamingDataLoader")
 
-    # Save results
+    # Save results (only if --save or --output specified)
     if args.output:
         save_results(results, machine_info, args.output, "raw_io")
-    else:
-        # Default output path uses machine_name (sanitized)
+    elif args.save:
         name = machine_info.machine_name.replace(".", "_").replace(" ", "_")
         output_path = Path(__file__).parent / "results" / f"raw_io_{name}.json"
         save_results(results, machine_info, output_path, "raw_io")

@@ -157,7 +157,8 @@ def main():
     parser.add_argument("--target-size", type=int, default=224, help="Target crop size")
     parser.add_argument("--device", type=str, default="cpu", help="Device (cpu or cuda)")
     parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results (e.g., 'nolan-25')")
-    parser.add_argument("--output", type=str, default=None, help="Output JSON path")
+    parser.add_argument("--save", action="store_true", help="Save results to JSON file")
+    parser.add_argument("--output", type=str, default=None, help="Output JSON path (implies --save)")
     args = parser.parse_args()
 
     # Print machine info
@@ -243,10 +244,10 @@ def main():
     print("  CPU Decode + RRC: ~5.7k samples/sec")
     print("  GPU Decode + RRC: ~10-11k samples/sec")
 
-    # Save results
+    # Save results (only if --save or --output specified)
     if args.output:
         save_results(results, machine_info, args.output, "loader")
-    else:
+    elif args.save:
         name = machine_info.machine_name.replace(".", "_").replace(" ", "_")
         output_path = Path(__file__).parent / "results" / f"loader_{name}.json"
         save_results(results, machine_info, output_path, "loader")
