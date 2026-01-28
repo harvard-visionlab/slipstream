@@ -980,16 +980,16 @@ class NumbaBatchDecoder:
         max_h = int(np.max(heights))
         max_w = int(np.max(widths))
 
-        # Ensure dtypes
-        sizes = np.ascontiguousarray(sizes, dtype=np.uint64)
-        heights_arr = np.ascontiguousarray(heights, dtype=np.uint32)
-        widths_arr = np.ascontiguousarray(widths, dtype=np.uint32)
+        # Ensure dtypes (avoid copies if already correct dtype)
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+        heights_i32 = heights if heights.dtype == np.int32 else np.ascontiguousarray(heights, dtype=np.int32)
+        widths_i32 = widths if widths.dtype == np.int32 else np.ascontiguousarray(widths, dtype=np.int32)
 
         # Generate crop parameters
         crop_params = _generate_center_crop_params_batch(
-            widths.astype(np.int32),
-            heights.astype(np.int32),
-            crop_size,
+            widths_i32, heights_i32, crop_size,
         )
 
         # Allocate buffers
@@ -998,13 +998,13 @@ class NumbaBatchDecoder:
 
         # Decode + crop + resize
         self._run_crop_fn(
-            data, sizes, heights_arr, widths_arr,
+            data, sizes_u64, heights_u32, widths_u32,
             crop_params, temp_buffer, dest_buffer,
             crop_size, crop_size,
         )
 
-        # Return copy of relevant portion
-        return dest_buffer[:batch_size].copy()
+        # Return view (no copy — caller should not hold reference across batches)
+        return dest_buffer[:batch_size]
 
     def _run_crop_fn(
         self,
@@ -1099,10 +1099,12 @@ class NumbaBatchDecoder:
         max_h = int(np.max(heights))
         max_w = int(np.max(widths))
 
-        # Ensure dtypes
-        sizes = np.ascontiguousarray(sizes, dtype=np.uint64)
-        heights_arr = np.ascontiguousarray(heights, dtype=np.uint32)
-        widths_arr = np.ascontiguousarray(widths, dtype=np.uint32)
+        # Ensure dtypes (avoid copies if already correct dtype)
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+        heights_i32 = heights if heights.dtype == np.int32 else np.ascontiguousarray(heights, dtype=np.int32)
+        widths_i32 = widths if widths.dtype == np.int32 else np.ascontiguousarray(widths, dtype=np.int32)
 
         # Generate random crop parameters
         log_ratio_min = math.log(ratio[0])
@@ -1110,12 +1112,9 @@ class NumbaBatchDecoder:
         self._seed_counter += 1
 
         crop_params = _generate_random_crop_params_batch(
-            widths.astype(np.int32),
-            heights.astype(np.int32),
-            scale[0],
-            scale[1],
-            log_ratio_min,
-            log_ratio_max,
+            widths_i32, heights_i32,
+            scale[0], scale[1],
+            log_ratio_min, log_ratio_max,
             self._seed_counter,
         )
 
@@ -1125,14 +1124,14 @@ class NumbaBatchDecoder:
 
         # Decode + crop + resize
         self._run_crop_fn(
-            data, sizes, heights_arr, widths_arr,
+            data, sizes_u64, heights_u32, widths_u32,
             crop_params, temp_buffer, dest_buffer,
             target_size, target_size,
         )
 
-        # Convert to tensor [B, C, H, W]
-        result = torch.from_numpy(dest_buffer[:batch_size].copy())
-        result = result.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
+        # Convert to tensor [B, C, H, W] — no copy, torch wraps numpy
+        result = torch.from_numpy(dest_buffer[:batch_size])
+        result = result.permute(0, 3, 1, 2).contiguous()  # [B, H, W, C] -> [B, C, H, W]
 
         return result
 
