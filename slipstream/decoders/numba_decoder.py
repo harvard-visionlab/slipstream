@@ -716,7 +716,7 @@ class NumbaBatchDecoder:
         )
     """
 
-    def __init__(self, num_threads: int = 0, use_scaled_decode: bool = True, crop_mode: str = "jpeg_domain") -> None:
+    def __init__(self, num_threads: int = 0, use_scaled_decode: bool = True, crop_mode: str = "basic") -> None:
         """Initialize the decoder.
 
         Args:
