@@ -254,25 +254,22 @@ class GPUDecoder:
         self._stream.synchronize()
         return output
 
-    def decode_batch_with_roi(
+    def decode_batch_with_roi_native(
         self,
         data: NDArray[np.uint8],
         sizes: NDArray[np.int64 | np.uint64 | np.uint32],
-        heights: NDArray[np.uint32],
-        widths: NDArray[np.uint32],
         rois: NDArray[np.int32],
         target_size: tuple[int, int],
     ) -> torch.Tensor:
-        """Decode batch with ROI (Region of Interest) for each image.
+        """Decode batch with native ROI decode (decode only the crop region).
 
-        Currently implements full decode + GPU crop + resize.
-        TODO: Investigate nvImageCodec ROI decode via DecodeParams.
+        Uses nvImageCodec's Region API to decode only the ROI, avoiding
+        decoding pixels that will be discarded. This is significantly faster
+        than full decode + crop for large images.
 
         Args:
             data: Padded JPEG data [B, max_size]
             sizes: JPEG sizes [B]
-            heights: Image heights [B]
-            widths: Image widths [B]
             rois: ROI parameters [B, 4] as (x, y, w, h)
             target_size: Final output size (height, width)
 
@@ -286,23 +283,98 @@ class GPUDecoder:
                 (0, 3, th, tw), dtype=torch.uint8, device=f"cuda:{self.device}"
             )
 
-        # Full decode first (ROI decode needs more API investigation)
-        full_images = self.decode_batch(data, sizes, heights, widths)
+        # Create code streams with regions for ROI decode
+        jpeg_list = self._pack_jpeg_bytes(data, sizes)
 
-        # Crop and resize each image on GPU
-        output = torch.zeros(
-            (batch_size, 3, th, tw),
-            dtype=torch.uint8,
-            device=f"cuda:{self.device}",
-        )
-
+        # Create regions for each image
+        decode_sources = []
         for i in range(batch_size):
             x, y, w, h = rois[i]
-            cropped = full_images[i, :, y:y+h, x:x+w]
-            resized = self._resize_single(cropped, (th, tw))
-            output[i] = resized
+            # nvimgcodec.Region uses (start_y, start_x, end_y, end_x)
+            region = nvimgcodec.Region(
+                start_y=int(y),
+                start_x=int(x),
+                end_y=int(y + h),
+                end_x=int(x + w),
+            )
+            # Create code stream from bytes
+            code_stream = nvimgcodec.CodeStream(jpeg_list[i])
+            # Get sub-stream for the region
+            view = nvimgcodec.CodeStreamView(image_idx=0, region=region)
+            sub_stream = code_stream.get_sub_code_stream(view)
+            decode_sources.append(sub_stream)
 
-        return output
+        with torch.cuda.stream(self._stream):
+            # Decode only the ROI regions
+            images = self._decoder.decode(decode_sources)
+
+            # Convert to tensors - all should be similar size now (the ROI size)
+            cropped_tensors: list[torch.Tensor] = []
+            for img in images:
+                tensor = torch.as_tensor(img, device=f"cuda:{self.device}")
+                if tensor.ndim == 3:  # HWC
+                    tensor = tensor.permute(2, 0, 1)  # Convert to CHW
+                cropped_tensors.append(tensor)
+
+        self._stream.synchronize()
+
+        # Resize all crops to target size
+        return self._resize_batch(cropped_tensors, (th, tw))
+
+    def decode_batch_with_roi(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray[np.int64 | np.uint64 | np.uint32],
+        heights: NDArray[np.uint32],
+        widths: NDArray[np.uint32],
+        rois: NDArray[np.int32],
+        target_size: tuple[int, int],
+        use_native_roi: bool = True,
+    ) -> torch.Tensor:
+        """Decode batch with ROI (Region of Interest) for each image.
+
+        Uses native ROI decode when available, falls back to full decode + crop.
+
+        Args:
+            data: Padded JPEG data [B, max_size]
+            sizes: JPEG sizes [B]
+            heights: Image heights [B]
+            widths: Image widths [B]
+            rois: ROI parameters [B, 4] as (x, y, w, h)
+            target_size: Final output size (height, width)
+            use_native_roi: Try native ROI decode first (faster for large images)
+
+        Returns:
+            Cropped and resized images [B, C, H, W] on GPU
+        """
+        batch_size = len(sizes)
+        th, tw = target_size
+        if batch_size == 0:
+            return torch.empty(
+                (0, 3, th, tw), dtype=torch.uint8, device=f"cuda:{self.device}"
+            )
+
+        # Try native ROI decode first (decodes only the crop region)
+        if use_native_roi:
+            try:
+                return self.decode_batch_with_roi_native(data, sizes, rois, target_size)
+            except Exception as e:
+                # Fall back to full decode + crop if native ROI fails
+                import warnings
+                warnings.warn(f"Native ROI decode failed, falling back to full decode: {e}")
+
+        # Fallback: Full decode then crop
+        full_images = self.decode_batch(data, sizes, heights, widths)
+
+        # Crop each image on GPU (fast indexing)
+        cropped_tensors: list[torch.Tensor] = []
+        for i in range(batch_size):
+            x, y, w, h = rois[i]
+            cropped = full_images[i, :, y:y+h, x:x+w].contiguous()
+            cropped_tensors.append(cropped)
+
+        # Batch resize all crops at once
+        return self._resize_batch(cropped_tensors, (th, tw))
 
     def _resize_single(
         self,
@@ -329,6 +401,76 @@ class GPUDecoder:
             align_corners=False,
         )
         return resized.squeeze(0).to(torch.uint8)
+
+    def _resize_batch(
+        self,
+        tensors: list[torch.Tensor],
+        target_size: tuple[int, int],
+    ) -> torch.Tensor:
+        """Resize batch of tensors to target size.
+
+        Uses CV-CUDA if available for GPU-accelerated resize,
+        otherwise falls back to torch resize.
+
+        Args:
+            tensors: List of CHW tensors (can have different sizes)
+            target_size: Target (height, width)
+
+        Returns:
+            Resized tensors [B, C, H, W]
+        """
+        batch_size = len(tensors)
+        th, tw = target_size
+
+        if self.use_cvcuda_resize and cvcuda is not None and nvcv is not None:
+            # CV-CUDA resize path
+            output = torch.zeros(
+                (batch_size, 3, th, tw),
+                dtype=torch.uint8,
+                device=f"cuda:{self.device}",
+            )
+
+            for i, tensor in enumerate(tensors):
+                # Convert CHW to HWC for CV-CUDA
+                hwc = tensor.permute(1, 2, 0).contiguous()
+
+                # Create nvcv tensor wrapper
+                src_tensor = nvcv.as_tensor(hwc, "HWC")
+
+                # Create destination tensor
+                dst_hwc = torch.zeros(
+                    (th, tw, 3), dtype=torch.uint8, device=f"cuda:{self.device}"
+                )
+                dst_tensor = nvcv.as_tensor(dst_hwc, "HWC")
+
+                # Resize using CV-CUDA
+                cvcuda.resize(src_tensor, dst_tensor, cvcuda.Interp.LINEAR)
+
+                # Convert back to CHW and store
+                output[i] = dst_hwc.permute(2, 0, 1)
+
+            return output
+        else:
+            # PyTorch resize fallback
+            from torch.nn import functional as fn
+
+            output = torch.zeros(
+                (batch_size, 3, th, tw),
+                dtype=torch.uint8,
+                device=f"cuda:{self.device}",
+            )
+
+            for i, tensor in enumerate(tensors):
+                t_float = tensor.unsqueeze(0).float()
+                resized = fn.interpolate(
+                    t_float,
+                    size=(th, tw),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                output[i] = resized.squeeze(0).to(torch.uint8)
+
+            return output
 
     def decode_batch_random_crop(
         self,
