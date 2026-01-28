@@ -48,7 +48,7 @@ def collate_results(results_dir: Path, hostname: str) -> dict:
 def format_markdown_results(results: dict, machine_info) -> str:
     """Format results as markdown for results.md."""
     lines = [
-        f"### {machine_info.hostname}",
+        f"### {machine_info.machine_name}",
         "",
         "**Machine Info:**",
         f"- Platform: {machine_info.platform} {machine_info.platform_version}",
@@ -119,16 +119,18 @@ def format_markdown_results(results: dict, machine_info) -> str:
 def main():
     parser = argparse.ArgumentParser(description="Run all benchmarks")
     parser.add_argument("--quick", action="store_true", help="Quick mode (fewer epochs)")
+    parser.add_argument("--cache-dir", type=str, default=None, help="Override cache directory")
+    parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results (e.g., 'nolan-25')")
     parser.add_argument("--skip-raw-io", action="store_true", help="Skip raw I/O benchmark")
     parser.add_argument("--skip-decode", action="store_true", help="Skip decode benchmark")
     parser.add_argument("--skip-loader", action="store_true", help="Skip loader benchmark")
     args = parser.parse_args()
 
     # Get machine info
-    machine_info = get_machine_info()
+    machine_info = get_machine_info(args.machine_name)
     print(machine_info)
 
-    hostname = machine_info.hostname.replace(".", "_")
+    machine_name = machine_info.machine_name.replace(".", "_").replace(" ", "_")
     benchmarks_dir = Path(__file__).parent
     results_dir = benchmarks_dir / "results"
 
@@ -136,6 +138,10 @@ def main():
     extra_args = []
     if args.quick:
         extra_args.extend(["--epochs", "1", "--warmup", "1"])
+    if args.cache_dir:
+        extra_args.extend(["--cache-dir", args.cache_dir])
+    if args.machine_name:
+        extra_args.extend(["--machine-name", args.machine_name])
 
     # Run benchmarks
     exit_codes = []
@@ -162,7 +168,7 @@ def main():
         print(f"  {name}: {status}")
 
     # Collate results
-    results = collate_results(results_dir, hostname)
+    results = collate_results(results_dir, machine_name)
 
     if results:
         print("\n" + "=" * 60)

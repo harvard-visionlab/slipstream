@@ -24,6 +24,7 @@ class MachineInfo:
     """Machine information for benchmark tracking."""
 
     hostname: str
+    machine_name: str  # User-provided name (e.g., "nolan-25")
     platform: str
     platform_version: str
     architecture: str
@@ -44,6 +45,7 @@ class MachineInfo:
         """Convert to dictionary."""
         return {
             "hostname": self.hostname,
+            "machine_name": self.machine_name,
             "platform": self.platform,
             "platform_version": self.platform_version,
             "architecture": self.architecture,
@@ -67,6 +69,7 @@ class MachineInfo:
             "=" * 60,
             "MACHINE INFO",
             "=" * 60,
+            f"Machine:       {self.machine_name}",
             f"Hostname:      {self.hostname}",
             f"Platform:      {self.platform} {self.platform_version}",
             f"Architecture:  {self.architecture}",
@@ -209,70 +212,130 @@ def get_ram_gb() -> float:
     return 0.0
 
 
-def get_drive_type(path: str = ".") -> str | None:
-    """Attempt to detect drive type (SSD/HDD/NVMe) for given path."""
+def get_drive_info(path: str = ".") -> dict[str, Any]:
+    """Get detailed drive information for a given path.
+
+    Returns dict with:
+        - type: "NVMe SSD", "SSD", "HDD", or None
+        - device: device path (e.g., /dev/nvme0n1p1)
+        - mount_point: mount point path
+        - filesystem: filesystem type
+        - size_gb: total size in GB (if available)
+        - free_gb: free space in GB (if available)
+    """
+    info = {
+        "type": None,
+        "device": None,
+        "mount_point": None,
+        "filesystem": None,
+        "size_gb": None,
+        "free_gb": None,
+    }
+
     system = platform.system()
+
+    # Resolve to absolute path
+    try:
+        path = os.path.realpath(path)
+    except Exception:
+        pass
 
     if system == "Darwin":
         try:
-            # Get the mount point
             result = subprocess.run(
-                ["df", path],
+                ["df", "-k", path],
                 capture_output=True,
                 text=True,
             )
             if result.returncode == 0:
                 lines = result.stdout.strip().split("\n")
                 if len(lines) > 1:
-                    device = lines[1].split()[0]
-                    # Check if it's an NVMe or SSD
+                    parts = lines[1].split()
+                    info["device"] = parts[0]
+                    info["mount_point"] = parts[8] if len(parts) > 8 else parts[5]
+                    # Size and free in 1K blocks
+                    if len(parts) >= 4:
+                        info["size_gb"] = int(parts[1]) / (1024 * 1024)
+                        info["free_gb"] = int(parts[3]) / (1024 * 1024)
+
+                    device = parts[0]
                     if "nvme" in device.lower():
-                        return "NVMe SSD"
-                    # On macOS, most internal drives are SSDs
-                    result2 = subprocess.run(
-                        ["diskutil", "info", device],
-                        capture_output=True,
-                        text=True,
-                    )
-                    if result2.returncode == 0:
-                        if "Solid State" in result2.stdout:
-                            if "Yes" in result2.stdout.split("Solid State")[1][:20]:
-                                return "SSD"
-                        if "NVMe" in result2.stdout:
-                            return "NVMe SSD"
-                    return "SSD (assumed)"  # Most Macs have SSDs
+                        info["type"] = "NVMe SSD"
+                    else:
+                        result2 = subprocess.run(
+                            ["diskutil", "info", device],
+                            capture_output=True,
+                            text=True,
+                        )
+                        if result2.returncode == 0:
+                            if "Solid State" in result2.stdout:
+                                if "Yes" in result2.stdout.split("Solid State")[1][:20]:
+                                    info["type"] = "SSD"
+                            if "NVMe" in result2.stdout:
+                                info["type"] = "NVMe SSD"
+                        if info["type"] is None:
+                            info["type"] = "SSD (assumed)"
         except Exception:
             pass
 
     elif system == "Linux":
         try:
-            # Get the device for the path
+            # Get device and mount info
             result = subprocess.run(
-                ["df", path],
+                ["df", "-T", "-k", path],
                 capture_output=True,
                 text=True,
             )
             if result.returncode == 0:
                 lines = result.stdout.strip().split("\n")
                 if len(lines) > 1:
-                    device = lines[1].split()[0]
-                    # Extract base device name
-                    device_name = os.path.basename(device).rstrip("0123456789")
-                    if device_name.startswith("nvme"):
-                        return "NVMe SSD"
+                    parts = lines[1].split()
+                    info["device"] = parts[0]
+                    info["filesystem"] = parts[1]
+                    info["mount_point"] = parts[6] if len(parts) > 6 else None
+                    # Size and free in 1K blocks
+                    if len(parts) >= 5:
+                        info["size_gb"] = int(parts[2]) / (1024 * 1024)
+                        info["free_gb"] = int(parts[4]) / (1024 * 1024)
 
-                    # Check rotational flag
-                    rotational_path = f"/sys/block/{device_name}/queue/rotational"
-                    if os.path.exists(rotational_path):
-                        with open(rotational_path) as f:
-                            if f.read().strip() == "0":
-                                return "SSD"
-                            else:
-                                return "HDD"
+                    # Extract base device name for drive type detection
+                    device = parts[0]
+                    # Handle overlay/docker filesystems
+                    if device == "overlay" or device.startswith("/dev/loop"):
+                        # Try to find the underlying device from mount info
+                        try:
+                            with open("/proc/mounts") as f:
+                                for line in f:
+                                    mount_parts = line.split()
+                                    if len(mount_parts) >= 2:
+                                        if mount_parts[1] == info["mount_point"]:
+                                            # For overlay, check the upper dir
+                                            pass
+                        except Exception:
+                            pass
+                        info["type"] = "Unknown (container)"
+                    else:
+                        device_name = os.path.basename(device).rstrip("0123456789p")
+                        if device_name.startswith("nvme"):
+                            info["type"] = "NVMe SSD"
+                        else:
+                            # Check rotational flag
+                            rotational_path = f"/sys/block/{device_name}/queue/rotational"
+                            if os.path.exists(rotational_path):
+                                with open(rotational_path) as f:
+                                    if f.read().strip() == "0":
+                                        info["type"] = "SSD"
+                                    else:
+                                        info["type"] = "HDD"
         except Exception:
             pass
 
-    return None
+    return info
+
+
+def get_drive_type(path: str = ".") -> str | None:
+    """Attempt to detect drive type (SSD/HDD/NVMe) for given path."""
+    return get_drive_info(path).get("type")
 
 
 def get_gpu_info() -> tuple[bool, str | None, str | None, float | None]:
@@ -291,15 +354,22 @@ def get_gpu_info() -> tuple[bool, str | None, str | None, float | None]:
     return False, None, None, None
 
 
-def get_machine_info() -> MachineInfo:
-    """Collect all machine information."""
+def get_machine_info(machine_name: str | None = None) -> MachineInfo:
+    """Collect all machine information.
+
+    Args:
+        machine_name: User-provided machine name (e.g., "nolan-25").
+                      If None, uses the hostname.
+    """
     import torch
 
+    hostname = socket.gethostname()
     physical_cores, logical_cores = get_cpu_cores()
     cuda_available, cuda_version, gpu_name, gpu_memory = get_gpu_info()
 
     return MachineInfo(
-        hostname=socket.gethostname(),
+        hostname=hostname,
+        machine_name=machine_name or hostname,
         platform=platform.system(),
         platform_version=platform.release(),
         architecture=platform.machine(),

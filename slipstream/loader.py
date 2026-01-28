@@ -221,7 +221,11 @@ class SlipstreamLoader:
         return result
 
     def __iter__(self):
-        """Iterate over batches with async prefetching."""
+        """Iterate over batches with async prefetching.
+
+        Uses zero-copy loading: JIT functions write directly into pre-allocated
+        buffers, and only slot indices are passed through the queue.
+        """
         indices = np.arange(len(self.cache), dtype=np.int64)
         if self.shuffle:
             np.random.shuffle(indices)
@@ -230,15 +234,21 @@ class SlipstreamLoader:
         if not self.drop_last and len(indices) % self.batch_size != 0:
             num_batches += 1
 
+        # Queue passes only (slot, batch_size, batch_indices, other_fields)
+        # Image data is accessed directly from pre-allocated banks using slot
         output_queue: queue.Queue = queue.Queue(maxsize=self.batches_ahead)
         stop_event = threading.Event()
         num_slots = len(self._data_banks) if self._data_banks else 1
 
         # Get the image field storage for direct access
         image_storage = self.cache.fields.get(self.image_field)
+        has_image_field = image_storage is not None and self._data_banks is not None
 
         def prefetch_worker():
-            """Background thread for async batch loading."""
+            """Background thread for async batch loading.
+
+            Mimics FFCV's EpochIterator: JIT runs with nogil=True, releasing GIL.
+            """
             current_slot = 0
 
             for batch_idx in range(num_batches):
@@ -250,31 +260,18 @@ class SlipstreamLoader:
                 batch_indices = indices[start:end]
                 actual_batch_size = len(batch_indices)
 
-                # Load image data into pre-allocated buffers
-                image_data = None
-                if image_storage is not None and self._data_banks is not None:
-                    dest = self._data_banks[current_slot]
-                    sizes = self._size_banks[current_slot]
-                    heights = self._height_banks[current_slot]
-                    widths = self._width_banks[current_slot]
+                # Load image data directly into pre-allocated buffers (ZERO-COPY!)
+                if has_image_field:
+                    image_storage.load_batch_into(
+                        batch_indices,
+                        self._data_banks[current_slot],
+                        self._size_banks[current_slot],
+                        self._height_banks[current_slot],
+                        self._width_banks[current_slot],
+                        parallel=True,
+                    )
 
-                    # Load directly using the storage's batch loader
-                    batch_data = image_storage.load_batch(batch_indices, parallel=True)
-
-                    # Copy to pre-allocated banks
-                    dest[:actual_batch_size] = batch_data['data'][:actual_batch_size]
-                    sizes[:actual_batch_size] = batch_data['sizes'][:actual_batch_size]
-                    heights[:actual_batch_size] = batch_data['heights'][:actual_batch_size]
-                    widths[:actual_batch_size] = batch_data['widths'][:actual_batch_size]
-
-                    image_data = {
-                        'data': dest[:actual_batch_size],
-                        'sizes': sizes[:actual_batch_size],
-                        'heights': heights[:actual_batch_size],
-                        'widths': widths[:actual_batch_size],
-                    }
-
-                # Load other fields
+                # Load other fields (labels are fast - simple array indexing)
                 other_fields = {}
                 for field_name in self._fields_to_load:
                     if field_name == self.image_field:
@@ -282,11 +279,11 @@ class SlipstreamLoader:
                     field_data = self.cache.fields[field_name].load_batch(batch_indices)
                     other_fields[field_name] = field_data['data']
 
+                # Only pass slot index and metadata - not the actual data!
                 output_queue.put((
                     current_slot,
                     actual_batch_size,
                     batch_indices,
-                    image_data,
                     other_fields,
                 ))
                 current_slot = (current_slot + 1) % num_slots
@@ -302,15 +299,22 @@ class SlipstreamLoader:
                 if result is None:
                     break
 
-                slot, actual_size, batch_indices, image_data, other_fields = result
+                slot, actual_size, batch_indices, other_fields = result
 
                 # Build output batch
                 batch = {
                     'indices': torch.from_numpy(batch_indices).to(self._device_str),
                 }
 
-                # Process image field through pipeline
-                if image_data is not None:
+                # Access image data from pre-allocated banks using slot index
+                if has_image_field:
+                    image_data = {
+                        'data': self._data_banks[slot][:actual_size],
+                        'sizes': self._size_banks[slot][:actual_size],
+                        'heights': self._height_banks[slot][:actual_size],
+                        'widths': self._width_banks[slot][:actual_size],
+                    }
+
                     if self.image_field in self.pipelines:
                         batch[self.image_field] = self._apply_pipeline(
                             self.image_field, image_data

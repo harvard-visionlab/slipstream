@@ -530,6 +530,54 @@ class ImageBytesStorage(FieldStorage):
             'widths': self._widths[indices],
         }
 
+    def load_batch_into(
+        self,
+        indices: NDArray[np.int64],
+        dest: np.ndarray,
+        sizes: np.ndarray,
+        heights: np.ndarray,
+        widths: np.ndarray,
+        parallel: bool = True,
+    ) -> int:
+        """Load a batch directly into provided buffers (zero-copy).
+
+        This is the fast path used by SlipstreamLoader to avoid intermediate copies.
+        The JIT function writes directly into the destination buffers.
+
+        Args:
+            indices: Sample indices to load
+            dest: Pre-allocated destination buffer [batch_size, max_size]
+            sizes: Pre-allocated sizes buffer [batch_size]
+            heights: Pre-allocated heights buffer [batch_size]
+            widths: Pre-allocated widths buffer [batch_size]
+            parallel: Use parallel loading
+
+        Returns:
+            Number of samples loaded (actual batch size)
+        """
+        batch_size = len(indices)
+
+        if indices.dtype != np.int64:
+            indices = indices.astype(np.int64)
+
+        # JIT writes directly into provided buffers - no intermediate copy!
+        if parallel:
+            _load_variable_batch_parallel(
+                indices, self._metadata, self._data_array,
+                dest[:batch_size], sizes[:batch_size]
+            )
+        else:
+            _load_variable_batch_sequential(
+                indices, self._metadata, self._data_array,
+                dest[:batch_size], sizes[:batch_size]
+            )
+
+        # Copy pre-stored dimensions (these are small arrays, fast)
+        heights[:batch_size] = self._heights[indices]
+        widths[:batch_size] = self._widths[indices]
+
+        return batch_size
+
     @classmethod
     def build(
         cls,

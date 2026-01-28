@@ -2,6 +2,7 @@
   "benchmark": "raw_io",
   "machine": {
     "hostname": "PSYC-LKQL73CVM6",
+    "machine_name": "nolan-25",
     "platform": "Darwin",
     "platform_version": "24.6.0",
     "architecture": "arm64",
@@ -16,14 +17,14 @@
     "gpu_name": null,
     "gpu_memory_gb": null,
     "drive_type": "SSD",
-    "timestamp": "2026-01-27T23:22:05.812375"
+    "timestamp": "2026-01-28T06:34:17.157857"
   },
   "results": [
     {
       "name": "OptimizedCache.load_batch (image)",
-      "samples_per_sec": 992338.7651479738,
+      "samples_per_sec": 1024493.0105596054,
       "total_samples": 50000,
-      "elapsed_sec": 0.1512498753145337,
+      "elapsed_sec": 0.1464345008134842,
       "num_epochs": 3,
       "warmup_epochs": 1,
       "metadata": {
@@ -33,9 +34,9 @@
     },
     {
       "name": "OptimizedCache.load_batch (label)",
-      "samples_per_sec": 174056452.48991045,
+      "samples_per_sec": 191459204.63524303,
       "total_samples": 50000,
-      "elapsed_sec": 0.0008630841039121151,
+      "elapsed_sec": 0.0007841675542294979,
       "num_epochs": 3,
       "warmup_epochs": 1,
       "metadata": {
@@ -45,9 +46,9 @@
     },
     {
       "name": "SlipstreamLoader (raw, no pipelines)",
-      "samples_per_sec": 164548.31942485846,
+      "samples_per_sec": 809286.9715692765,
       "total_samples": 50000,
-      "elapsed_sec": 0.9122932497411966,
+      "elapsed_sec": 0.18607170833274722,
       "num_epochs": 3,
       "warmup_epochs": 1,
       "metadata": {
@@ -56,9 +57,9 @@
     },
     {
       "name": "StreamingDataLoader (8 workers)",
-      "samples_per_sec": 2905.651195520864,
+      "samples_per_sec": 2450.1894730808467,
       "total_samples": 50000,
-      "elapsed_sec": 51.74619941646233,
+      "elapsed_sec": 61.220335042104125,
       "num_epochs": 3,
       "warmup_epochs": 1,
       "metadata": {

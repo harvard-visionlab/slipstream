@@ -24,6 +24,7 @@ from tqdm import tqdm
 from benchmarks.utils import (
     BenchmarkResult,
     format_results_table,
+    get_drive_info,
     get_machine_info,
     run_benchmark,
     save_results,
@@ -109,6 +110,7 @@ def benchmark_slipstream_raw(
         batch_size=batch_size,
         shuffle=False,
         drop_last=False,
+        exclude_fields=["path"],  # Exclude string field for fair comparison
         # No pipelines = raw data
     )
 
@@ -172,15 +174,17 @@ def benchmark_streaming_dataloader(
 def main():
     parser = argparse.ArgumentParser(description="Benchmark raw I/O performance")
     parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help="Dataset path (S3 or local)")
+    parser.add_argument("--cache-dir", type=str, default=None, help="Override cache directory (e.g., /path/to/fast/nvme)")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
     parser.add_argument("--epochs", type=int, default=3, help="Number of timed epochs")
     parser.add_argument("--warmup", type=int, default=1, help="Number of warmup epochs")
     parser.add_argument("--num-workers", type=int, default=8, help="Workers for StreamingDataLoader")
+    parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results (e.g., 'nolan-25')")
     parser.add_argument("--output", type=str, default=None, help="Output JSON path")
     args = parser.parse_args()
 
     # Print machine info
-    machine_info = get_machine_info()
+    machine_info = get_machine_info(args.machine_name)
     print(machine_info)
 
     # Load dataset
@@ -190,9 +194,18 @@ def main():
 
     dataset = SlipstreamDataset(
         remote_dir=args.dataset,
+        cache_dir=args.cache_dir,
         decode_images=False,
     )
     print(f"Dataset: {len(dataset):,} samples")
+
+    # Report cache drive info
+    cache_path = dataset.cache_path
+    print(f"Cache path: {cache_path}")
+    cache_drive = get_drive_info(cache_path)
+    print(f"Cache drive: {cache_drive['type']} (device: {cache_drive['device']})")
+    if cache_drive['size_gb'] and cache_drive['free_gb']:
+        print(f"Cache drive size: {cache_drive['size_gb']:.1f} GB total, {cache_drive['free_gb']:.1f} GB free")
 
     # Build/load optimized cache
     print("\nBuilding/loading optimized cache...")
@@ -246,9 +259,9 @@ def main():
     if args.output:
         save_results(results, machine_info, args.output, "raw_io")
     else:
-        # Default output path
-        hostname = machine_info.hostname.replace(".", "_")
-        output_path = Path(__file__).parent / "results" / f"raw_io_{hostname}.json"
+        # Default output path uses machine_name (sanitized)
+        name = machine_info.machine_name.replace(".", "_").replace(" ", "_")
+        output_path = Path(__file__).parent / "results" / f"raw_io_{name}.json"
         save_results(results, machine_info, output_path, "raw_io")
 
 

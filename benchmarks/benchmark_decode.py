@@ -26,6 +26,7 @@ from tqdm import tqdm
 from benchmarks.utils import (
     BenchmarkResult,
     format_results_table,
+    get_drive_info,
     get_machine_info,
     save_results,
 )
@@ -134,17 +135,19 @@ def benchmark_decode(
 def main():
     parser = argparse.ArgumentParser(description="Benchmark decode performance")
     parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help="Dataset path (S3 or local)")
+    parser.add_argument("--cache-dir", type=str, default=None, help="Override cache directory (e.g., /path/to/fast/nvme)")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
     parser.add_argument("--epochs", type=int, default=3, help="Number of timed epochs")
     parser.add_argument("--warmup", type=int, default=1, help="Number of warmup epochs")
     parser.add_argument("--num-workers", type=int, default=8, help="CPU decoder workers")
     parser.add_argument("--target-size", type=int, default=224, help="Target crop size")
+    parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results (e.g., 'nolan-25')")
     parser.add_argument("--output", type=str, default=None, help="Output JSON path")
     parser.add_argument("--skip-gpu", action="store_true", help="Skip GPU benchmarks")
     args = parser.parse_args()
 
     # Print machine info
-    machine_info = get_machine_info()
+    machine_info = get_machine_info(args.machine_name)
     print(machine_info)
 
     # Load dataset
@@ -154,13 +157,19 @@ def main():
 
     dataset = SlipstreamDataset(
         remote_dir=args.dataset,
+        cache_dir=args.cache_dir,
         decode_images=False,
     )
     print(f"Dataset: {len(dataset):,} samples")
 
+    # Report cache drive info
+    cache_path = dataset.cache_path
+    print(f"Cache path: {cache_path}")
+    cache_drive = get_drive_info(cache_path)
+    print(f"Cache drive: {cache_drive['type']} (device: {cache_drive['device']})")
+
     # Build/load optimized cache
     print("\nBuilding/loading optimized cache...")
-    cache_path = dataset.cache_path
     if OptimizedCache.exists(cache_path):
         cache = OptimizedCache.load(cache_path)
     else:
@@ -258,8 +267,8 @@ def main():
     if args.output:
         save_results(results, machine_info, args.output, "decode")
     else:
-        hostname = machine_info.hostname.replace(".", "_")
-        output_path = Path(__file__).parent / "results" / f"decode_{hostname}.json"
+        name = machine_info.machine_name.replace(".", "_").replace(" ", "_")
+        output_path = Path(__file__).parent / "results" / f"decode_{name}.json"
         save_results(results, machine_info, output_path, "decode")
 
 
