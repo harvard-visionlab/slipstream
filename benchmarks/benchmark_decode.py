@@ -230,7 +230,8 @@ def benchmark_numba_decode(
 ) -> BenchmarkResult:
     """Benchmark Numba decoder throughput.
 
-    Uses Numba JIT for crop param generation + ThreadPoolExecutor for decode.
+    Uses Numba prange + C extension for parallel decode (FFCV-style).
+    For decode-only, uses pre-allocated buffer path for maximum performance.
     """
     num_samples = len(cache)
     num_batches = (num_samples + batch_size - 1) // batch_size
@@ -244,7 +245,22 @@ def benchmark_numba_decode(
 
     name = f"NumbaBatchDecoder{crop_str}"
 
+    # Pre-allocate buffers for decode-only path
+    # This matches the FFCV-style pattern: pre-allocated output buffers
+    decode_only_buffer = None
+    if with_crop is None:
+        # For decode-only, pre-allocate the largest possible buffer
+        # Get max dimensions from first batch
+        first_batch = cache.load_batch(indices[:batch_size], fields=["image"])
+        max_h = int(np.max(first_batch["image"]["heights"]))
+        max_w = int(np.max(first_batch["image"]["widths"]))
+        # Estimate max dimensions across dataset (add 20% margin)
+        max_h = int(max_h * 1.2)
+        max_w = int(max_w * 1.2)
+        decode_only_buffer = np.zeros((batch_size, max_h, max_w, 3), dtype=np.uint8)
+
     def run_epoch():
+        nonlocal decode_only_buffer
         total_samples = 0
         for i in tqdm(range(num_batches), leave=False):
             batch_start = i * batch_size
@@ -268,14 +284,22 @@ def benchmark_numba_decode(
                     scale=(0.08, 1.0),
                 )
             elif with_crop == "center":
-                # Returns list of numpy arrays
+                # Returns array [B, crop_size, crop_size, 3]
                 images = decoder.decode_batch_center_crop(
                     data, sizes, heights, widths,
                     crop_size=target_size,
                 )
             else:
-                # Returns list of numpy arrays
-                images = decoder.decode_batch(data, sizes, heights, widths)
+                # Decode-only: use pre-allocated buffer (FFCV-style)
+                # This is the fast path - no per-image extraction
+                max_h = int(np.max(heights))
+                max_w = int(np.max(widths))
+                if decode_only_buffer.shape[1] < max_h or decode_only_buffer.shape[2] < max_w:
+                    # Reallocate if needed
+                    decode_only_buffer = np.zeros((batch_size, max_h, max_w, 3), dtype=np.uint8)
+                images = decoder.decode_batch_to_buffer(
+                    data, sizes, heights, widths, decode_only_buffer
+                )
 
             total_samples += actual_batch_size
         return total_samples

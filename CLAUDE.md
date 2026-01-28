@@ -147,6 +147,43 @@ Benchmark environments: macOS laptop (CPU), GPU workstation, cluster
 
 ---
 
+## Benchmark Results (Measured)
+
+All benchmarks on **machina** (GPU workstation), ImageNet-1k val (50k samples), batch_size=256.
+
+### Raw I/O (no decode)
+
+| System | Samples/sec | vs FFCV | Status |
+|--------|-------------|---------|--------|
+| **Slipstream OptimizedCache** | **938,674** | **2.27x** | ✅ Exceeds target |
+| **Slipstream Loader (simple)** | **774,801** | **1.87x** | ✅ Exceeds target |
+| Slipstream Loader (threaded) | 393,245 | 0.95x | Threading overhead |
+| FFCV | 413,413 | baseline | Reference |
+| litdata-mmap PageAligned | 365,553 | 0.88x | |
+| litdata-mmap FFCVStyle | 355,827 | 0.86x | |
+
+**Target was 480k+ img/s → Achieved 775k-939k img/s (1.6-2x target)**
+
+### CPU Decode + Transforms
+
+| System | Decode Only | + CenterCrop | + RRC | Status |
+|--------|-------------|--------------|-------|--------|
+| **Slipstream NumbaBatchDecoder** | TBD | TBD | TBD | 🔄 In progress |
+| FFCV Reference | ~11k | ~11k | ~15.7k | Target |
+| litdata-mmap NumbaCropDecoder | ~11k | ~11k | ~10k | Reference |
+
+**Target: Match FFCV's ~15k samples/sec for decode + RRC**
+
+### GPU Decode + Transforms
+
+| System | Decode Only | + RRC | Status |
+|--------|-------------|-------|--------|
+| **Slipstream GPUDecoder** | TBD | TBD | ⬜ Not started |
+| FFCV Reference | ~11k | ~10k | Target |
+| litdata-mmap nvImageCodec | ~10k | ~10.1k | Reference |
+
+---
+
 ## Project Structure
 
 ```
