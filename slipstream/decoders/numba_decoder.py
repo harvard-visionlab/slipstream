@@ -1129,11 +1129,9 @@ class NumbaBatchDecoder:
             target_size, target_size,
         )
 
-        # Convert to tensor [B, C, H, W] — no copy, torch wraps numpy
-        result = torch.from_numpy(dest_buffer[:batch_size])
-        result = result.permute(0, 3, 1, 2).contiguous()  # [B, H, W, C] -> [B, C, H, W]
-
-        return result
+        # Return view (no copy — caller should not hold reference across batches)
+        # Tensor conversion + permute to [B, C, H, W] should happen in the pipeline
+        return dest_buffer[:batch_size]
 
     def get_profile_stats(self) -> dict:
         """Get profiling stats from the C++ layer.
