@@ -48,7 +48,68 @@ __all__ = [
     "is_image_bytes",
     "ensure_lightning_symlink_on_cluster",
     "get_default_cache_dir",
+    "list_collate_fn",
 ]
+
+
+def list_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+    """Collate function that keeps variable-sized fields as lists.
+
+    Use this with PyTorch DataLoader when you have variable-sized images
+    or other fields that can't be stacked into tensors.
+
+    Example:
+        from slipstream import SlipstreamDataset, list_collate_fn
+        from torch.utils.data import DataLoader
+
+        dataset = SlipstreamDataset(remote_dir="s3://...", decode_images=False)
+        loader = DataLoader(
+            dataset,
+            batch_size=256,
+            num_workers=8,
+            collate_fn=list_collate_fn,
+        )
+
+    Args:
+        batch: List of sample dicts from the dataset
+
+    Returns:
+        Dict with field names as keys. Numeric fields are stacked into tensors,
+        variable-sized fields (bytes, images, strings) are kept as lists.
+    """
+    if not batch:
+        return {}
+
+    result: dict[str, Any] = {}
+    first = batch[0]
+
+    for key in first.keys():
+        values = [sample[key] for sample in batch]
+        first_val = values[0]
+
+        # Try to stack numeric types into tensors
+        if isinstance(first_val, (int, float)):
+            result[key] = torch.tensor(values)
+        elif isinstance(first_val, np.ndarray) and first_val.dtype.kind in 'iufb':
+            # Numeric numpy arrays with same shape
+            try:
+                stacked = np.stack(values)
+                result[key] = torch.from_numpy(stacked)
+            except ValueError:
+                # Different shapes, keep as list
+                result[key] = values
+        elif isinstance(first_val, torch.Tensor):
+            # Try to stack tensors
+            try:
+                result[key] = torch.stack(values)
+            except RuntimeError:
+                # Different shapes, keep as list
+                result[key] = values
+        else:
+            # Bytes, strings, PIL Images, variable-sized arrays -> keep as list
+            result[key] = values
+
+    return result
 
 
 def get_default_cache_dir() -> pathlib.Path:
@@ -309,6 +370,62 @@ class SlipstreamDataset(LitDataStreamingDataset):
 
         # Detect field types from first sample
         self._set_field_types()
+
+    @property
+    def cache_path(self) -> pathlib.Path | None:
+        """Get the local cache directory path.
+
+        Note: This is named cache_path (not cache_dir) to avoid conflicting
+        with the parent class's cache_dir attribute.
+
+        Returns:
+            Path to the local cache directory, or None if using remote-only mode.
+        """
+        # First check if parent class set cache_dir (from LitData's internal resolution)
+        parent_cache = getattr(super(), 'cache_dir', None)
+        if parent_cache is not None:
+            if hasattr(parent_cache, 'path'):
+                return pathlib.Path(parent_cache.path)
+            if isinstance(parent_cache, str):
+                return pathlib.Path(parent_cache)
+
+        if self.input_dir is None:
+            return None
+
+        # Dir object with explicit cache
+        if hasattr(self.input_dir, "path") and self.input_dir.path:
+            return pathlib.Path(self.input_dir.path)
+
+        # String path (local directory)
+        if isinstance(self.input_dir, str):
+            # Check if it's a local path vs remote URL
+            if not self.input_dir.startswith(("s3://", "gs://", "http://", "https://")):
+                return pathlib.Path(self.input_dir)
+
+        # Remote URL without explicit cache - LitData uses default cache location
+        # We can try to find it, but it's complex (hash-based subdirectories)
+        return None
+
+    @property
+    def remote_dir(self) -> str | None:
+        """Get the remote URL if using remote storage.
+
+        Returns:
+            Remote URL string, or None if using local-only mode.
+        """
+        if self.input_dir is None:
+            return None
+
+        # Dir object with URL
+        if hasattr(self.input_dir, "url") and self.input_dir.url:
+            return self.input_dir.url
+
+        # String that looks like a URL
+        if isinstance(self.input_dir, str):
+            if self.input_dir.startswith(("s3://", "gs://", "http://", "https://")):
+                return self.input_dir
+
+        return None
 
     def _resolve_input_dir(
         self,

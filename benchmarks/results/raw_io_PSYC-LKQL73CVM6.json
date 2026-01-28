@@ -1,0 +1,70 @@
+{
+  "benchmark": "raw_io",
+  "machine": {
+    "hostname": "PSYC-LKQL73CVM6",
+    "platform": "Darwin",
+    "platform_version": "24.6.0",
+    "architecture": "arm64",
+    "cpu_model": "Apple M4 Pro",
+    "cpu_cores_physical": 14,
+    "cpu_cores_logical": 14,
+    "ram_gb": 48.0,
+    "python_version": "3.11.13",
+    "pytorch_version": "2.10.0",
+    "cuda_available": false,
+    "cuda_version": null,
+    "gpu_name": null,
+    "gpu_memory_gb": null,
+    "drive_type": "SSD",
+    "timestamp": "2026-01-27T23:22:05.812375"
+  },
+  "results": [
+    {
+      "name": "OptimizedCache.load_batch (image)",
+      "samples_per_sec": 992338.7651479738,
+      "total_samples": 50000,
+      "elapsed_sec": 0.1512498753145337,
+      "num_epochs": 3,
+      "warmup_epochs": 1,
+      "metadata": {
+        "field": "image",
+        "batch_size": 256
+      }
+    },
+    {
+      "name": "OptimizedCache.load_batch (label)",
+      "samples_per_sec": 174056452.48991045,
+      "total_samples": 50000,
+      "elapsed_sec": 0.0008630841039121151,
+      "num_epochs": 3,
+      "warmup_epochs": 1,
+      "metadata": {
+        "field": "label",
+        "batch_size": 256
+      }
+    },
+    {
+      "name": "SlipstreamLoader (raw, no pipelines)",
+      "samples_per_sec": 164548.31942485846,
+      "total_samples": 50000,
+      "elapsed_sec": 0.9122932497411966,
+      "num_epochs": 3,
+      "warmup_epochs": 1,
+      "metadata": {
+        "batch_size": 256
+      }
+    },
+    {
+      "name": "StreamingDataLoader (8 workers)",
+      "samples_per_sec": 2905.651195520864,
+      "total_samples": 50000,
+      "elapsed_sec": 51.74619941646233,
+      "num_epochs": 3,
+      "warmup_epochs": 1,
+      "metadata": {
+        "batch_size": 256,
+        "num_workers": 8
+      }
+    }
+  ]
+}
