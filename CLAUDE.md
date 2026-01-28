@@ -230,6 +230,18 @@ slipstream/
 
 ---
 
+## Important Notes for Claude
+
+### DO NOT run benchmarks directly
+The benchmark scripts output progress bars that consume excessive tokens. Instead:
+1. Prepare code changes
+2. Ask the user to run benchmarks
+3. User will paste the results back
+
+Example: "Please run `uv run python benchmarks/benchmark_decode.py --numba-only --epochs 1 --warmup 1 --batch-size 256 --skip-streaming` and paste the results."
+
+---
+
 ## Development Commands
 
 ```bash

@@ -184,7 +184,8 @@ def benchmark_decode(
         total = run_epoch()
         elapsed = time.perf_counter() - start
         rate = total / elapsed
-        warmup_results.append({"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        warmup_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
         print(f"    Warmup {i + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
 
     # Timed epochs
@@ -194,7 +195,8 @@ def benchmark_decode(
         total = run_epoch()
         elapsed = time.perf_counter() - start
         rate = total / elapsed
-        epoch_results.append({"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        epoch_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
         print(f"  Epoch {epoch + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
 
     avg_rate = np.mean([r["samples_per_sec"] for r in epoch_results])
@@ -217,23 +219,148 @@ def benchmark_decode(
     )
 
 
+def benchmark_numba_decode(
+    cache,
+    decoder,
+    batch_size: int,
+    num_epochs: int,
+    num_warmup: int,
+    with_crop: str | None = None,  # None, "rrc", "center"
+    target_size: int = 224,
+) -> BenchmarkResult:
+    """Benchmark Numba decoder throughput.
+
+    Uses Numba JIT for crop param generation + ThreadPoolExecutor for decode.
+    """
+    num_samples = len(cache)
+    num_batches = (num_samples + batch_size - 1) // batch_size
+    indices = np.arange(num_samples, dtype=np.int64)
+
+    crop_str = ""
+    if with_crop == "rrc":
+        crop_str = " + RRC"
+    elif with_crop == "center":
+        crop_str = " + CenterCrop"
+
+    name = f"NumbaBatchDecoder{crop_str}"
+
+    def run_epoch():
+        total_samples = 0
+        for i in tqdm(range(num_batches), leave=False):
+            batch_start = i * batch_size
+            batch_end = min(batch_start + batch_size, num_samples)
+            batch_indices = indices[batch_start:batch_end]
+            actual_batch_size = len(batch_indices)
+
+            # Load raw data
+            batch_data = cache.load_batch(batch_indices, fields=["image"])
+            data = batch_data["image"]["data"]
+            sizes = batch_data["image"]["sizes"]
+            heights = batch_data["image"]["heights"]
+            widths = batch_data["image"]["widths"]
+
+            # Decode
+            if with_crop == "rrc":
+                # Returns tensor [B, 3, target_size, target_size]
+                images = decoder.decode_batch_random_crop(
+                    data, sizes, heights, widths,
+                    target_size=target_size,
+                    scale=(0.08, 1.0),
+                )
+            elif with_crop == "center":
+                # Returns list of numpy arrays
+                images = decoder.decode_batch_center_crop(
+                    data, sizes, heights, widths,
+                    crop_size=target_size,
+                )
+            else:
+                # Returns list of numpy arrays
+                images = decoder.decode_batch(data, sizes, heights, widths)
+
+            total_samples += actual_batch_size
+        return total_samples
+
+    # Warmup
+    print(f"\n{name}:")
+    print(f"  Warmup ({num_warmup} epoch(s)):")
+    warmup_results = []
+    for i in range(num_warmup):
+        start = time.perf_counter()
+        total = run_epoch()
+        elapsed = time.perf_counter() - start
+        rate = total / elapsed
+        warmup_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        print(f"    Warmup {i + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
+
+    # Timed epochs
+    epoch_results = []
+    for epoch in range(num_epochs):
+        start = time.perf_counter()
+        total = run_epoch()
+        elapsed = time.perf_counter() - start
+        rate = total / elapsed
+        epoch_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        print(f"  Epoch {epoch + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
+
+    avg_rate = np.mean([r["samples_per_sec"] for r in epoch_results])
+    print(f"  Average: {avg_rate:,.0f} samples/sec")
+
+    return BenchmarkResult(
+        name=name,
+        samples_per_sec=avg_rate,
+        total_samples=epoch_results[0]["total_samples"],
+        elapsed_sec=sum(r["elapsed_sec"] for r in epoch_results),
+        num_epochs=num_epochs,
+        warmup_epochs=num_warmup,
+        per_epoch_results=warmup_results + epoch_results,
+        metadata={
+            "decoder": "NumbaBatchDecoder",
+            "with_crop": with_crop,
+            "target_size": target_size,
+            "batch_size": batch_size,
+        },
+    )
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark decode performance")
-    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help="Dataset path (S3 or local)")
-    parser.add_argument("--cache-dir", type=str, default=None, help="Override cache directory (e.g., /path/to/fast/nvme)")
-    parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
-    parser.add_argument("--epochs", type=int, default=3, help="Number of timed epochs")
-    parser.add_argument("--warmup", type=int, default=1, help="Number of warmup epochs")
-    parser.add_argument("--num-workers", type=int, default=8, help="CPU decoder workers")
-    parser.add_argument("--target-size", type=int, default=224, help="Target crop size")
-    parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results (e.g., 'nolan-25')")
-    parser.add_argument("--save", action="store_true", help="Save results to JSON file")
-    parser.add_argument("--output", type=str, default=None, help="Output JSON path (implies --save)")
-    parser.add_argument("--skip-cpu", action="store_true", help="Skip CPU benchmarks (jump to GPU)")
-    parser.add_argument("--skip-gpu", action="store_true", help="Skip GPU benchmarks")
-    parser.add_argument("--skip-streaming", action="store_true", help="Skip slow StreamingDataLoader benchmark")
-    parser.add_argument("--dct", action="store_true", help="Include DCT-space crop benchmarks (slower, for comparison)")
-    parser.add_argument("--scaled", action="store_true", help="Include scaled decode benchmarks (experimental, currently slower)")
+    parser = argparse.ArgumentParser(
+        description="Benchmark decode performance")
+    parser.add_argument("--dataset", type=str,
+                        default=DEFAULT_DATASET, help="Dataset path (S3 or local)")
+    parser.add_argument("--cache-dir", type=str, default=None,
+                        help="Override cache directory (e.g., /path/to/fast/nvme)")
+    parser.add_argument("--batch-size", type=int,
+                        default=256, help="Batch size")
+    parser.add_argument("--epochs", type=int, default=3,
+                        help="Number of timed epochs")
+    parser.add_argument("--warmup", type=int, default=1,
+                        help="Number of warmup epochs")
+    parser.add_argument("--num-workers", type=int,
+                        default=12, help="CPU decoder workers")
+    parser.add_argument("--target-size", type=int,
+                        default=224, help="Target crop size")
+    parser.add_argument("--machine-name", type=str, default=None,
+                        help="Machine name for results (e.g., 'nolan-25')")
+    parser.add_argument("--save", action="store_true",
+                        help="Save results to JSON file")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Output JSON path (implies --save)")
+    parser.add_argument("--skip-cpu", action="store_true",
+                        help="Skip CPU benchmarks (jump to GPU)")
+    parser.add_argument("--skip-gpu", action="store_true",
+                        help="Skip GPU benchmarks")
+    parser.add_argument("--skip-streaming", action="store_true",
+                        help="Skip slow StreamingDataLoader benchmark")
+    parser.add_argument("--dct", action="store_true",
+                        help="Include DCT-space crop benchmarks (slower, for comparison)")
+    parser.add_argument("--scaled", action="store_true",
+                        help="Include scaled decode benchmarks (experimental, currently slower)")
+    parser.add_argument("--numba", action="store_true",
+                        help="Include Numba JIT decoder benchmarks (FFCV-style)")
+    parser.add_argument("--numba-only", action="store_true",
+                        help="Only run Numba benchmarks")
     args = parser.parse_args()
 
     # Print machine info
@@ -256,7 +383,8 @@ def main():
     cache_path = dataset.cache_path
     print(f"Cache path: {cache_path}")
     cache_drive = get_drive_info(cache_path)
-    print(f"Cache drive: {cache_drive['type']} (device: {cache_drive['device']})")
+    print(
+        f"Cache drive: {cache_drive['type']} (device: {cache_drive['device']})")
 
     # Build/load optimized cache
     print("\nBuilding/loading optimized cache...")
@@ -267,6 +395,45 @@ def main():
     print(f"Cache: {len(cache):,} samples")
 
     results = []
+
+    # Numba decoder benchmarks (FFCV-style)
+    if args.numba or args.numba_only:
+        from slipstream.decoders import check_numba_decoder_available, NumbaBatchDecoder
+
+        if check_numba_decoder_available():
+            numba_decoder = NumbaBatchDecoder(num_threads=args.num_workers)
+            print(f"\nNumba Decoder: {numba_decoder}")
+
+            # 1. Numba decode only
+            result = benchmark_numba_decode(
+                cache, numba_decoder, args.batch_size, args.epochs, args.warmup,
+                with_crop=None,
+            )
+            results.append(result)
+
+            # 2. Numba decode + RandomResizedCrop
+            result = benchmark_numba_decode(
+                cache, numba_decoder, args.batch_size, args.epochs, args.warmup,
+                with_crop="rrc", target_size=args.target_size,
+            )
+            results.append(result)
+
+            # 3. Numba decode + CenterCrop
+            result = benchmark_numba_decode(
+                cache, numba_decoder, args.batch_size, args.epochs, args.warmup,
+                with_crop="center", target_size=args.target_size,
+            )
+            results.append(result)
+
+            numba_decoder.shutdown()
+        else:
+            print("\nNumba decoder not available (build libslipstream first)")
+
+    # Skip other benchmarks if --numba-only
+    if args.numba_only:
+        args.skip_cpu = True
+        args.skip_gpu = True
+        args.skip_streaming = True
 
     # CPU decoder benchmarks
     if not args.skip_cpu:
@@ -363,7 +530,8 @@ def main():
         else:
             print("\nnvImageCodec not available, using fallback GPU decoder...")
             if torch.cuda.is_available():
-                gpu_fallback = GPUDecoderFallback(device=0, num_workers=args.num_workers)
+                gpu_fallback = GPUDecoderFallback(
+                    device=0, num_workers=args.num_workers)
                 print(f"GPU Fallback Decoder: {gpu_fallback}")
 
                 # 4. GPU fallback decode + RRC
@@ -394,6 +562,8 @@ def main():
     print("  CPU Decode + RRC:   ~10k samples/sec")
     print("  CPU Decode + CC:    ~11k samples/sec")
     print("  GPU Decode + RRC:   ~10-11k samples/sec (nvImageCodec)")
+    print("  Numba Decode + RRC: ~15k samples/sec (FFCV-style, target)")
+    print("  FFCV Reference:     ~15.7k samples/sec")
 
     # Save results (only if --save or --output specified)
     if args.output:
