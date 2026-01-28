@@ -31,6 +31,7 @@ extern "C" {
 
 // Thread-local storage keys for TurboJPEG handles
 static pthread_key_t key_tj_decompressor;
+static pthread_key_t key_tj_transformer;
 static pthread_once_t key_once = PTHREAD_ONCE_INIT;
 
 /**
@@ -39,6 +40,7 @@ static pthread_once_t key_once = PTHREAD_ONCE_INIT;
  */
 static void make_keys() {
     pthread_key_create(&key_tj_decompressor, NULL);
+    pthread_key_create(&key_tj_transformer, NULL);
 }
 
 /**
@@ -52,6 +54,19 @@ static tjhandle get_decompressor() {
         pthread_setspecific(key_tj_decompressor, decompressor);
     }
     return decompressor;
+}
+
+/**
+ * Get or create thread-local TurboJPEG transformer handle.
+ */
+static tjhandle get_transformer() {
+    pthread_once(&key_once, make_keys);
+    tjhandle transformer = (tjhandle)pthread_getspecific(key_tj_transformer);
+    if (transformer == NULL) {
+        transformer = tjInitTransform();
+        pthread_setspecific(key_tj_transformer, transformer);
+    }
+    return transformer;
 }
 
 /**
@@ -82,6 +97,201 @@ int jpeg_header(
         *out_height = (uint32_t)height;
     }
     return result;
+}
+
+/**
+ * Get MCU block size based on JPEG subsampling.
+ * MCU (Minimum Coded Unit) alignment is required for tjTransform crop.
+ */
+static int get_mcu_size(int subsamp) {
+    switch (subsamp) {
+        case TJSAMP_420:  return 16;  // 4:2:0 - most common
+        case TJSAMP_422:  return 16;  // 4:2:2
+        case TJSAMP_440:  return 16;  // 4:4:0
+        default:          return 8;   // 4:4:4, gray, etc.
+    }
+}
+
+/**
+ * Align value down to nearest multiple of alignment.
+ */
+static int align_down(int value, int alignment) {
+    return (value / alignment) * alignment;
+}
+
+/**
+ * FFCV-style JPEG decode with crop in compressed domain.
+ *
+ * This is the key optimization: tjTransform() crops the JPEG data BEFORE
+ * decompression, which is much faster than decoding the full image then cropping.
+ *
+ * The crop must be MCU-aligned (8 or 16 pixels depending on subsampling).
+ * We align down to MCU boundaries and track the offset for final pixel-level crop.
+ *
+ * @param input_buffer   Raw JPEG bytes
+ * @param input_size     Size of JPEG data
+ * @param output_buffer  Pre-allocated output buffer (must fit final output!)
+ * @param temp_buffer    Temporary buffer for decoded image (must fit MCU-aligned crop)
+ * @param src_height     Original image height
+ * @param src_width      Original image width
+ * @param crop_y         Crop Y offset (will be MCU-aligned internally)
+ * @param crop_x         Crop X offset (will be MCU-aligned internally)
+ * @param crop_h         Crop height
+ * @param crop_w         Crop width
+ * @param target_h       Final output height (after resize)
+ * @param target_w       Final output width (after resize)
+ * @param hflip          Horizontal flip (true/false)
+ * @return 0 on success, negative on error
+ */
+int imdecode_crop(
+    unsigned char *input_buffer,
+    uint64_t input_size,
+    unsigned char *output_buffer,
+    unsigned char *temp_buffer,
+    uint32_t src_height,
+    uint32_t src_width,
+    uint32_t crop_y,
+    uint32_t crop_x,
+    uint32_t crop_h,
+    uint32_t crop_w,
+    uint32_t target_h,
+    uint32_t target_w,
+    int hflip
+) {
+    tjhandle decompressor = get_decompressor();
+    tjhandle transformer = get_transformer();
+
+    // Get JPEG header info (need subsampling for MCU alignment)
+    int width, height, subsamp, colorspace;
+    int result = tjDecompressHeader3(
+        decompressor, input_buffer, input_size,
+        &width, &height, &subsamp, &colorspace
+    );
+    if (result != 0) return result;
+
+    // Get MCU size for alignment
+    int mcu = get_mcu_size(subsamp);
+
+    // Align crop coordinates to MCU boundaries
+    int aligned_x = align_down(crop_x, mcu);
+    int aligned_y = align_down(crop_y, mcu);
+
+    // Calculate MCU-aligned crop dimensions (extend to cover original crop)
+    int aligned_w = align_down(crop_x + crop_w + mcu - 1, mcu) - aligned_x;
+    int aligned_h = align_down(crop_y + crop_h + mcu - 1, mcu) - aligned_y;
+
+    // Clamp to image boundaries
+    if (aligned_x + aligned_w > width) aligned_w = width - aligned_x;
+    if (aligned_y + aligned_h > height) aligned_h = height - aligned_y;
+
+    // Track pixel offset from MCU-aligned crop to actual crop
+    int pixel_offset_x = crop_x - aligned_x;
+    int pixel_offset_y = crop_y - aligned_y;
+
+    // Set up tjTransform for crop (and optional hflip)
+    tjtransform xform;
+    memset(&xform, 0, sizeof(tjtransform));
+    xform.r.x = aligned_x;
+    xform.r.y = aligned_y;
+    xform.r.w = aligned_w;
+    xform.r.h = aligned_h;
+    xform.options = TJXOPT_CROP;
+    if (hflip) {
+        xform.op = TJXOP_HFLIP;
+    }
+
+    // Allocate buffer for transformed (cropped) JPEG
+    unsigned char *crop_jpeg = NULL;
+    unsigned long crop_jpeg_size = 0;
+
+    // Perform the JPEG-domain crop
+    result = tjTransform(
+        transformer, input_buffer, input_size,
+        1, &crop_jpeg, &crop_jpeg_size,
+        &xform, TJFLAG_FASTDCT
+    );
+    if (result != 0) {
+        if (crop_jpeg) tjFree(crop_jpeg);
+        return result;
+    }
+
+    // Find optimal scale factor for the cropped JPEG
+    int num_factors = 0;
+    tjscalingfactor *factors = tjGetScalingFactors(&num_factors);
+    int best_idx = -1;
+    int best_pixels = aligned_w * aligned_h;
+
+    if (factors != NULL) {
+        for (int i = 0; i < num_factors; i++) {
+            int scaled_w = TJSCALED(aligned_w, factors[i]);
+            int scaled_h = TJSCALED(aligned_h, factors[i]);
+
+            // Need enough resolution for the target output
+            // Scale the pixel offset region too
+            int scaled_crop_w = (int)(crop_w * scaled_w / (float)aligned_w + 0.5f);
+            int scaled_crop_h = (int)(crop_h * scaled_h / (float)aligned_h + 0.5f);
+
+            if (scaled_crop_w >= (int)target_w && scaled_crop_h >= (int)target_h) {
+                int pixels = scaled_w * scaled_h;
+                if (pixels < best_pixels) {
+                    best_pixels = pixels;
+                    best_idx = i;
+                }
+            }
+        }
+    }
+
+    // Calculate decode dimensions
+    int decode_w, decode_h;
+    tjscalingfactor sf;
+    if (best_idx >= 0) {
+        sf = factors[best_idx];
+        decode_w = TJSCALED(aligned_w, sf);
+        decode_h = TJSCALED(aligned_h, sf);
+    } else {
+        sf.num = 1;
+        sf.denom = 1;
+        decode_w = aligned_w;
+        decode_h = aligned_h;
+    }
+
+    // Decompress the cropped JPEG
+    result = tjDecompress2(
+        decompressor, crop_jpeg, crop_jpeg_size, temp_buffer,
+        decode_w, 0, decode_h, TJPF_RGB, TJFLAG_FASTDCT | TJFLAG_NOREALLOC
+    );
+    tjFree(crop_jpeg);
+    if (result != 0) return result;
+
+    // Scale pixel offsets to match decode dimensions
+    int scaled_offset_x = (int)(pixel_offset_x * decode_w / (float)aligned_w + 0.5f);
+    int scaled_offset_y = (int)(pixel_offset_y * decode_h / (float)aligned_h + 0.5f);
+    int final_crop_w = (int)(crop_w * decode_w / (float)aligned_w + 0.5f);
+    int final_crop_h = (int)(crop_h * decode_h / (float)aligned_h + 0.5f);
+
+    // Clamp final crop dimensions
+    if (scaled_offset_x + final_crop_w > decode_w) {
+        final_crop_w = decode_w - scaled_offset_x;
+    }
+    if (scaled_offset_y + final_crop_h > decode_h) {
+        final_crop_h = decode_h - scaled_offset_y;
+    }
+
+    // If hflip was applied, adjust the x offset
+    if (hflip) {
+        scaled_offset_x = decode_w - scaled_offset_x - final_crop_w;
+    }
+
+    // Final crop + resize using stb
+    int stride = decode_w * 3;
+    uint8_t *crop_start = temp_buffer + scaled_offset_y * stride + scaled_offset_x * 3;
+    unsigned char *resize_result = stbir_resize_uint8_linear(
+        crop_start, final_crop_w, final_crop_h, stride,
+        output_buffer, target_w, target_h, 0,
+        STBIR_RGB
+    );
+
+    return resize_result != NULL ? 0 : -1;
 }
 
 /**
