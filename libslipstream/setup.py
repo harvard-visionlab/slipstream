@@ -40,8 +40,25 @@ if use_opencv:
 else:
     print("Building without OpenCV (resize_crop disabled)")
 
+# Linux-specific paths (libjpeg-turbo from package or manual install)
+if sys.platform == "linux":
+    include_dirs.extend([
+        "/usr/libjpeg-turbo/include",
+        "/opt/libjpeg-turbo/include",
+    ])
+    library_dirs.extend([
+        "/usr/libjpeg-turbo/lib64",
+        "/usr/libjpeg-turbo/lib",
+        "/opt/libjpeg-turbo/lib64",
+        "/opt/libjpeg-turbo/lib",
+    ])
+    extra_link_args.extend([
+        "-Wl,-rpath,/usr/libjpeg-turbo/lib64",
+        "-Wl,-rpath,/opt/libjpeg-turbo/lib64",
+    ])
+
 # macOS-specific paths
-if sys.platform == "darwin":
+elif sys.platform == "darwin":
     # Homebrew paths for libjpeg-turbo
     homebrew_prefix = os.environ.get("HOMEBREW_PREFIX", "/opt/homebrew")
     include_dirs.extend([
