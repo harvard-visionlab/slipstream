@@ -155,7 +155,8 @@ class GPUDecoder:
             )
 
         self.device = device
-        self.use_cvcuda_resize = use_cvcuda_resize and check_cvcuda_available()
+        # Temporarily disable CV-CUDA to test if it's the bottleneck
+        self.use_cvcuda_resize = False  # use_cvcuda_resize and check_cvcuda_available()
         self.max_batch_size = max_batch_size
 
         # Initialize nvImageCodec decoder
