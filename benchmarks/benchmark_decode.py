@@ -28,6 +28,7 @@ from benchmarks.utils import (
     format_results_table,
     get_drive_info,
     get_machine_info,
+    run_benchmark,
     save_results,
 )
 
@@ -36,13 +37,57 @@ from benchmarks.utils import (
 DEFAULT_DATASET = "s3://visionlab-datasets/imagenet1k/pre-processed/s256-l512-jpgbytes-q100-streaming/val/"
 
 
+def benchmark_streaming_dataloader(
+    dataset,
+    batch_size: int,
+    num_workers: int,
+    num_epochs: int,
+    num_warmup: int,
+) -> BenchmarkResult:
+    """Benchmark StreamingDataLoader with image decoding (baseline)."""
+    from litdata import StreamingDataLoader
+    from torchvision import transforms
+
+    from slipstream import list_collate_fn
+
+    # Create a dataset that decodes images
+    decode_transform = transforms.Compose([
+        transforms.ToTensor(),
+    ])
+
+    loader = StreamingDataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        drop_last=False,
+        collate_fn=list_collate_fn,
+    )
+
+    def count_samples(batch):
+        if isinstance(batch, dict):
+            img_data = batch.get("image")
+            if isinstance(img_data, list):
+                return len(img_data)
+        return batch_size
+
+    return run_benchmark(
+        name=f"StreamingDataLoader ({num_workers} workers, raw)",
+        iterator_fn=lambda: loader,
+        count_fn=count_samples,
+        num_epochs=num_epochs,
+        num_warmup=num_warmup,
+        metadata={"batch_size": batch_size, "num_workers": num_workers},
+    )
+
+
 def benchmark_decode(
     cache,
     decoder,
     batch_size: int,
     num_epochs: int,
     num_warmup: int,
-    with_crop: str | None = None,  # None, "rrc", "center"
+    with_crop: str | None = None,  # None, "rrc", "center", "rrc_fast", "center_fast"
     target_size: int = 224,
 ) -> BenchmarkResult:
     """Benchmark decode throughput."""
@@ -52,11 +97,23 @@ def benchmark_decode(
 
     crop_str = ""
     if with_crop == "rrc":
-        crop_str = " + RandomResizedCrop"
+        crop_str = " + RRC"
     elif with_crop == "center":
         crop_str = " + CenterCrop"
+    elif with_crop == "rrc_fast":
+        crop_str = " + RRC (scaled)"
+    elif with_crop == "center_fast":
+        crop_str = " + CenterCrop (scaled)"
 
     name = f"{type(decoder).__name__}{crop_str}"
+
+    # Pre-allocate output tensor for fast methods
+    output_tensor = None
+    if with_crop in ("rrc_fast", "center_fast"):
+        output_tensor = torch.zeros(
+            (batch_size, 3, target_size, target_size),
+            dtype=torch.uint8,
+        )
 
     def run_epoch():
         total_samples = 0
@@ -83,6 +140,19 @@ def benchmark_decode(
                 images = decoder.decode_batch_center_crop(
                     data, sizes, heights, widths,
                     crop_size=target_size,
+                )
+            elif with_crop == "rrc_fast":
+                images = decoder.decode_batch_random_crop_to_tensor(
+                    data, sizes, heights, widths,
+                    target_size=target_size,
+                    scale=(0.08, 1.0),
+                    output=output_tensor,
+                )
+            elif with_crop == "center_fast":
+                images = decoder.decode_batch_center_crop_to_tensor(
+                    data, sizes, heights, widths,
+                    crop_size=target_size,
+                    output=output_tensor,
                 )
             else:
                 images = decoder.decode_batch(data, sizes)
@@ -145,6 +215,8 @@ def main():
     parser.add_argument("--save", action="store_true", help="Save results to JSON file")
     parser.add_argument("--output", type=str, default=None, help="Output JSON path (implies --save)")
     parser.add_argument("--skip-gpu", action="store_true", help="Skip GPU benchmarks")
+    parser.add_argument("--skip-streaming", action="store_true", help="Skip slow StreamingDataLoader benchmark")
+    parser.add_argument("--scaled", action="store_true", help="Include scaled decode benchmarks (experimental, currently slower)")
     args = parser.parse_args()
 
     # Print machine info
@@ -206,6 +278,22 @@ def main():
     )
     results.append(result)
 
+    # Experimental scaled decode benchmarks (optional, currently slower)
+    if args.scaled:
+        # 4. CPU decode + RandomResizedCrop (scaled)
+        result = benchmark_decode(
+            cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
+            with_crop="rrc_fast", target_size=args.target_size,
+        )
+        results.append(result)
+
+        # 5. CPU decode + CenterCrop (scaled)
+        result = benchmark_decode(
+            cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
+            with_crop="center_fast", target_size=args.target_size,
+        )
+        results.append(result)
+
     cpu_decoder.shutdown()
 
     # GPU decoder benchmarks (if available)
@@ -252,6 +340,13 @@ def main():
                 results.append(result)
 
                 gpu_fallback.shutdown()
+
+    # StreamingDataLoader baseline (optional)
+    if not args.skip_streaming:
+        result = benchmark_streaming_dataloader(
+            dataset, args.batch_size, args.num_workers, args.epochs, args.warmup
+        )
+        results.append(result)
 
     # Summary
     print("\n" + "=" * 60)

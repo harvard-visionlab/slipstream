@@ -423,6 +423,142 @@ class CenterCrop(BatchTransform):
         return f"CenterCrop(size={self.size}, device='{self._device_str}')"
 
 
+class ResizeCenterCrop(BatchTransform):
+    """Resize shortest edge then center crop - standard validation transform.
+
+    This is the standard ImageNet validation transform:
+    1. Resize image so shortest edge = resize_size
+    2. Center crop to crop_size x crop_size
+
+    Args:
+        resize_size: Target size for shortest edge (default 256)
+        crop_size: Final crop size (default 224)
+        device: Device for output tensors
+        num_workers: CPU workers for decoding
+
+    Example:
+        rcc = ResizeCenterCrop(256, 224, device='cuda')
+    """
+
+    def __init__(
+        self,
+        resize_size: int = 256,
+        crop_size: int = 224,
+        device: str | int = 'cuda',
+        num_workers: int = 8,
+        max_batch_size: int = 256,
+    ) -> None:
+        self.resize_size = resize_size
+        self.crop_size = crop_size
+        self.num_workers = num_workers
+        self.max_batch_size = max_batch_size
+
+        # Parse device
+        if isinstance(device, int):
+            self._device_idx = device
+            self._device_str = f'cuda:{device}'
+            self._use_gpu = True
+        elif device == 'cpu':
+            self._device_idx = None
+            self._device_str = 'cpu'
+            self._use_gpu = False
+        elif device.startswith('cuda'):
+            if ':' in device:
+                self._device_idx = int(device.split(':')[1])
+            else:
+                self._device_idx = 0
+            self._device_str = f'cuda:{self._device_idx}'
+            self._use_gpu = True
+        else:
+            raise ValueError(f"Invalid device: {device}")
+
+        # Select decoder
+        if self._use_gpu and check_gpu_decoder_available():
+            self._decoder = GPUDecoder(
+                device=self._device_idx,
+                max_batch_size=max_batch_size,
+            )
+            self._decoder_type = 'gpu'
+        elif self._use_gpu and torch.cuda.is_available():
+            self._decoder = GPUDecoderFallback(
+                device=self._device_idx,
+                num_workers=num_workers,
+            )
+            self._decoder_type = 'gpu_fallback'
+        else:
+            self._decoder = CPUDecoder(num_workers=num_workers)
+            self._decoder_type = 'cpu'
+
+    def __call__(self, batch_data: dict[str, Any]) -> torch.Tensor:
+        """Decode, resize shortest edge, then center crop."""
+        from torch.nn import functional as F
+
+        data = batch_data['data']
+        sizes = batch_data['sizes']
+        heights = batch_data['heights']
+        widths = batch_data['widths']
+
+        batch_size = len(sizes)
+
+        # Decode full images first
+        if self._decoder_type in ('gpu', 'gpu_fallback'):
+            # GPU path: decode full, then resize+crop
+            images = self._decoder.decode_batch(data, sizes)
+            # images is tensor [B, C, H, W] with varying sizes - need per-image processing
+            # For now, fall back to CPU-style per-image processing
+            images_list = [images[i] for i in range(batch_size)]
+        else:
+            images_list = self._decoder.decode_batch(data, sizes)
+
+        # Process each image: resize shortest edge, then center crop
+        output = torch.zeros(
+            (batch_size, 3, self.crop_size, self.crop_size),
+            dtype=torch.float32,
+            device=self._device_str,
+        )
+
+        for i, img in enumerate(images_list):
+            if isinstance(img, np.ndarray):
+                # CPU decoder returns HWC numpy
+                tensor = torch.from_numpy(img).permute(2, 0, 1).float()
+            else:
+                # GPU decoder returns CHW tensor
+                tensor = img.float()
+
+            _, h, w = tensor.shape
+
+            # Resize so shortest edge = resize_size
+            if h < w:
+                new_h = self.resize_size
+                new_w = int(w * self.resize_size / h)
+            else:
+                new_w = self.resize_size
+                new_h = int(h * self.resize_size / w)
+
+            tensor = F.interpolate(
+                tensor.unsqueeze(0),
+                size=(new_h, new_w),
+                mode='bilinear',
+                align_corners=False,
+            ).squeeze(0)
+
+            # Center crop
+            start_h = (new_h - self.crop_size) // 2
+            start_w = (new_w - self.crop_size) // 2
+            cropped = tensor[:, start_h:start_h + self.crop_size, start_w:start_w + self.crop_size]
+
+            output[i] = cropped.to(self._device_str)
+
+        return output.to(torch.uint8)
+
+    def shutdown(self) -> None:
+        if hasattr(self._decoder, 'shutdown'):
+            self._decoder.shutdown()
+
+    def __repr__(self) -> str:
+        return f"ResizeCenterCrop(resize={self.resize_size}, crop={self.crop_size}, device='{self._device_str}')"
+
+
 class Normalize(BatchTransform):
     """ImageNet-style normalization for batch tensors.
 
@@ -626,6 +762,7 @@ __all__ = [
     "Decoder",
     "RandomResizedCrop",
     "CenterCrop",
+    "ResizeCenterCrop",
     "Normalize",
     "ToDevice",
     # Convenience
