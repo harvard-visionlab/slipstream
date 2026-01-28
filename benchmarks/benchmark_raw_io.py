@@ -101,6 +101,7 @@ def benchmark_slipstream_raw(
     batch_size: int,
     num_epochs: int,
     num_warmup: int,
+    use_threading: bool = True,
 ) -> BenchmarkResult:
     """Benchmark SlipstreamLoader with no pipelines (raw bytes)."""
     from slipstream import SlipstreamLoader
@@ -111,6 +112,7 @@ def benchmark_slipstream_raw(
         shuffle=False,
         drop_last=False,
         exclude_fields=["path"],  # Exclude string field for fair comparison
+        use_threading=use_threading,
         # No pipelines = raw data
     )
 
@@ -120,13 +122,14 @@ def benchmark_slipstream_raw(
             return len(img_data["data"])
         return batch_size
 
+    mode = "threaded" if use_threading else "simple"
     result = run_benchmark(
-        name="SlipstreamLoader (raw, no pipelines)",
+        name=f"SlipstreamLoader (raw, {mode})",
         iterator_fn=lambda: loader,
         count_fn=count_samples,
         num_epochs=num_epochs,
         num_warmup=num_warmup,
-        metadata={"batch_size": batch_size},
+        metadata={"batch_size": batch_size, "use_threading": use_threading},
     )
 
     loader.shutdown()
@@ -180,6 +183,7 @@ def main():
     parser.add_argument("--warmup", type=int, default=1, help="Number of warmup epochs")
     parser.add_argument("--num-workers", type=int, default=8, help="Workers for StreamingDataLoader")
     parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results (e.g., 'nolan-25')")
+    parser.add_argument("--skip-streaming", action="store_true", help="Skip slow StreamingDataLoader benchmark")
     parser.add_argument("--output", type=str, default=None, help="Output JSON path")
     args = parser.parse_args()
 
@@ -230,17 +234,26 @@ def main():
     )
     results.append(result)
 
-    # 3. SlipstreamLoader raw
+    # 3. SlipstreamLoader raw (simple - no threading)
     result = benchmark_slipstream_raw(
-        dataset, args.batch_size, args.epochs, args.warmup
+        dataset, args.batch_size, args.epochs, args.warmup, use_threading=False
     )
     results.append(result)
 
-    # 4. StreamingDataLoader baseline
-    result = benchmark_streaming_dataloader(
-        dataset, args.batch_size, args.num_workers, args.epochs, args.warmup
+    # 4. SlipstreamLoader raw (threaded)
+    result = benchmark_slipstream_raw(
+        dataset, args.batch_size, args.epochs, args.warmup, use_threading=True
     )
     results.append(result)
+
+    # 5. StreamingDataLoader baseline (optional)
+    streaming_rate = 0
+    if not args.skip_streaming:
+        result = benchmark_streaming_dataloader(
+            dataset, args.batch_size, args.num_workers, args.epochs, args.warmup
+        )
+        results.append(result)
+        streaming_rate = result.samples_per_sec
 
     # Summary
     print("\n" + "=" * 60)
@@ -248,12 +261,15 @@ def main():
     print("=" * 60)
     print(format_results_table(results))
 
-    # Calculate speedup
-    slipstream_rate = results[2].samples_per_sec
-    streaming_rate = results[3].samples_per_sec
+    # Calculate speedups
+    cache_rate = results[0].samples_per_sec
+    simple_rate = results[2].samples_per_sec
+    threaded_rate = results[3].samples_per_sec
+
+    print(f"\nSlipstreamLoader (simple) vs cache: {simple_rate/cache_rate*100:.1f}% efficiency")
+    print(f"SlipstreamLoader (threaded) vs cache: {threaded_rate/cache_rate*100:.1f}% efficiency")
     if streaming_rate > 0:
-        speedup = slipstream_rate / streaming_rate
-        print(f"\nSlipstreamLoader is {speedup:.1f}x faster than StreamingDataLoader")
+        print(f"SlipstreamLoader (threaded) is {threaded_rate/streaming_rate:.1f}x faster than StreamingDataLoader")
 
     # Save results
     if args.output:

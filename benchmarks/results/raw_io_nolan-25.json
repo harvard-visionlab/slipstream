@@ -17,14 +17,14 @@
     "gpu_name": null,
     "gpu_memory_gb": null,
     "drive_type": "SSD",
-    "timestamp": "2026-01-28T06:34:17.157857"
+    "timestamp": "2026-01-28T06:49:34.948875"
   },
   "results": [
     {
       "name": "OptimizedCache.load_batch (image)",
-      "samples_per_sec": 1024493.0105596054,
+      "samples_per_sec": 1004975.6656236207,
       "total_samples": 50000,
-      "elapsed_sec": 0.1464345008134842,
+      "elapsed_sec": 0.14935412490740418,
       "num_epochs": 3,
       "warmup_epochs": 1,
       "metadata": {
@@ -34,9 +34,9 @@
     },
     {
       "name": "OptimizedCache.load_batch (label)",
-      "samples_per_sec": 191459204.63524303,
+      "samples_per_sec": 178825110.57604244,
       "total_samples": 50000,
-      "elapsed_sec": 0.0007841675542294979,
+      "elapsed_sec": 0.0008423756808042526,
       "num_epochs": 3,
       "warmup_epochs": 1,
       "metadata": {
@@ -45,26 +45,27 @@
       }
     },
     {
-      "name": "SlipstreamLoader (raw, no pipelines)",
-      "samples_per_sec": 809286.9715692765,
+      "name": "SlipstreamLoader (raw, simple)",
+      "samples_per_sec": 899928.8957521316,
       "total_samples": 50000,
-      "elapsed_sec": 0.18607170833274722,
-      "num_epochs": 3,
-      "warmup_epochs": 1,
-      "metadata": {
-        "batch_size": 256
-      }
-    },
-    {
-      "name": "StreamingDataLoader (8 workers)",
-      "samples_per_sec": 2450.1894730808467,
-      "total_samples": 50000,
-      "elapsed_sec": 61.220335042104125,
+      "elapsed_sec": 0.1675989581272006,
       "num_epochs": 3,
       "warmup_epochs": 1,
       "metadata": {
         "batch_size": 256,
-        "num_workers": 8
+        "use_threading": false
+      }
+    },
+    {
+      "name": "SlipstreamLoader (raw, threaded)",
+      "samples_per_sec": 841256.010302141,
+      "total_samples": 50000,
+      "elapsed_sec": 0.1783097917214036,
+      "num_epochs": 3,
+      "warmup_epochs": 1,
+      "metadata": {
+        "batch_size": 256,
+        "use_threading": true
       }
     }
   ]

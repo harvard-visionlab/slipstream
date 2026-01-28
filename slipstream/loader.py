@@ -115,6 +115,7 @@ class SlipstreamLoader:
         exclude_fields: list[str] | None = None,
         force_rebuild: bool = False,
         verbose: bool = True,
+        use_threading: bool = True,
     ) -> None:
         """Initialize SlipstreamLoader.
 
@@ -132,6 +133,8 @@ class SlipstreamLoader:
             exclude_fields: List of field names to exclude from loading
             force_rebuild: Force rebuilding the optimized cache
             verbose: Print progress messages
+            use_threading: Use background thread for prefetching (default True).
+                Set to False for debugging to isolate threading overhead.
         """
         self.dataset = dataset
         self.batch_size = batch_size
@@ -141,6 +144,7 @@ class SlipstreamLoader:
         self.image_field = image_field
         self.exclude_fields = set(exclude_fields or [])
         self.verbose = verbose
+        self.use_threading = use_threading
 
         # Parse device for non-pipelined fields
         if isinstance(device, str):
@@ -226,6 +230,75 @@ class SlipstreamLoader:
         Uses zero-copy loading: JIT functions write directly into pre-allocated
         buffers, and only slot indices are passed through the queue.
         """
+        if self.use_threading:
+            yield from self._iter_threaded()
+        else:
+            yield from self._iter_simple()
+
+    def _iter_simple(self):
+        """Simple iteration without threading (for debugging/profiling)."""
+        indices = np.arange(len(self.cache), dtype=np.int64)
+        if self.shuffle:
+            np.random.shuffle(indices)
+
+        num_batches = len(indices) // self.batch_size
+        if not self.drop_last and len(indices) % self.batch_size != 0:
+            num_batches += 1
+
+        image_storage = self.cache.fields.get(self.image_field)
+        has_image_field = image_storage is not None and self._data_banks is not None
+
+        for batch_idx in range(num_batches):
+            start = batch_idx * self.batch_size
+            end = min(start + self.batch_size, len(indices))
+            batch_indices = indices[start:end]
+            actual_size = len(batch_indices)
+
+            # Build output batch
+            batch = {
+                'indices': torch.from_numpy(batch_indices).to(self._device_str),
+            }
+
+            # Load and add image data
+            if has_image_field:
+                image_storage.load_batch_into(
+                    batch_indices,
+                    self._data_banks[0],
+                    self._size_banks[0],
+                    self._height_banks[0],
+                    self._width_banks[0],
+                    parallel=True,
+                )
+                image_data = {
+                    'data': self._data_banks[0][:actual_size],
+                    'sizes': self._size_banks[0][:actual_size],
+                    'heights': self._height_banks[0][:actual_size],
+                    'widths': self._width_banks[0][:actual_size],
+                }
+
+                if self.image_field in self.pipelines:
+                    batch[self.image_field] = self._apply_pipeline(
+                        self.image_field, image_data
+                    )
+                else:
+                    batch[self.image_field] = image_data
+
+            # Load other fields
+            for field_name in self._fields_to_load:
+                if field_name == self.image_field:
+                    continue
+                field_data = self.cache.fields[field_name].load_batch(batch_indices)['data']
+                if field_name in self.pipelines:
+                    batch[field_name] = self._apply_pipeline(field_name, field_data)
+                elif isinstance(field_data, np.ndarray):
+                    batch[field_name] = torch.from_numpy(field_data).to(self._device_str)
+                else:
+                    batch[field_name] = field_data
+
+            yield batch
+
+    def _iter_threaded(self):
+        """Threaded iteration with async prefetching."""
         indices = np.arange(len(self.cache), dtype=np.int64)
         if self.shuffle:
             np.random.shuffle(indices)
