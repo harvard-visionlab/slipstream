@@ -442,33 +442,32 @@ class GPUDecoder:
                     src_tensor, (th, tw, 3), cvcuda.Interp.LINEAR
                 )
 
-                # Convert cvcuda.Tensor back to torch
-                # Use DLPack protocol (standard inter-framework tensor exchange)
-                dst_hwc = torch.from_dlpack(resized_cvcuda)
+                # Convert cvcuda.Tensor back to torch via __cuda_array_interface__
+                dst_hwc = torch.as_tensor(resized_cvcuda, device=f"cuda:{self.device}")
                 output[i] = dst_hwc.permute(2, 0, 1)
 
             return output
-        else:
-            # PyTorch resize fallback
-            from torch.nn import functional as fn
 
-            output = torch.zeros(
-                (batch_size, 3, th, tw),
-                dtype=torch.uint8,
-                device=f"cuda:{self.device}",
+        # PyTorch resize path (also GPU-accelerated via CUDA)
+        from torch.nn import functional as fn
+
+        output = torch.zeros(
+            (batch_size, 3, th, tw),
+            dtype=torch.uint8,
+            device=f"cuda:{self.device}",
+        )
+
+        for i, tensor in enumerate(tensors):
+            t_float = tensor.unsqueeze(0).float()
+            resized = fn.interpolate(
+                t_float,
+                size=(th, tw),
+                mode="bilinear",
+                align_corners=False,
             )
+            output[i] = resized.squeeze(0).to(torch.uint8)
 
-            for i, tensor in enumerate(tensors):
-                t_float = tensor.unsqueeze(0).float()
-                resized = fn.interpolate(
-                    t_float,
-                    size=(th, tw),
-                    mode="bilinear",
-                    align_corners=False,
-                )
-                output[i] = resized.squeeze(0).to(torch.uint8)
-
-            return output
+        return output
 
     def decode_batch_random_crop(
         self,
