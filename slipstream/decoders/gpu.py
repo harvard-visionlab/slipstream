@@ -422,7 +422,8 @@ class GPUDecoder:
         th, tw = target_size
 
         if self.use_cvcuda_resize and cvcuda is not None:
-            # CV-CUDA resize path (using new API with cvcuda.as_tensor)
+            # CV-CUDA resize path
+            # API: cvcuda.resize(src, shape, interp) -> returns new cvcuda.Tensor
             output = torch.zeros(
                 (batch_size, 3, th, tw),
                 dtype=torch.uint8,
@@ -436,16 +437,14 @@ class GPUDecoder:
                 # Create cvcuda tensor wrapper
                 src_tensor = cvcuda.as_tensor(hwc, "HWC")
 
-                # Create destination tensor
-                dst_hwc = torch.zeros(
-                    (th, tw, 3), dtype=torch.uint8, device=f"cuda:{self.device}"
+                # Resize using CV-CUDA - returns new cvcuda.Tensor
+                resized_cvcuda = cvcuda.resize(
+                    src_tensor, (th, tw, 3), cvcuda.Interp.LINEAR
                 )
-                dst_tensor = cvcuda.as_tensor(dst_hwc, "HWC")
 
-                # Resize using CV-CUDA
-                cvcuda.resize(src_tensor, dst_tensor, cvcuda.Interp.LINEAR)
-
-                # Convert back to CHW and store
+                # Convert cvcuda.Tensor back to torch
+                # Use DLPack protocol (standard inter-framework tensor exchange)
+                dst_hwc = torch.from_dlpack(resized_cvcuda)
                 output[i] = dst_hwc.permute(2, 0, 1)
 
             return output
