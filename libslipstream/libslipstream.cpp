@@ -112,6 +112,183 @@ int imdecode_simple(
 }
 
 /**
+ * JPEG decode with TurboJPEG scaling (FFCV-style optimization).
+ *
+ * TurboJPEG can decode directly to smaller sizes (1/2, 1/4, 1/8, etc.) during
+ * the IDCT step with almost no extra cost. This is key to FFCV's performance
+ * for RandomResizedCrop - decode at a smaller size when the crop is small.
+ *
+ * @param input_buffer   Raw JPEG bytes
+ * @param input_size     Size of JPEG data
+ * @param output_buffer  Pre-allocated output buffer (must fit scaled size!)
+ * @param src_height     Original image height (from metadata)
+ * @param src_width      Original image width (from metadata)
+ * @param scale_num      Scale numerator (e.g., 1 for 1/2)
+ * @param scale_denom    Scale denominator (e.g., 2 for 1/2)
+ * @param out_height     Output: actual decoded height
+ * @param out_width      Output: actual decoded width
+ * @return 0 on success, negative on error
+ */
+int imdecode_scaled(
+    unsigned char *input_buffer,
+    uint64_t input_size,
+    unsigned char *output_buffer,
+    uint32_t src_height,
+    uint32_t src_width,
+    uint32_t scale_num,
+    uint32_t scale_denom,
+    uint32_t *out_height,
+    uint32_t *out_width
+) {
+    tjhandle decompressor = get_decompressor();
+
+    // Calculate scaled dimensions using TurboJPEG's macro
+    tjscalingfactor sf = {(int)scale_num, (int)scale_denom};
+    int scaled_width = TJSCALED(src_width, sf);
+    int scaled_height = TJSCALED(src_height, sf);
+
+    // Output the actual dimensions
+    *out_width = (uint32_t)scaled_width;
+    *out_height = (uint32_t)scaled_height;
+
+    // Decode at scaled size
+    int result = tjDecompress2(
+        decompressor, input_buffer, input_size, output_buffer,
+        scaled_width, 0, scaled_height, TJPF_RGB, TJFLAG_FASTDCT | TJFLAG_NOREALLOC
+    );
+
+    return result;
+}
+
+/**
+ * Combined scaled decode + crop + resize in one call.
+ *
+ * This is the FFCV-style optimized path:
+ * 1. Choose optimal scale factor based on crop size
+ * 2. Decode at that scale (fewer pixels!)
+ * 3. Crop from the smaller decoded image
+ * 4. Resize to target size
+ *
+ * @param input_buffer   Raw JPEG bytes
+ * @param input_size     Size of JPEG data
+ * @param temp_buffer    Temporary buffer for decoded image (must fit scaled size)
+ * @param output_buffer  Final output buffer [target_h * target_w * 3]
+ * @param src_height     Original image height
+ * @param src_width      Original image width
+ * @param crop_y         Crop Y offset (in original image coords)
+ * @param crop_x         Crop X offset (in original image coords)
+ * @param crop_h         Crop height (in original image coords)
+ * @param crop_w         Crop width (in original image coords)
+ * @param target_h       Final output height
+ * @param target_w       Final output width
+ * @return 0 on success, negative on error
+ */
+int decode_crop_resize(
+    unsigned char *input_buffer,
+    uint64_t input_size,
+    unsigned char *temp_buffer,
+    unsigned char *output_buffer,
+    uint32_t src_height,
+    uint32_t src_width,
+    uint32_t crop_y,
+    uint32_t crop_x,
+    uint32_t crop_h,
+    uint32_t crop_w,
+    uint32_t target_h,
+    uint32_t target_w
+) {
+    tjhandle decompressor = get_decompressor();
+
+    // Get available scaling factors from TurboJPEG
+    int num_factors = 0;
+    tjscalingfactor *factors = tjGetScalingFactors(&num_factors);
+    if (factors == NULL || num_factors == 0) {
+        // Fallback: no scaling available, decode at full size
+        int result = tjDecompress2(
+            decompressor, input_buffer, input_size, temp_buffer,
+            src_width, 0, src_height, TJPF_RGB, TJFLAG_FASTDCT | TJFLAG_NOREALLOC
+        );
+        if (result != 0) return result;
+
+        // Crop and resize from full image
+        int stride = src_width * 3;
+        uint8_t *crop_start = temp_buffer + crop_y * stride + crop_x * 3;
+        unsigned char *resize_result = stbir_resize_uint8_linear(
+            crop_start, crop_w, crop_h, stride,
+            output_buffer, target_w, target_h, 0,
+            STBIR_RGB
+        );
+        return resize_result != NULL ? 0 : -1;
+    }
+
+    // Find the smallest scale that still covers the crop region
+    // We need scaled_crop_dim >= target_dim for good quality
+    int best_idx = -1;
+    int best_pixels = src_width * src_height;  // Start with full size
+
+    for (int i = 0; i < num_factors; i++) {
+        int scaled_w = TJSCALED(src_width, factors[i]);
+        int scaled_h = TJSCALED(src_height, factors[i]);
+
+        // Calculate where the crop region maps to in scaled coords
+        // Scale the crop coordinates proportionally
+        int scaled_crop_w = (crop_w * scaled_w + src_width - 1) / src_width;
+        int scaled_crop_h = (crop_h * scaled_h + src_height - 1) / src_height;
+
+        // Ensure the scaled crop is at least as large as target for quality
+        // (we'll resize down, not up significantly)
+        if (scaled_crop_w >= (int)target_w && scaled_crop_h >= (int)target_h) {
+            int pixels = scaled_w * scaled_h;
+            if (pixels < best_pixels) {
+                best_pixels = pixels;
+                best_idx = i;
+            }
+        }
+    }
+
+    // Decode at best scale (or full size if no suitable scale found)
+    int scaled_w, scaled_h;
+    if (best_idx >= 0) {
+        scaled_w = TJSCALED(src_width, factors[best_idx]);
+        scaled_h = TJSCALED(src_height, factors[best_idx]);
+    } else {
+        scaled_w = src_width;
+        scaled_h = src_height;
+    }
+
+    int result = tjDecompress2(
+        decompressor, input_buffer, input_size, temp_buffer,
+        scaled_w, 0, scaled_h, TJPF_RGB, TJFLAG_FASTDCT | TJFLAG_NOREALLOC
+    );
+    if (result != 0) return result;
+
+    // Map crop coordinates to scaled image
+    int scaled_crop_x = (crop_x * scaled_w) / src_width;
+    int scaled_crop_y = (crop_y * scaled_h) / src_height;
+    int scaled_crop_w = (crop_w * scaled_w + src_width - 1) / src_width;
+    int scaled_crop_h = (crop_h * scaled_h + src_height - 1) / src_height;
+
+    // Clamp to valid bounds
+    if (scaled_crop_x + scaled_crop_w > scaled_w) {
+        scaled_crop_w = scaled_w - scaled_crop_x;
+    }
+    if (scaled_crop_y + scaled_crop_h > scaled_h) {
+        scaled_crop_h = scaled_h - scaled_crop_y;
+    }
+
+    // Crop and resize
+    int stride = scaled_w * 3;
+    uint8_t *crop_start = temp_buffer + scaled_crop_y * stride + scaled_crop_x * 3;
+    unsigned char *resize_result = stbir_resize_uint8_linear(
+        crop_start, scaled_crop_w, scaled_crop_h, stride,
+        output_buffer, target_w, target_h, 0,
+        STBIR_RGB
+    );
+
+    return resize_result != NULL ? 0 : -1;
+}
+
+/**
  * Crop and resize image region using stb_image_resize2.
  *
  * This is the FFCV-style fused crop+resize operation, designed to be
