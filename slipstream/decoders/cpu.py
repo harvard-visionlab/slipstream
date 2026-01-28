@@ -352,14 +352,64 @@ class CPUDecoder:
         scale: tuple[float, float] = (0.08, 1.0),
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
     ) -> list[NDArray[np.uint8]]:
-        """Decode batch with RandomResizedCrop during decode.
+        """Decode batch with RandomResizedCrop (decode full, then crop).
 
-        This is ~2x faster than decode + crop because:
-        1. Crop happens in DCT space (before decompression)
-        2. Less data to decompress after crop
+        Fast approach: decode full image then numpy slice. This is faster
+        than DCT-space cropping for typical ImageNet-sized images (~256-512px)
+        because the DCT crop overhead exceeds decode savings.
+
+        Args:
+            data: Raw JPEG data [B, max_size]
+            sizes: Actual size of each JPEG [B]
+            heights: Pre-stored heights [B] (optional)
+            widths: Pre-stored widths [B] (optional)
+            target_size: Final desired size (for reference)
+            scale: Range of size relative to original
+            ratio: Range of aspect ratios
+
+        Returns:
+            List of cropped RGB images, each [H, W, 3]
+        """
+        executor = self._ensure_executor()
+        batch_size = len(sizes)
+
+        jpeg_bytes_list = [bytes(data[i, :int(sizes[i])]) for i in range(batch_size)]
+        dims_provided = heights is not None and widths is not None
+
+        def decode_then_crop(args: tuple[int, bytes]) -> NDArray[np.uint8]:
+            i, jpeg_bytes = args
+
+            # Decode full image first
+            img = self._decode_one(jpeg_bytes)
+            h, w = img.shape[:2]
+
+            # Generate random crop params
+            crop = generate_random_crop_params(w, h, scale=scale, ratio=ratio)
+
+            # Numpy slicing then copy (need copy since we return different sizes)
+            return img[crop.y:crop.y + crop.height, crop.x:crop.x + crop.width].copy()
+
+        args_list = list(enumerate(jpeg_bytes_list))
+        return list(executor.map(decode_then_crop, args_list))
+
+    def decode_batch_random_crop_dct(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray[np.uint64 | np.uint32 | np.int64],
+        heights: NDArray[np.uint32] | None = None,
+        widths: NDArray[np.uint32] | None = None,
+        target_size: int = 224,
+        scale: tuple[float, float] = (0.08, 1.0),
+        ratio: tuple[float, float] = (3 / 4, 4 / 3),
+    ) -> list[NDArray[np.uint8]]:
+        """Decode batch with RandomResizedCrop using DCT-space cropping.
+
+        DCT-space cropping crops in the frequency domain before decompression.
+        This can be faster for very large images (>1024px) but has overhead
+        that makes it slower for typical ImageNet-sized images.
 
         Note: The returned images may need final resize to target_size
-        since DCT-space crop is constrained to MCU boundaries.
+        since DCT-space crop is constrained to MCU boundaries (8x8 or 16x16).
 
         Args:
             data: Raw JPEG data [B, max_size]
@@ -410,9 +460,56 @@ class CPUDecoder:
         widths: NDArray[np.uint32] | None = None,
         crop_size: int = 224,
     ) -> list[NDArray[np.uint8]]:
-        """Decode batch with center crop during decode.
+        """Decode batch with center crop (decode full, then crop).
 
-        For validation/inference where center crop is needed.
+        Fast approach: decode full image then numpy slice. This is faster
+        than DCT-space cropping for typical ImageNet-sized images (~256-512px).
+
+        Args:
+            data: Raw JPEG data [B, max_size]
+            sizes: Actual size of each JPEG [B]
+            heights: Pre-stored heights [B] (optional)
+            widths: Pre-stored widths [B] (optional)
+            crop_size: Size of center crop (square)
+
+        Returns:
+            List of center-cropped RGB images
+        """
+        executor = self._ensure_executor()
+        batch_size = len(sizes)
+
+        jpeg_bytes_list = [bytes(data[i, :int(sizes[i])]) for i in range(batch_size)]
+
+        def decode_then_crop(args: tuple[int, bytes]) -> NDArray[np.uint8]:
+            i, jpeg_bytes = args
+
+            # Decode full image first
+            img = self._decode_one(jpeg_bytes)
+            h, w = img.shape[:2]
+
+            # Calculate center crop coordinates
+            top = (h - crop_size) // 2
+            left = (w - crop_size) // 2
+
+            # Numpy slicing then copy
+            return img[top:top + crop_size, left:left + crop_size].copy()
+
+        args_list = list(enumerate(jpeg_bytes_list))
+        return list(executor.map(decode_then_crop, args_list))
+
+    def decode_batch_center_crop_dct(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray[np.uint64 | np.uint32 | np.int64],
+        heights: NDArray[np.uint32] | None = None,
+        widths: NDArray[np.uint32] | None = None,
+        crop_size: int = 224,
+    ) -> list[NDArray[np.uint8]]:
+        """Decode batch with center crop using DCT-space cropping.
+
+        DCT-space cropping crops in the frequency domain before decompression.
+        This can be faster for very large images (>1024px) but has overhead
+        that makes it slower for typical ImageNet-sized images.
 
         Args:
             data: Raw JPEG data [B, max_size]

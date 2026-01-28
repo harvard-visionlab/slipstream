@@ -98,8 +98,12 @@ def benchmark_decode(
     crop_str = ""
     if with_crop == "rrc":
         crop_str = " + RRC"
+    elif with_crop == "rrc_dct":
+        crop_str = " + RRC (DCT)"
     elif with_crop == "center":
         crop_str = " + CenterCrop"
+    elif with_crop == "center_dct":
+        crop_str = " + CenterCrop (DCT)"
     elif with_crop == "rrc_fast":
         crop_str = " + RRC (scaled)"
     elif with_crop == "center_fast":
@@ -136,8 +140,19 @@ def benchmark_decode(
                     target_size=target_size,
                     scale=(0.08, 1.0),
                 )
+            elif with_crop == "rrc_dct":
+                images = decoder.decode_batch_random_crop_dct(
+                    data, sizes, heights, widths,
+                    target_size=target_size,
+                    scale=(0.08, 1.0),
+                )
             elif with_crop == "center":
                 images = decoder.decode_batch_center_crop(
+                    data, sizes, heights, widths,
+                    crop_size=target_size,
+                )
+            elif with_crop == "center_dct":
+                images = decoder.decode_batch_center_crop_dct(
                     data, sizes, heights, widths,
                     crop_size=target_size,
                 )
@@ -216,6 +231,7 @@ def main():
     parser.add_argument("--output", type=str, default=None, help="Output JSON path (implies --save)")
     parser.add_argument("--skip-gpu", action="store_true", help="Skip GPU benchmarks")
     parser.add_argument("--skip-streaming", action="store_true", help="Skip slow StreamingDataLoader benchmark")
+    parser.add_argument("--dct", action="store_true", help="Include DCT-space crop benchmarks (slower, for comparison)")
     parser.add_argument("--scaled", action="store_true", help="Include scaled decode benchmarks (experimental, currently slower)")
     args = parser.parse_args()
 
@@ -277,6 +293,22 @@ def main():
         with_crop="center", target_size=args.target_size,
     )
     results.append(result)
+
+    # DCT-space crop benchmarks (optional, slower for small images)
+    if args.dct:
+        # 4. CPU decode + RRC (DCT)
+        result = benchmark_decode(
+            cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
+            with_crop="rrc_dct", target_size=args.target_size,
+        )
+        results.append(result)
+
+        # 5. CPU decode + CenterCrop (DCT)
+        result = benchmark_decode(
+            cache, cpu_decoder, args.batch_size, args.epochs, args.warmup,
+            with_crop="center_dct", target_size=args.target_size,
+        )
+        results.append(result)
 
     # Experimental scaled decode benchmarks (optional, currently slower)
     if args.scaled:
@@ -355,9 +387,11 @@ def main():
     print(format_results_table(results))
 
     # Reference targets
-    print("\nReference targets (from litdata-mmap on Linux):")
-    print("  CPU Decode + RRC: ~5.7k samples/sec")
-    print("  GPU Decode + RRC: ~10-11k samples/sec")
+    print("\nReference targets:")
+    print("  CPU Decode only:    ~11k samples/sec")
+    print("  CPU Decode + RRC:   ~10k samples/sec")
+    print("  CPU Decode + CC:    ~11k samples/sec")
+    print("  GPU Decode + RRC:   ~10-11k samples/sec (nvImageCodec)")
 
     # Save results (only if --save or --output specified)
     if args.output:
