@@ -10,8 +10,8 @@ Usage:
 
 import time
 import numpy as np
-from slipstream.dataset import SlipstreamDataset
-from slipstream.optimized_cache import OptimizedCache
+from slipstream import SlipstreamDataset
+from slipstream.cache import OptimizedCache
 from slipstream.decoders.numba_decoder import NumbaBatchDecoder
 
 DATASET_PATH = "s3://visionlab-datasets/imagenet1k/pre-processed/s256-l512-jpgbytes-q100-streaming/val/"
@@ -20,17 +20,29 @@ NUM_BATCHES = 50  # ~12,800 images
 
 def main():
     print("Loading dataset...")
-    dataset = SlipstreamDataset(input_dir=DATASET_PATH, decode_images=False)
-    cache = OptimizedCache(dataset)
-    print(f"Dataset: {len(cache)} samples")
-    print(f"Will profile {NUM_BATCHES} batches x {BATCH_SIZE} = {NUM_BATCHES * BATCH_SIZE} images\n")
+    dataset = SlipstreamDataset(
+        remote_dir=DATASET_PATH,
+        decode_images=False,
+    )
+    print(f"Dataset: {len(dataset):,} samples")
 
-    # Create decoder in profiled mode (uses stb resize but times decode vs resize)
+    cache_path = dataset.cache_path
+    print(f"Cache path: {cache_path}")
+
+    print("Building/loading optimized cache...")
+    if OptimizedCache.exists(cache_path):
+        cache = OptimizedCache.load(cache_path)
+    else:
+        cache = OptimizedCache.build(dataset, cache_path)
+    print(f"Cache: {len(cache):,} samples\n")
+
+    # Create decoder in profiled mode
     decoder = NumbaBatchDecoder(crop_mode="profiled")
     print(f"Decoder: {decoder}")
     print(f"OpenCV available: {decoder.has_opencv()}\n")
 
-    indices = np.arange(len(cache), dtype=np.int64)
+    num_samples = len(cache)
+    indices = np.arange(num_samples, dtype=np.int64)
 
     # Warmup (1 batch for JIT)
     print("Warming up JIT...")
@@ -52,7 +64,7 @@ def main():
     total_samples = 0
     for i in range(NUM_BATCHES):
         batch_start = i * BATCH_SIZE
-        batch_end = min(batch_start + BATCH_SIZE, len(cache))
+        batch_end = min(batch_start + BATCH_SIZE, num_samples)
         batch_indices = indices[batch_start:batch_end]
 
         batch_data = cache.load_batch(batch_indices, fields=["image"])
@@ -90,7 +102,7 @@ def main():
     total_samples = 0
     for i in range(NUM_BATCHES):
         batch_start = i * BATCH_SIZE
-        batch_end = min(batch_start + BATCH_SIZE, len(cache))
+        batch_end = min(batch_start + BATCH_SIZE, num_samples)
         batch_indices = indices[batch_start:batch_end]
 
         batch_data = cache.load_batch(batch_indices, fields=["image"])
