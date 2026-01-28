@@ -22,10 +22,22 @@
 #include <string.h>
 #include <turbojpeg.h>
 #include <pthread.h>
+#include <time.h>
+#include <atomic>
+
+#ifdef USE_OPENCV
+#include <opencv2/imgproc.hpp>
+#endif
 
 // stb_image_resize2 for crop+resize (header-only, no dependencies)
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize2.h"
+
+// Profiling counters (C++ atomics, must be outside extern "C")
+static std::atomic<uint64_t> g_decode_ns{0};
+static std::atomic<uint64_t> g_resize_ns{0};
+static std::atomic<uint64_t> g_decode_count{0};
+static std::atomic<uint64_t> g_resize_count{0};
 
 extern "C" {
 
@@ -588,6 +600,123 @@ int resize_simple(
     );
 
     return result != NULL ? 1 : 0;
+}
+
+// =============================================================================
+// Profiling support
+// =============================================================================
+
+static inline uint64_t now_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+/**
+ * Decode + crop + resize with per-step timing.
+ * Same signature as resize_crop but also does decode.
+ * Accumulates timing into atomic counters readable via get_profile_stats().
+ */
+int decode_and_resize_profiled(
+    int64_t jpeg_p, int64_t jpeg_size,
+    int64_t temp_p, int64_t temp_h, int64_t temp_w,
+    int64_t crop_y, int64_t crop_x, int64_t crop_h, int64_t crop_w,
+    int64_t dest_p, int64_t target_h, int64_t target_w
+) {
+    uint8_t *jpeg = (uint8_t *)jpeg_p;
+    uint8_t *temp = (uint8_t *)temp_p;
+    uint8_t *dest = (uint8_t *)dest_p;
+
+    // Time decode
+    uint64_t t0 = now_ns();
+    tjhandle decompressor = get_decompressor();
+    int result = tjDecompress2(
+        decompressor, jpeg, jpeg_size, temp,
+        (int)temp_w, 0, (int)temp_h, TJPF_RGB, TJFLAG_FASTDCT | TJFLAG_NOREALLOC
+    );
+    uint64_t t1 = now_ns();
+    if (result != 0) return -1;
+
+    // Time resize
+    int source_stride = (int)temp_w * 3;
+    uint8_t *crop_start = temp + crop_y * source_stride + crop_x * 3;
+    unsigned char *resize_result = stbir_resize_uint8_linear(
+        crop_start, (int)crop_w, (int)crop_h, source_stride,
+        dest, (int)target_w, (int)target_h, 0, STBIR_RGB
+    );
+    uint64_t t2 = now_ns();
+
+    g_decode_ns.fetch_add(t1 - t0, std::memory_order_relaxed);
+    g_resize_ns.fetch_add(t2 - t1, std::memory_order_relaxed);
+    g_decode_count.fetch_add(1, std::memory_order_relaxed);
+    g_resize_count.fetch_add(1, std::memory_order_relaxed);
+
+    return resize_result != NULL ? 1 : 0;
+}
+
+/**
+ * Get profiling stats. Returns total nanoseconds and count for decode and resize.
+ * Call reset_profile_stats() between benchmarks.
+ */
+void get_profile_stats(
+    uint64_t *out_decode_ns, uint64_t *out_resize_ns,
+    uint64_t *out_decode_count, uint64_t *out_resize_count
+) {
+    *out_decode_ns = g_decode_ns.load(std::memory_order_relaxed);
+    *out_resize_ns = g_resize_ns.load(std::memory_order_relaxed);
+    *out_decode_count = g_decode_count.load(std::memory_order_relaxed);
+    *out_resize_count = g_resize_count.load(std::memory_order_relaxed);
+}
+
+void reset_profile_stats() {
+    g_decode_ns.store(0, std::memory_order_relaxed);
+    g_resize_ns.store(0, std::memory_order_relaxed);
+    g_decode_count.store(0, std::memory_order_relaxed);
+    g_resize_count.store(0, std::memory_order_relaxed);
+}
+
+// =============================================================================
+// OpenCV resize (optional, built with USE_OPENCV=1)
+// =============================================================================
+
+#ifdef USE_OPENCV
+/**
+ * Crop + resize using OpenCV cv::resize with INTER_AREA.
+ * Same signature as resize_crop for drop-in replacement.
+ */
+int resize_crop_cv(
+    int64_t source_p,
+    int64_t source_h,
+    int64_t source_w,
+    int64_t crop_y,
+    int64_t crop_x,
+    int64_t crop_h,
+    int64_t crop_w,
+    int64_t dest_p,
+    int64_t target_h,
+    int64_t target_w
+) {
+    cv::Mat source((int)source_h, (int)source_w, CV_8UC3, (uint8_t *)source_p);
+    cv::Mat dest((int)target_h, (int)target_w, CV_8UC3, (uint8_t *)dest_p);
+    cv::resize(
+        source.rowRange((int)crop_y, (int)(crop_y + crop_h))
+              .colRange((int)crop_x, (int)(crop_x + crop_w)),
+        dest, dest.size(), 0, 0, cv::INTER_AREA
+    );
+    return 1;
+}
+#endif
+
+/**
+ * Check if OpenCV support was compiled in.
+ * Returns 1 if USE_OPENCV was defined at build time, 0 otherwise.
+ */
+int has_opencv() {
+#ifdef USE_OPENCV
+    return 1;
+#else
+    return 0;
+#endif
 }
 
 /**

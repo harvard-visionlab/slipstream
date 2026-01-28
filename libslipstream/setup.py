@@ -11,6 +11,7 @@ For OpenCV support (enables resize_crop):
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from setuptools import Extension, setup
@@ -36,9 +37,25 @@ if use_opencv:
     libraries.append("opencv_core")
     libraries.append("opencv_imgproc")
     define_macros.append(("USE_OPENCV", "1"))
-    print("Building with OpenCV support (resize_crop enabled)")
+    # Try pkg-config for OpenCV paths (works on most Linux systems)
+    try:
+        cv_cflags = subprocess.check_output(
+            ["pkg-config", "--cflags", "opencv4"], stderr=subprocess.DEVNULL
+        ).decode().strip().split()
+        cv_libs = subprocess.check_output(
+            ["pkg-config", "--libs-only-L", "opencv4"], stderr=subprocess.DEVNULL
+        ).decode().strip().split()
+        for flag in cv_cflags:
+            if flag.startswith("-I"):
+                include_dirs.append(flag[2:])
+        for flag in cv_libs:
+            if flag.startswith("-L"):
+                library_dirs.append(flag[2:])
+        print(f"Building with OpenCV support (pkg-config found)")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("Building with OpenCV support (pkg-config not found, using default paths)")
 else:
-    print("Building without OpenCV (resize_crop disabled)")
+    print("Building without OpenCV (stb_image_resize2 fallback)")
 
 # Linux-specific paths (libjpeg-turbo from package or manual install)
 if sys.platform == "linux":
