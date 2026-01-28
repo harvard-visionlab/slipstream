@@ -421,63 +421,53 @@ class GPUDecoder:
         batch_size = len(tensors)
         th, tw = target_size
 
-        if self.use_cvcuda_resize and cvcuda is not None:
-            # CV-CUDA batched resize using ImageBatchVarShape
-            # This handles variable-sized inputs in a single batched operation
-
-            # Create input ImageBatchVarShape
-            src_batch = cvcuda.ImageBatchVarShape(batch_size)
-            hwc_tensors = []  # Keep references alive
-
-            for tensor in tensors:
-                # Convert CHW to HWC for CV-CUDA
-                hwc = tensor.permute(1, 2, 0).contiguous()
-                hwc_tensors.append(hwc)
-                # Create Image from tensor and add to batch
-                img = cvcuda.as_image(hwc, "HWC")
-                src_batch.pushback(img)
-
-            # All outputs are same size
-            out_sizes = [(tw, th)] * batch_size  # (width, height) format
-
-            # Batched resize - single operation for all images
-            dst_batch = cvcuda.resize(src_batch, out_sizes, cvcuda.Interp.LINEAR)
-
-            # Extract results back to torch tensor
-            output = torch.zeros(
-                (batch_size, 3, th, tw),
-                dtype=torch.uint8,
-                device=f"cuda:{self.device}",
-            )
-
-            for i in range(batch_size):
-                # Get the resized image and convert to torch
-                dst_img = dst_batch[i]
-                dst_hwc = torch.as_tensor(dst_img.cuda(), device=f"cuda:{self.device}")
-                output[i] = dst_hwc.permute(2, 0, 1)
-
-            return output
-
-        # PyTorch resize path (also GPU-accelerated via CUDA)
+        # PyTorch resize path - optimized for batched operation
+        # Strategy: pad all crops to max size, batch resize, extract results
         from torch.nn import functional as fn
 
-        output = torch.zeros(
-            (batch_size, 3, th, tw),
-            dtype=torch.uint8,
-            device=f"cuda:{self.device}",
+        # Find max dimensions in batch
+        max_h = max(t.shape[1] for t in tensors)
+        max_w = max(t.shape[2] for t in tensors)
+
+        # Check if all same size (common case for center crop)
+        all_same_size = all(
+            t.shape[1] == tensors[0].shape[1] and t.shape[2] == tensors[0].shape[2]
+            for t in tensors
         )
 
-        for i, tensor in enumerate(tensors):
-            t_float = tensor.unsqueeze(0).float()
+        if all_same_size:
+            # Fast path: stack and resize in one operation
+            stacked = torch.stack(tensors)  # [B, C, H, W]
+            stacked_float = stacked.float()
             resized = fn.interpolate(
-                t_float,
+                stacked_float,
                 size=(th, tw),
                 mode="bilinear",
                 align_corners=False,
             )
-            output[i] = resized.squeeze(0).to(torch.uint8)
+            return resized.to(torch.uint8)
 
-        return output
+        # Variable sizes: pad to max, batch resize
+        # Pad all tensors to max size
+        padded = torch.zeros(
+            (batch_size, 3, max_h, max_w),
+            dtype=torch.uint8,
+            device=f"cuda:{self.device}",
+        )
+        for i, tensor in enumerate(tensors):
+            c, h, w = tensor.shape
+            padded[i, :, :h, :w] = tensor
+
+        # Single batched resize
+        padded_float = padded.float()
+        resized = fn.interpolate(
+            padded_float,
+            size=(th, tw),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        return resized.to(torch.uint8)
 
     def decode_batch_random_crop(
         self,
