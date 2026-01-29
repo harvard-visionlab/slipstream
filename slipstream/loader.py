@@ -152,11 +152,18 @@ class SlipstreamLoader:
         else:
             self._device_str = f'cuda:{device}'
 
-        # Store pipelines
+        # Store pipelines, detecting multi-pipeline fields
         self.pipelines: dict[str, list[Any]] = {}
+        self._multi_pipeline_fields: set[str] = set()
         if pipelines:
             for field_name, pipeline in pipelines.items():
-                if isinstance(pipeline, (list, tuple)):
+                if (isinstance(pipeline, (list, tuple))
+                    and len(pipeline) > 0
+                    and isinstance(pipeline[0], (list, tuple))):
+                    # Multi-pipeline mode: list of sub-pipelines
+                    self.pipelines[field_name] = [list(p) for p in pipeline]
+                    self._multi_pipeline_fields.add(field_name)
+                elif isinstance(pipeline, (list, tuple)):
                     self.pipelines[field_name] = list(pipeline)
                 else:
                     self.pipelines[field_name] = [pipeline]
@@ -213,16 +220,28 @@ class SlipstreamLoader:
         else:
             self._data_banks = None
 
+    def _apply_single_pipeline(self, pipeline: list[Any], data: Any) -> Any:
+        """Apply a single pipeline (list of transforms) to data."""
+        result = data
+        for transform in pipeline:
+            result = transform(result)
+        return result
+
     def _apply_pipeline(self, field_name: str, data: Any) -> Any:
-        """Apply pipeline transforms to field data."""
+        """Apply pipeline transforms to field data.
+
+        For multi-pipeline fields, returns a list of results (one per sub-pipeline).
+        """
         if field_name not in self.pipelines:
             return data
 
-        result = data
-        for transform in self.pipelines[field_name]:
-            result = transform(result)
+        if field_name in self._multi_pipeline_fields:
+            return [
+                self._apply_single_pipeline(sub_pipeline, data)
+                for sub_pipeline in self.pipelines[field_name]
+            ]
 
-        return result
+        return self._apply_single_pipeline(self.pipelines[field_name], data)
 
     def __iter__(self):
         """Iterate over batches with async prefetching.
@@ -334,6 +353,10 @@ class SlipstreamLoader:
                 actual_batch_size = len(batch_indices)
 
                 # Load image data directly into pre-allocated buffers (ZERO-COPY!)
+                # Use parallel=False here because Numba's workqueue threading
+                # layer is not thread-safe — the main thread may concurrently
+                # run NumbaBatchDecoder (also parallel=True). Sequential mmap
+                # reads are fast enough that this doesn't bottleneck.
                 if has_image_field:
                     image_storage.load_batch_into(
                         batch_indices,
@@ -341,7 +364,7 @@ class SlipstreamLoader:
                         self._size_banks[current_slot],
                         self._height_banks[current_slot],
                         self._width_banks[current_slot],
-                        parallel=True,
+                        parallel=False,
                     )
 
                 # Load other fields (labels are fast - simple array indexing)
@@ -420,9 +443,15 @@ class SlipstreamLoader:
     def shutdown(self) -> None:
         """Release resources."""
         for field_name, pipeline in self.pipelines.items():
-            for transform in pipeline:
-                if hasattr(transform, 'shutdown'):
-                    transform.shutdown()
+            if field_name in self._multi_pipeline_fields:
+                for sub_pipeline in pipeline:
+                    for transform in sub_pipeline:
+                        if hasattr(transform, 'shutdown'):
+                            transform.shutdown()
+            else:
+                for transform in pipeline:
+                    if hasattr(transform, 'shutdown'):
+                        transform.shutdown()
 
     def __del__(self) -> None:
         """Cleanup on deletion."""
@@ -431,8 +460,15 @@ class SlipstreamLoader:
     def __repr__(self) -> str:
         pipeline_strs = []
         for field, pipeline in self.pipelines.items():
-            transforms = [type(t).__name__ for t in pipeline]
-            pipeline_strs.append(f"'{field}': [{', '.join(transforms)}]")
+            if field in self._multi_pipeline_fields:
+                sub_strs = []
+                for sub in pipeline:
+                    transforms = [type(t).__name__ for t in sub]
+                    sub_strs.append(f"[{', '.join(transforms)}]")
+                pipeline_strs.append(f"'{field}': [{', '.join(sub_strs)}]")
+            else:
+                transforms = [type(t).__name__ for t in pipeline]
+                pipeline_strs.append(f"'{field}': [{', '.join(transforms)}]")
 
         pipelines_str = "{" + ", ".join(pipeline_strs) + "}" if pipeline_strs else "{}"
 

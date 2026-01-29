@@ -317,6 +317,27 @@ def _create_decode_with_crop_function() -> Any:
     return Compiler.compile(decode_crop_batch)
 
 
+@njit(parallel=True, cache=True, fastmath=True)
+def _transpose_hwc_to_chw(
+    src: np.ndarray,   # [B, H, W, 3] uint8
+    dst: np.ndarray,   # [B, 3, H, W] uint8
+    batch_size: int,
+) -> None:
+    """Transpose HWC→CHW per-image in parallel.
+
+    Each image (~150KB at 224x224) fits in L1/L2 cache, making this
+    much faster than a bulk transpose of the entire batch.
+    """
+    H = src.shape[1]
+    W = src.shape[2]
+    for i in prange(batch_size):
+        for h in range(H):
+            for w in range(W):
+                dst[i, 0, h, w] = src[i, h, w, 0]
+                dst[i, 1, h, w] = src[i, h, w, 1]
+                dst[i, 2, h, w] = src[i, h, w, 2]
+
+
 # Lazy-loaded compiled functions
 _decode_batch_compiled: Any = None
 _decode_crop_batch_compiled: Any = None
@@ -485,6 +506,7 @@ class NumbaBatchDecoder:
         # Reusable buffers (allocated on first use)
         self._temp_buffer: np.ndarray | None = None
         self._dest_buffer: np.ndarray | None = None
+        self._chw_buffer: np.ndarray | None = None
 
     def _ensure_temp_buffer(self, batch_size: int, max_h: int, max_w: int) -> np.ndarray:
         """Get or allocate temp buffer for decode."""
@@ -494,6 +516,15 @@ class NumbaBatchDecoder:
             self._temp_buffer.shape[2] < max_w):
             self._temp_buffer = np.zeros((batch_size, max_h, max_w, 3), dtype=np.uint8)
         return self._temp_buffer
+
+    def _ensure_chw_buffer(self, batch_size: int, target_h: int, target_w: int) -> np.ndarray:
+        """Get or allocate CHW output buffer."""
+        if (self._chw_buffer is None or
+            self._chw_buffer.shape[0] < batch_size or
+            self._chw_buffer.shape[2] != target_h or
+            self._chw_buffer.shape[3] != target_w):
+            self._chw_buffer = np.zeros((batch_size, 3, target_h, target_w), dtype=np.uint8)
+        return self._chw_buffer
 
     def _ensure_dest_buffer(self, batch_size: int, target_h: int, target_w: int) -> np.ndarray:
         """Get or allocate destination buffer for crop+resize."""
@@ -625,6 +656,103 @@ class NumbaBatchDecoder:
         # Return view (no copy — caller should not hold reference across batches)
         return dest_buffer[:batch_size]
 
+    def decode_batch_resize_crop(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray,
+        heights: NDArray,
+        widths: NDArray,
+        resize_size: int = 256,
+        crop_size: int = 224,
+        destination: NDArray[np.uint8] | None = None,
+    ) -> NDArray[np.uint8]:
+        """Decode batch with resize shortest edge + center crop.
+
+        Standard ImageNet validation transform:
+        1. Decode JPEG
+        2. Resize so shortest edge = resize_size
+        3. Center crop to crop_size x crop_size
+
+        This is implemented as a single fused operation using resize_crop:
+        we compute the crop region that corresponds to resizing the shortest
+        edge to resize_size and then taking a center crop of crop_size.
+
+        Args:
+            data: Padded JPEG data [B, max_size] uint8
+            sizes: Actual JPEG sizes [B]
+            heights: Image heights [B]
+            widths: Image widths [B]
+            resize_size: Target size for shortest edge (default 256)
+            crop_size: Final crop size (default 224)
+            destination: Unused (for API compatibility)
+
+        Returns:
+            Array [B, crop_size, crop_size, 3] uint8
+        """
+        batch_size = len(sizes)
+        max_h = int(np.max(heights))
+        max_w = int(np.max(widths))
+
+        # Ensure dtypes
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+
+        # Compute crop params: resize shortest edge then center crop
+        # Instead of actually resizing first, we compute the equivalent crop
+        # in the original image space.
+        crop_params = np.zeros((batch_size, 4), dtype=np.int32)
+        for i in range(batch_size):
+            h = int(heights[i])
+            w = int(widths[i])
+
+            # After resizing shortest edge to resize_size, what's the scale?
+            if h < w:
+                scale = resize_size / h
+                new_h = resize_size
+                new_w = int(w * scale + 0.5)
+            else:
+                scale = resize_size / w
+                new_w = resize_size
+                new_h = int(h * scale + 0.5)
+
+            # Center crop of crop_size in the resized image
+            # Map back to original image coordinates
+            crop_h_resized = min(crop_size, new_h)
+            crop_w_resized = min(crop_size, new_w)
+            start_y_resized = (new_h - crop_h_resized) // 2
+            start_x_resized = (new_w - crop_w_resized) // 2
+
+            # Map to original coordinates
+            crop_x = int(start_x_resized / scale + 0.5)
+            crop_y = int(start_y_resized / scale + 0.5)
+            crop_w_orig = int(crop_w_resized / scale + 0.5)
+            crop_h_orig = int(crop_h_resized / scale + 0.5)
+
+            # Clamp to image bounds
+            crop_x = max(0, min(crop_x, w - 1))
+            crop_y = max(0, min(crop_y, h - 1))
+            crop_w_orig = max(1, min(crop_w_orig, w - crop_x))
+            crop_h_orig = max(1, min(crop_h_orig, h - crop_y))
+
+            crop_params[i, 0] = crop_x
+            crop_params[i, 1] = crop_y
+            crop_params[i, 2] = crop_w_orig
+            crop_params[i, 3] = crop_h_orig
+
+        # Allocate buffers
+        temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
+        dest_buffer = self._ensure_dest_buffer(batch_size, crop_size, crop_size)
+
+        # Decode + crop + resize
+        self._decode_crop_fn(
+            data, sizes_u64, heights_u32, widths_u32,
+            crop_params, temp_buffer, dest_buffer,
+            crop_size, crop_size,
+        )
+
+        return dest_buffer[:batch_size]
+
     def decode_batch_random_crop(
         self,
         data: NDArray[np.uint8],
@@ -634,6 +762,7 @@ class NumbaBatchDecoder:
         target_size: int = 224,
         scale: tuple[float, float] = (0.08, 1.0),
         ratio: tuple[float, float] = (3.0 / 4.0, 4.0 / 3.0),
+        seed: int | None = None,
         destination: NDArray[np.uint8] | None = None,
     ) -> NDArray[np.uint8]:
         """Decode batch with RandomResizedCrop.
@@ -667,13 +796,21 @@ class NumbaBatchDecoder:
         # Generate random crop parameters
         log_ratio_min = math.log(ratio[0])
         log_ratio_max = math.log(ratio[1])
-        self._seed_counter += 1
+
+        if seed is not None:
+            # Reproducible: use provided seed + auto-incrementing counter
+            self._seed_counter += 1
+            batch_seed = seed + self._seed_counter
+        else:
+            # Non-reproducible: use auto-incrementing counter (original behavior)
+            self._seed_counter += 1
+            batch_seed = self._seed_counter
 
         crop_params = _generate_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
-            self._seed_counter,
+            batch_seed,
         )
 
         # Allocate buffers
@@ -691,10 +828,35 @@ class NumbaBatchDecoder:
         # Tensor conversion + permute to [B, C, H, W] should happen in the pipeline
         return dest_buffer[:batch_size]
 
+    def hwc_to_chw(
+        self,
+        hwc: NDArray[np.uint8],
+        batch_size: int | None = None,
+    ) -> NDArray[np.uint8]:
+        """Transpose [B, H, W, 3] → [B, 3, H, W] using parallel per-image copy.
+
+        Uses Numba prange so each image (~150KB) is transposed in-cache.
+        Much faster than torch's .permute().contiguous() on the full batch.
+
+        Args:
+            hwc: Input array [B, H, W, 3] uint8
+            batch_size: Actual batch size (if hwc is a larger pre-allocated buffer)
+
+        Returns:
+            Array [B, 3, H, W] uint8 (view of pre-allocated buffer)
+        """
+        if batch_size is None:
+            batch_size = hwc.shape[0]
+        H, W = hwc.shape[1], hwc.shape[2]
+        chw_buffer = self._ensure_chw_buffer(batch_size, H, W)
+        _transpose_hwc_to_chw(hwc, chw_buffer, batch_size)
+        return chw_buffer[:batch_size]
+
     def shutdown(self) -> None:
         """Release resources (no-op for this implementation)."""
         self._temp_buffer = None
         self._dest_buffer = None
+        self._chw_buffer = None
 
     def __repr__(self) -> str:
         return f"NumbaBatchDecoder(num_threads={self.num_threads})"

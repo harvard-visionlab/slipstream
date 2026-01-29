@@ -257,7 +257,8 @@ def benchmark_numba_decode(
         # Estimate max dimensions across dataset (add 20% margin)
         max_h = int(max_h * 1.2)
         max_w = int(max_w * 1.2)
-        decode_only_buffer = np.zeros((batch_size, max_h, max_w, 3), dtype=np.uint8)
+        decode_only_buffer = np.zeros(
+            (batch_size, max_h, max_w, 3), dtype=np.uint8)
 
     def run_epoch():
         nonlocal decode_only_buffer
@@ -296,7 +297,8 @@ def benchmark_numba_decode(
                 max_w = int(np.max(widths))
                 if decode_only_buffer.shape[1] < max_h or decode_only_buffer.shape[2] < max_w:
                     # Reallocate if needed
-                    decode_only_buffer = np.zeros((batch_size, max_h, max_w, 3), dtype=np.uint8)
+                    decode_only_buffer = np.zeros(
+                        (batch_size, max_h, max_w, 3), dtype=np.uint8)
                 images = decoder.decode_batch_to_buffer(
                     data, sizes, heights, widths, decode_only_buffer
                 )

@@ -2,15 +2,15 @@
 """Benchmark SlipstreamLoader full pipeline performance.
 
 Tests complete training/validation pipelines with:
-- Async prefetching
-- Decode + crop transforms
-- Normalization
-- Device placement
+- Raw I/O (no pipeline)
+- RandomResizedCrop (training)
+- CenterCrop (validation)
+- 2x RandomResizedCrop (multi-crop SSL)
 
 Usage:
     uv run python benchmarks/benchmark_loader.py
-    uv run python benchmarks/benchmark_loader.py --batch-size 512 --epochs 5
-    uv run python benchmarks/benchmark_loader.py --device cuda --output results/loader.json
+    uv run python benchmarks/benchmark_loader.py --batch-size 256 --epochs 3
+    uv run python benchmarks/benchmark_loader.py --output results/loader.json
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-import torch
 from tqdm import tqdm
 
 from benchmarks.utils import (
@@ -28,7 +27,6 @@ from benchmarks.utils import (
     format_results_table,
     get_drive_info,
     get_machine_info,
-    run_benchmark,
     save_results,
 )
 
@@ -37,82 +35,44 @@ from benchmarks.utils import (
 DEFAULT_DATASET = "s3://visionlab-datasets/imagenet1k/pre-processed/s256-l512-jpgbytes-q100-streaming/val/"
 
 
-def benchmark_streaming_dataloader(
-    dataset,
-    batch_size: int,
-    num_workers: int,
-    num_epochs: int,
-    num_warmup: int,
-) -> BenchmarkResult:
-    """Benchmark StreamingDataLoader (LitData baseline)."""
-    from litdata import StreamingDataLoader
-
-    from slipstream import list_collate_fn
-
-    loader = StreamingDataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        drop_last=False,
-        collate_fn=list_collate_fn,
-    )
-
-    def count_samples(batch):
-        if isinstance(batch, dict):
-            img_data = batch.get("image")
-            if isinstance(img_data, list):
-                return len(img_data)
-        return batch_size
-
-    return run_benchmark(
-        name=f"StreamingDataLoader ({num_workers} workers)",
-        iterator_fn=lambda: loader,
-        count_fn=count_samples,
-        num_epochs=num_epochs,
-        num_warmup=num_warmup,
-        metadata={"batch_size": batch_size, "num_workers": num_workers},
-    )
-
-
 def benchmark_loader(
     dataset,
     batch_size: int,
     num_epochs: int,
     num_warmup: int,
-    pipeline_type: str,  # "train", "val", "raw"
-    device: str = "cpu",
-    num_workers: int = 8,
+    pipeline_type: str,  # "train", "val", "raw", "multi-crop"
+    num_threads: int = 0,
     target_size: int = 224,
     use_threading: bool = True,
 ) -> BenchmarkResult:
     """Benchmark SlipstreamLoader with specified pipeline."""
-    from slipstream import (
-        SlipstreamLoader,
-        RandomResizedCrop,
-        CenterCrop,
-        Normalize,
-    )
+    from slipstream import SlipstreamLoader
+    from slipstream.pipelines import CenterCrop, RandomResizedCrop
 
     mode = "threaded" if use_threading else "simple"
 
-    # Build pipeline based on type
     if pipeline_type == "train":
         pipelines = {
             "image": [
-                RandomResizedCrop(target_size, scale=(0.08, 1.0), device=device, num_workers=num_workers),
-                Normalize(),
+                RandomResizedCrop(target_size, num_threads=num_threads),
             ],
         }
-        name = f"SlipstreamLoader (train RRC, {mode})"
+        name = f"SlipstreamLoader (RRC, {mode})"
     elif pipeline_type == "val":
         pipelines = {
             "image": [
-                CenterCrop(target_size, device=device, num_workers=num_workers),
-                Normalize(),
+                CenterCrop(target_size, num_threads=num_threads),
             ],
         }
-        name = f"SlipstreamLoader (val CenterCrop, {mode})"
+        name = f"SlipstreamLoader (CenterCrop, {mode})"
+    elif pipeline_type == "multi-crop":
+        pipelines = {
+            "image": [
+                [RandomResizedCrop(target_size, num_threads=num_threads)],
+                [RandomResizedCrop(target_size, num_threads=num_threads)],
+            ],
+        }
+        name = f"SlipstreamLoader (2x RRC multi-crop, {mode})"
     else:  # raw
         pipelines = None
         name = f"SlipstreamLoader (raw, {mode})"
@@ -131,17 +91,17 @@ def benchmark_loader(
         total_samples = 0
         for batch in tqdm(loader, leave=False):
             if pipeline_type == "raw":
-                # Raw mode - count from image data dict
                 img_data = batch.get("image")
                 if isinstance(img_data, dict):
                     total_samples += len(img_data["data"])
                 else:
                     total_samples += batch_size
+            elif pipeline_type == "multi-crop":
+                views = batch["image"]
+                total_samples += views[0].shape[0]
             else:
-                # Pipeline mode - count from tensor shape
-                total_samples += batch["image"].shape[0]
-                # Ensure tensor is materialized
-                _ = batch["image"].sum()
+                img = batch["image"]
+                total_samples += img.shape[0]
         return total_samples
 
     # Warmup
@@ -181,10 +141,9 @@ def benchmark_loader(
         per_epoch_results=warmup_results + epoch_results,
         metadata={
             "pipeline_type": pipeline_type,
-            "device": device,
             "target_size": target_size,
             "batch_size": batch_size,
-            "num_workers": num_workers,
+            "num_threads": num_threads,
             "use_threading": use_threading,
         },
     )
@@ -193,15 +152,14 @@ def benchmark_loader(
 def main():
     parser = argparse.ArgumentParser(description="Benchmark SlipstreamLoader full pipeline")
     parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help="Dataset path (S3 or local)")
-    parser.add_argument("--cache-dir", type=str, default=None, help="Override cache directory (e.g., /path/to/fast/nvme)")
+    parser.add_argument("--cache-dir", type=str, default=None, help="Override cache directory")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
     parser.add_argument("--epochs", type=int, default=3, help="Number of timed epochs")
     parser.add_argument("--warmup", type=int, default=1, help="Number of warmup epochs")
-    parser.add_argument("--num-workers", type=int, default=8, help="CPU decoder workers")
+    parser.add_argument("--num-threads", type=int, default=0, help="NumbaBatchDecoder threads (0=auto)")
     parser.add_argument("--target-size", type=int, default=224, help="Target crop size")
-    parser.add_argument("--device", type=str, default="cpu", help="Device (cpu or cuda)")
-    parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results (e.g., 'nolan-25')")
-    parser.add_argument("--skip-streaming", action="store_true", help="Skip slow StreamingDataLoader benchmark")
+    parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results")
+    parser.add_argument("--skip-multi-crop", action="store_true", help="Skip multi-crop benchmark")
     parser.add_argument("--save", action="store_true", help="Save results to JSON file")
     parser.add_argument("--output", type=str, default=None, help="Output JSON path (implies --save)")
     args = parser.parse_args()
@@ -209,12 +167,6 @@ def main():
     # Print machine info
     machine_info = get_machine_info(args.machine_name)
     print(machine_info)
-
-    # Validate device
-    device = args.device
-    if device.startswith("cuda") and not machine_info.cuda_available:
-        print(f"\nWarning: CUDA requested but not available, falling back to CPU")
-        device = "cpu"
 
     # Load dataset
     print("\nLoading dataset...")
@@ -235,49 +187,35 @@ def main():
 
     results = []
 
-    # Test each pipeline type with both simple and threaded modes
+    # Benchmark each pipeline type with simple mode (less overhead)
     for pipeline_type in ["raw", "train", "val"]:
-        # Simple mode (no threading)
         result = benchmark_loader(
             dataset, args.batch_size, args.epochs, args.warmup,
-            pipeline_type=pipeline_type, device=device, num_workers=args.num_workers,
+            pipeline_type=pipeline_type, num_threads=args.num_threads,
             target_size=args.target_size, use_threading=False,
         )
         results.append(result)
 
-        # Threaded mode
         result = benchmark_loader(
             dataset, args.batch_size, args.epochs, args.warmup,
-            pipeline_type=pipeline_type, device=device, num_workers=args.num_workers,
+            pipeline_type=pipeline_type, num_threads=args.num_threads,
             target_size=args.target_size, use_threading=True,
         )
         results.append(result)
 
-    # If CPU was used but CUDA is available, also test CUDA
-    if device == "cpu" and machine_info.cuda_available:
-        print("\n--- Also benchmarking with CUDA ---")
+    # Multi-crop SSL benchmark
+    if not args.skip_multi_crop:
+        result = benchmark_loader(
+            dataset, args.batch_size, args.epochs, args.warmup,
+            pipeline_type="multi-crop", num_threads=args.num_threads,
+            target_size=args.target_size, use_threading=False,
+        )
+        results.append(result)
 
-        for pipeline_type in ["train", "val"]:
-            # Simple mode
-            result = benchmark_loader(
-                dataset, args.batch_size, args.epochs, args.warmup,
-                pipeline_type=pipeline_type, device="cuda", num_workers=args.num_workers,
-                target_size=args.target_size, use_threading=False,
-            )
-            results.append(result)
-
-            # Threaded mode
-            result = benchmark_loader(
-                dataset, args.batch_size, args.epochs, args.warmup,
-                pipeline_type=pipeline_type, device="cuda", num_workers=args.num_workers,
-                target_size=args.target_size, use_threading=True,
-            )
-            results.append(result)
-
-    # StreamingDataLoader baseline (optional)
-    if not args.skip_streaming:
-        result = benchmark_streaming_dataloader(
-            dataset, args.batch_size, args.num_workers, args.epochs, args.warmup
+        result = benchmark_loader(
+            dataset, args.batch_size, args.epochs, args.warmup,
+            pipeline_type="multi-crop", num_threads=args.num_threads,
+            target_size=args.target_size, use_threading=True,
         )
         results.append(result)
 
@@ -287,13 +225,13 @@ def main():
     print("=" * 60)
     print(format_results_table(results))
 
-    # Reference targets
-    print("\nReference targets (from litdata-mmap on Linux):")
-    print("  Raw I/O: ~480k+ samples/sec")
-    print("  CPU Decode + RRC: ~5.7k samples/sec")
-    print("  GPU Decode + RRC: ~10-11k samples/sec")
+    print("\nReference targets (direct NumbaBatchDecoder, no tensor conversion):")
+    print("  Raw I/O: ~775k-939k samples/sec")
+    print("  Decode + RRC: ~13,851 samples/sec")
+    print("  Decode + CenterCrop: ~15,749 samples/sec")
+    print("  Multi-crop (2x RRC): ~7,000 samples/sec (expected)")
 
-    # Save results (only if --save or --output specified)
+    # Save results
     if args.output:
         save_results(results, machine_info, args.output, "loader")
     elif args.save:

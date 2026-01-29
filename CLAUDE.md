@@ -245,7 +245,7 @@ slipstream/
 │   ├── __init__.py             # ✅ Package exports
 │   ├── dataset.py              # ✅ SlipstreamDataset (LitData wrapper)
 │   ├── cache.py                # ✅ OptimizedCache (V2 metadata format)
-│   ├── loader.py               # ⬜ PrefetchingDataLoader + SlipstreamLoader
+│   ├── loader.py               # ✅ SlipstreamLoader (multi-crop support)
 │   ├── ffcv_reader.py          # ⬜ Native .ffcv file reader
 │   ├── decoders/
 │   │   ├── __init__.py         # ✅ Decoder exports
@@ -265,7 +265,7 @@ slipstream/
 │   ├── __init__.py             # ✅ Created
 │   ├── utils.py                # ✅ Benchmark utilities
 │   ├── benchmark_decode.py     # ✅ Decode benchmarks
-│   └── benchmark_loader.py     # ⬜ End-to-end loader benchmarks
+│   └── benchmark_loader.py     # ✅ Loader benchmarks (raw, RRC, CenterCrop, multi-crop)
 └── notebooks/
     ├── 00_environment_test.ipynb  # ✅ Environment verification
     └── 01_dataset_basics.ipynb    # ✅ SlipstreamDataset tutorial
@@ -305,11 +305,13 @@ slipstream/
 5. ✅ Port GPUDecoder (nvImageCodec) — optional, CPU path is faster
 6. ✅ Create decode benchmarks
 
-### Phase 3: Loader Integration
+### Phase 3: Loader Integration ✅ COMPLETE
 
-1. ⬜ Port PrefetchingDataLoader (raw I/O layer with prefetch)
-2. ⬜ Create SlipstreamLoader (training-ready layer)
-3. ⬜ Port FFCVFileDataset (.beton reader)
+1. ✅ SlipstreamLoader with NumbaBatchDecoder pipelines
+2. ✅ Multi-crop SSL support (list-of-pipelines per field)
+3. ✅ Pipeline stages: DecodeOnly, CenterCrop, RandomResizedCrop, ResizeCrop
+4. ✅ Seed support for reproducible multi-crop
+5. ⬜ Port FFCVFileDataset (.beton reader)
 
 ### Phase 4: Augmentations
 
@@ -341,6 +343,21 @@ The benchmark scripts output progress bars that consume excessive tokens. Instea
 3. User will paste the results back
 
 Example: "Please run `uv run python benchmarks/benchmark_decode.py --numba-only --epochs 1 --warmup 1 --batch-size 256 --skip-streaming` and paste the results."
+
+### DO NOT add materialization ops to CPU benchmarks
+
+**Never** add `.sum()`, `.item()`, `.numpy()`, `.tolist()`, or similar reduction/conversion
+ops to benchmark loops for CPU pipelines. On CPU, all operations are synchronous — data is
+fully materialized the moment the decode/transform function returns. Adding `.sum()` on a
+`[256, 3, 224, 224]` uint8 tensor reads 36.75 MB per batch, which can cost as much as the
+decode itself (we measured 41% of total time from `.sum()` alone).
+
+- **CPU pipelines**: No materialization op needed. `img.shape[0]` is sufficient to confirm
+  the tensor exists.
+- **GPU pipelines**: Use `torch.cuda.synchronize()` for accurate timing, NOT `.sum()`.
+  `.sum()` both synchronizes AND does expensive work — it conflates the two.
+- **Benchmark rule**: Only measure the operations that would happen in real training.
+  In training, the tensor goes into `model.forward()` — it doesn't get `.sum()`'d.
 
 ---
 
