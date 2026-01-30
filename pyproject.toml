@@ -20,6 +20,8 @@ dependencies = [
     # AWS/S3 support
     "boto3",
     "fsspec[s3]",
+    "s3fs>=2024.0.0",
+    "s5cmd",
 ]
 
 [dependency-groups]

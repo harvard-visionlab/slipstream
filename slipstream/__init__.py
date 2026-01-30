@@ -59,6 +59,7 @@ from slipstream.backends.ffcv_file import (
 # Optimized cache (internal, but exposed for advanced users)
 from slipstream.cache import (
     OptimizedCache,
+    write_index,
 )
 from slipstream.dataset import (
     SlipstreamDataset,
@@ -99,6 +100,9 @@ from slipstream.pipelines import (
     make_val_pipeline,
 )
 
+# Readers (dataset format adapters)
+from slipstream.readers import FFCVFileReader
+
 # Crop utilities
 from slipstream.utils.crop import (
     CropParams,
@@ -134,6 +138,7 @@ __all__ = [
     "IMAGENET_STD",
     # Optimized cache (advanced)
     "OptimizedCache",
+    "write_index",
     # Crop utilities
     "CropParams",
     "align_to_mcu",
@@ -149,4 +154,6 @@ __all__ = [
     # Native FFCV file support
     "FFCVFileDataset",
     "FFCVFilePrefetchingDataLoader",
+    # Readers
+    "FFCVFileReader",
 ]

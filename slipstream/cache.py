@@ -44,6 +44,11 @@ if TYPE_CHECKING:
 
     from slipstream.dataset import SlipstreamDataset
 
+# Protocol for any dataset/reader that can be used with OptimizedCache.build()
+# Must have: cache_path, field_types, __len__, __getitem__
+# Optional: read_all_fields() for bulk fast path
+DatasetLike = Any  # Using Any since Protocol requires runtime_checkable for isinstance
+
 
 # =============================================================================
 # Constants
@@ -840,6 +845,7 @@ class OptimizedCache:
         self.fields = fields
         self.field_types = field_types
         self.num_samples = num_samples
+        self._indexes: dict[str, dict] = {}
 
     @classmethod
     def exists(cls, parent_dir: Path) -> bool:
@@ -851,17 +857,17 @@ class OptimizedCache:
     @classmethod
     def build(
         cls,
-        dataset: SlipstreamDataset,
+        dataset: Any,
         output_dir: Path | None = None,
         verbose: bool = True,
     ) -> OptimizedCache:
-        """Build optimized cache from a SlipstreamDataset.
+        """Build optimized cache from a dataset or reader.
 
-        Uses fast path for LitData-backed datasets (reads all fields directly
-        from chunks without calling dataset[i]).
+        Uses fast path when available: reader.read_all_fields() for readers,
+        or direct LitData chunk reading for LitData-backed datasets.
 
         Args:
-            dataset: Any SlipstreamDataset (or compatible iterable)
+            dataset: Any object with cache_path, field_types, __len__, __getitem__
             output_dir: Where to store cache (defaults to dataset.cache_path)
             verbose: Show progress
 
@@ -891,13 +897,29 @@ class OptimizedCache:
         if verbose:
             print(f"Fields: {field_types}")
 
+        # Check for reader fast path (read_all_fields protocol)
+        reader_fast_path = hasattr(dataset, 'read_all_fields') and callable(dataset.read_all_fields)
+
         # Check for LitData fast path
         litdata_cache_dir = Path(output_dir)
-        use_fast_path = _has_litdata_cache(litdata_cache_dir)
+        use_litdata_fast_path = _has_litdata_cache(litdata_cache_dir)
 
         num_samples = len(dataset)
 
-        if use_fast_path:
+        use_fast_path = False
+
+        if reader_fast_path:
+            if verbose:
+                print("Using reader fast path (read_all_fields)")
+
+            samples_by_field = dataset.read_all_fields()
+            if samples_by_field is not None:
+                use_fast_path = True
+            else:
+                reader_fast_path = False
+
+        if not use_fast_path and use_litdata_fast_path:
+            use_fast_path = True
             if verbose:
                 print("Using fast path (reading all fields from LitData chunks)")
 
@@ -908,9 +930,10 @@ class OptimizedCache:
                 dataset=dataset,
                 verbose=verbose,
             )
-        else:
+
+        if not use_fast_path:
             if verbose:
-                print("Using iteration path (no LitData chunk format detected)")
+                print("Using iteration path (no fast path available)")
 
             # Fall back to dataset iteration
             samples_by_field = {k: [] for k in field_types}
@@ -1013,11 +1036,15 @@ class OptimizedCache:
         if verbose:
             print(f"Loaded cache: {num_samples:,} samples, {len(fields)} fields")
 
-        return cls(cache_dir, fields, field_types, num_samples)
+        instance = cls(cache_dir, fields, field_types, num_samples)
+        instance._discover_indexes()
+        if verbose and instance._indexes:
+            print(f"  Loaded indexes: {list(instance._indexes.keys())}")
+        return instance
 
     def verify(
         self,
-        dataset: SlipstreamDataset,
+        dataset: Any,
         num_checks: int = 100,
         verbose: bool = True,
     ) -> bool:
@@ -1082,6 +1109,20 @@ class OptimizedCache:
                         errors.append(
                             f"Image mismatch at index {idx}, field '{field_name}'"
                         )
+                elif field_type == "bytes":
+                    # Variable-length bytes field (same storage as images)
+                    if isinstance(dataset_value, np.ndarray):
+                        dataset_bytes = bytes(dataset_value)
+                    else:
+                        dataset_bytes = dataset_value
+
+                    cache_size = int(cache_batch[field_name]['sizes'][0])
+                    cache_bytes = bytes(cache_value[0, :cache_size])
+
+                    if dataset_bytes != cache_bytes:
+                        errors.append(
+                            f"Bytes mismatch at index {idx}, field '{field_name}'"
+                        )
                 elif field_type == "str":
                     if dataset_value != cache_value[0]:
                         errors.append(
@@ -1141,6 +1182,33 @@ class OptimizedCache:
             raise TypeError(f"Field {field_name} is not an image field")
         return int(storage._heights[idx]), int(storage._widths[idx])
 
+    def _discover_indexes(self) -> None:
+        """Scan cache directory for index files and load them."""
+        for path in sorted(self.cache_dir.glob("*_index.npy")):
+            field_name = path.stem.removesuffix("_index")
+            self._indexes[field_name] = np.load(path, allow_pickle=True).item()
+
+    def get_index(self, field_name: str) -> dict:
+        """Get the field index mapping unique values to sample indices.
+
+        Args:
+            field_name: Name of the indexed field (e.g. 'label')
+
+        Returns:
+            Dict mapping field values to numpy arrays of sample indices.
+
+        Raises:
+            KeyError: If no index exists for this field.
+        """
+        if field_name not in self._indexes:
+            available = list(self._indexes.keys())
+            raise KeyError(
+                f"No index found for field '{field_name}'. "
+                f"Available indexes: {available}. "
+                f"Use write_index(cache, fields=['{field_name}']) to build one."
+            )
+        return self._indexes[field_name]
+
     def __len__(self) -> int:
         return self.num_samples
 
@@ -1155,6 +1223,124 @@ class OptimizedCache:
         )
 
 
+# =============================================================================
+# Index Utilities
+# =============================================================================
+
+def _resolve_cache_dir(source: Any) -> Path:
+    """Resolve the .slipstream cache directory from a source object."""
+    if isinstance(source, OptimizedCache):
+        return source.cache_dir
+    # Dataset or reader with cache_path attribute
+    if hasattr(source, 'cache_path'):
+        cache_dir = Path(source.cache_path) / CACHE_SUBDIR
+        if cache_dir.exists():
+            return cache_dir
+    raise ValueError(
+        "Cannot resolve cache directory from source. "
+        "Pass an OptimizedCache instance or an object with cache_path."
+    )
+
+
+def write_index(
+    source: Any,
+    fields: list[str],
+    verbose: bool = True,
+) -> None:
+    """Build field indexes for an optimized cache.
+
+    An index maps each unique field value to the sample indices that have
+    that value. Indexes are saved as ``{field}_index.npy`` inside the cache
+    directory and are auto-discovered on ``OptimizedCache.load()``.
+
+    Args:
+        source: An ``OptimizedCache`` instance, or any object with a
+            ``cache_path`` attribute (e.g. ``SlipstreamDataset``, reader).
+        fields: List of field names to index (e.g. ``['label']``).
+        verbose: Print progress information.
+
+    Example::
+
+        from slipstream.cache import OptimizedCache, write_index
+
+        cache = OptimizedCache.load(cache_dir)
+        write_index(cache, fields=['label'])
+
+        # Reload to pick up new indexes
+        cache = OptimizedCache.load(cache_dir)
+        label_idx = cache.get_index('label')
+        print(f"Samples with label 0: {len(label_idx[0])}")
+    """
+    cache_dir = _resolve_cache_dir(source)
+
+    # Load manifest to validate fields
+    manifest_path = cache_dir / MANIFEST_FILE
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"No manifest found at {cache_dir}. Build the cache first."
+        )
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    field_metadata = manifest['fields']
+
+    for field_name in fields:
+        if field_name not in field_metadata:
+            available = list(field_metadata.keys())
+            raise KeyError(
+                f"Field '{field_name}' not found in cache. "
+                f"Available fields: {available}"
+            )
+
+        field_type = field_metadata[field_name]['type']
+
+        if field_type == 'ImageBytes':
+            raise ValueError(
+                f"Cannot index image field '{field_name}'. "
+                "Indexing is only supported for numeric and string fields."
+            )
+
+        if verbose:
+            print(f"Building index for '{field_name}' ({field_type})...")
+
+        if field_type == 'str':
+            # String fields: read via StringStorage
+            storage = StringStorage.load(field_name, cache_dir, field_metadata[field_name])
+            all_indices = np.arange(storage.num_samples, dtype=np.int64)
+            # Read all strings
+            values = []
+            for idx in range(storage.num_samples):
+                offset, length = storage._offsets[idx]
+                raw = bytes(storage._data_mmap[offset:offset + length])
+                values.append(raw.decode('utf-8'))
+
+            # Build index
+            index: dict[Any, np.ndarray] = {}
+            for i, val in enumerate(values):
+                if val not in index:
+                    index[val] = []
+                index[val].append(i)
+            index = {k: np.array(v, dtype=np.int64) for k, v in index.items()}
+        else:
+            # Numeric fields: fast numpy path
+            data = np.load(cache_dir / f"{field_name}.npy", mmap_mode='r')
+            unique_vals = np.unique(data)
+            index = {}
+            for val in unique_vals:
+                index[val.item()] = np.where(data == val)[0].astype(np.int64)
+
+        # Save index
+        index_path = cache_dir / f"{field_name}_index.npy"
+        np.save(index_path, index, allow_pickle=True)
+
+        if verbose:
+            print(f"  {len(index)} unique values → {index_path.name}")
+
+    # If source is an OptimizedCache, update its in-memory indexes
+    if isinstance(source, OptimizedCache):
+        source._discover_indexes()
+
+
 __all__ = [
     "OptimizedCache",
     "FieldStorage",
@@ -1162,4 +1348,5 @@ __all__ = [
     "NumpyStorage",
     "StringStorage",
     "CACHE_SUBDIR",
+    "write_index",
 ]

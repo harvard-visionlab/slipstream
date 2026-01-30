@@ -350,8 +350,10 @@ class FFCVFileDataset:
             )
 
         # Extract image entries: every num_var_fields-th entry, starting at image_var_idx
-        image_indices = np.arange(num_samples) * num_var_fields + image_var_idx
-        self._alloc_table = full_alloc_table[image_indices]
+        # Then sort by sample_id — alloc table is in page-write order, NOT sample order
+        image_entries = full_alloc_table[np.arange(num_samples) * num_var_fields + image_var_idx]
+        sort_order = np.argsort(image_entries['sample_id'])
+        self._alloc_table = image_entries[sort_order]
 
         if self._verbose:
             self._log(f"  Variable-length fields: {num_var_fields} (indices: {var_field_indices})")

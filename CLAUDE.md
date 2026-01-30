@@ -25,31 +25,31 @@ These decisions were confirmed during project planning and should be followed:
 ### Architecture
 
 - **Two-layer loader architecture**:
-  1. `PrefetchingDataLoader` - Raw I/O layer (480k img/s target)
-     - Pre-allocated memory banks (zero-copy)
-     - Background thread with `nogil=True` Numba
-     - Returns: `{data, sizes, heights, widths, indices}`
-  2. `SlipstreamLoader` - Training-ready layer
-     - Integrates PrefetchingDataLoader
-     - Adds GPU/CPU decoders
-     - Adds RandomResizedCrop, CenterCrop, normalization
-     - Returns: decoded GPU tensors `[B, C, H, W]`
-     - Deterministic seeded shuffle (`seed=` param, epoch-varying via `seed + epoch`)
-     - Distributed training support (`distributed=True`, auto-detects rank/world_size)
-     - `set_epoch(n)` for manual epoch control (standard PyTorch distributed pattern)
-     - Subset filtering (`indices=` param, for debugging/few-shot/custom sampling)
+    1. `PrefetchingDataLoader` - Raw I/O layer (480k img/s target)
+        - Pre-allocated memory banks (zero-copy)
+        - Background thread with `nogil=True` Numba
+        - Returns: `{data, sizes, heights, widths, indices}`
+    2. `SlipstreamLoader` - Training-ready layer
+        - Integrates PrefetchingDataLoader
+        - Adds GPU/CPU decoders
+        - Adds RandomResizedCrop, CenterCrop, normalization
+        - Returns: decoded GPU tensors `[B, C, H, W]`
+        - Deterministic seeded shuffle (`seed=` param, epoch-varying via `seed + epoch`)
+        - Distributed training support (`distributed=True`, auto-detects rank/world_size)
+        - `set_epoch(n)` for manual epoch control (standard PyTorch distributed pattern)
+        - Subset filtering (`indices=` param, for debugging/few-shot/custom sampling)
 
 - **Dataset sources**: Start with LitData variant only, expand later
-  - Future: `SlipstreamDataset.from_litdata()`, `.from_imagefolder()`, `.from_huggingface()`
+    - Future: `SlipstreamDataset.from_litdata()`, `.from_imagefolder()`, `.from_huggingface()`
 
 - **Sample handling**: Work with any sample dict; if sample is a tuple, ask user for field names to return a dict
 
 ### Decoders
 
 - **Primary decoder**: NumbaBatchDecoder (Numba prange + libslipstream C extension + TurboJPEG + stb_image_resize2)
-  - Matches or exceeds FFCV performance for all operations
-  - System dependency: `libturbojpeg`
-  - No OpenCV required — stb_image_resize2 is sufficient
+    - Matches or exceeds FFCV performance for all operations
+    - System dependency: `libturbojpeg`
+    - No OpenCV required — stb_image_resize2 is sufficient
 - **GPU decoder**: nvImageCodec exists but is slower than CPU path for this dataset size (~10k vs ~17k). Keep as optional for future larger-resolution datasets where GPU decode may win.
 
 ### File Formats
@@ -57,22 +57,22 @@ These decisions were confirmed during project planning and should be followed:
 - **V2 metadata format**: Use exact same format as litdata-mmap for compatibility
 - **First-epoch generation**: Create optimized files during first epoch from any source dataset
 - **Dataset versioning**: Content-addressable hash for 1-to-1 mapping to source dataset
-  ```python
-  # Hash of: source_path + dataset_version + slipstream_format_version
-  dataset_id = hashlib.sha256(f"{source_path}:{dataset.version}:slipstream-v1").hexdigest()[:8]
-  # Filename: imagenet1k-val-{dataset_id}.slipstream
-  ```
+    ```python
+    # Hash of: source_path + dataset_version + slipstream_format_version
+    dataset_id = hashlib.sha256(f"{source_path}:{dataset.version}:slipstream-v1").hexdigest()[:8]
+    # Filename: imagenet1k-val-{dataset_id}.slipstream
+    ```
 - **FFCV .beton support**: Yes, read existing .ffcv files directly via `FFCVFileDataset`
-  - Location: `/Users/gaa019/Documents/GitHub/litdata-mmap/src/litdata_mmap/ffcv_file_dataset.py`
+    - Location: `/Users/gaa019/Documents/GitHub/litdata-mmap/src/litdata_mmap/ffcv_file_dataset.py`
 
 ### RandomResizedCrop
 
 - **Standard**: Torchvision-compatible (10 attempts, rejection sampling)
 - **Optimized**: `DirectRandomResizedCrop` (or `AnalyticRandomResizedCrop`) - no loop needed
-  - Choose random ratio from range
-  - Choose long edge length from valid range
-  - Short edge determined by ratio
-  - Sample top-left coordinates from valid range directly
+    - Choose random ratio from range
+    - Choose long edge length from valid range
+    - Short edge determined by ratio
+    - Sample top-left coordinates from valid range directly
 
 ### Cluster & Lab Infrastructure
 
@@ -83,11 +83,11 @@ These decisions were confirmed during project planning and should be followed:
 
 - **Do NOT port** litdata-mmap tests (too sprawling)
 - **Fresh test approach**:
-  - Always run 3 full epochs (1 cold, 2 warm) to verify mmap reduces I/O bottleneck
-  - Report: batch shape, device, images/s per epoch
-  - Separate tests for:
-    - I/O only (raw data pass through)
-    - Minimal decoding (decode + center-crop for uniform sizes)
+    - Always run 3 full epochs (1 cold, 2 warm) to verify mmap reduces I/O bottleneck
+    - Report: batch shape, device, images/s per epoch
+    - Separate tests for:
+        - I/O only (raw data pass through)
+        - Minimal decoding (decode + center-crop for uniform sizes)
 
 ### Batch Augmentations (fastaugs)
 
@@ -111,6 +111,7 @@ These decisions were confirmed during project planning and should be followed:
 ```
 
 Provides:
+
 - LitData StreamingDataset wrapper with pipelines
 - Automatic image decoding and field type detection
 - Cluster symlink setup for shared credentials
@@ -122,13 +123,13 @@ Provides:
 /Users/gaa019/Documents/GitHub/litdata-mmap
 ```
 
-| litdata-mmap File                       | slipstream Target                 | Purpose                                      |
-| --------------------------------------- | --------------------------------- | -------------------------------------------- |
-| `src/litdata_mmap/ffcv_style_loader.py` | `slipstream/loader.py`            | PrefetchingDataLoader + FFCVStyleDataset     |
-| `src/litdata_mmap/gpu_decoder.py`       | `slipstream/decoders/gpu.py`      | nvImageCodec GPU decoder                     |
-| `src/litdata_mmap/turbo_decoder.py`     | `slipstream/decoders/cpu.py`      | TurboJPEG CPU decoder                        |
-| `src/litdata_mmap/ffcv_file_dataset.py` | `slipstream/ffcv_reader.py`       | Native .ffcv/.beton file reader              |
-| `src/litdata_mmap/optimized_dataset.py` | `slipstream/dataset.py`           | High-level dataset wrapper                   |
+| litdata-mmap File                       | slipstream Target            | Purpose                                  |
+| --------------------------------------- | ---------------------------- | ---------------------------------------- |
+| `src/litdata_mmap/ffcv_style_loader.py` | `slipstream/loader.py`       | PrefetchingDataLoader + FFCVStyleDataset |
+| `src/litdata_mmap/gpu_decoder.py`       | `slipstream/decoders/gpu.py` | nvImageCodec GPU decoder                 |
+| `src/litdata_mmap/turbo_decoder.py`     | `slipstream/decoders/cpu.py` | TurboJPEG CPU decoder                    |
+| `src/litdata_mmap/ffcv_file_dataset.py` | `slipstream/ffcv_reader.py`  | Native .ffcv/.beton file reader          |
+| `src/litdata_mmap/optimized_dataset.py` | `slipstream/dataset.py`      | High-level dataset wrapper               |
 
 ### Benchmark Datasets
 
@@ -143,14 +144,14 @@ Benchmark environments: macOS laptop (CPU), GPU workstation, cluster
 
 ## Performance Targets
 
-| Metric           | FFCV        | Slipstream         | Status |
-| ---------------- | ----------- | ------------------ | ------ |
-| Raw I/O          | ~413k img/s | **939k img/s**     | ✅ 2.3x faster |
-| CPU Decode Only  | ~17k        | **17,366 img/s**   | ✅ Target met |
-| CPU + CenterCrop | ~15,840     | **15,749 img/s**   | ✅ 99.4% of FFCV |
-| CPU + RRC        | ~13,250     | **13,851 img/s**   | ✅ 104.5% of FFCV |
-| GPU Decode Only  | -           | ~10k img/s         | ✅ (CPU path preferred) |
-| Cold Start       | baseline    | -                  | ⬜ Not measured |
+| Metric           | FFCV        | Slipstream       | Status                  |
+| ---------------- | ----------- | ---------------- | ----------------------- |
+| Raw I/O          | ~413k img/s | **939k img/s**   | ✅ 2.3x faster          |
+| CPU Decode Only  | ~17k        | **17,366 img/s** | ✅ Target met           |
+| CPU + CenterCrop | ~15,840     | **15,749 img/s** | ✅ 99.4% of FFCV        |
+| CPU + RRC        | ~13,250     | **13,851 img/s** | ✅ 104.5% of FFCV       |
+| GPU Decode Only  | -           | ~10k img/s       | ✅ (CPU path preferred) |
+| Cold Start       | baseline    | -                | ⬜ Not measured         |
 
 All CPU decode targets met or exceeded. No OpenCV dependency required — stb_image_resize2 matches OpenCV's cv::resize(INTER_AREA) performance for this workload.
 
@@ -162,26 +163,27 @@ All benchmarks on **machina** (GPU workstation: AMD Threadripper PRO 3975WX, 64 
 
 ### Raw I/O (no decode)
 
-| System | Samples/sec | vs FFCV | Status |
-|--------|-------------|---------|--------|
-| **Slipstream OptimizedCache** | **938,674** | **2.27x** | ✅ Exceeds target |
-| **Slipstream Loader (simple)** | **774,801** | **1.87x** | ✅ Exceeds target |
-| Slipstream Loader (threaded) | 393,245 | 0.95x | Threading overhead |
-| FFCV | 413,413 | baseline | Reference |
-| litdata-mmap PageAligned | 365,553 | 0.88x | |
-| litdata-mmap FFCVStyle | 355,827 | 0.86x | |
+| System                         | Samples/sec | vs FFCV   | Status             |
+| ------------------------------ | ----------- | --------- | ------------------ |
+| **Slipstream OptimizedCache**  | **938,674** | **2.27x** | ✅ Exceeds target  |
+| **Slipstream Loader (simple)** | **774,801** | **1.87x** | ✅ Exceeds target  |
+| Slipstream Loader (threaded)   | 393,245     | 0.95x     | Threading overhead |
+| FFCV                           | 413,413     | baseline  | Reference          |
+| litdata-mmap PageAligned       | 365,553     | 0.88x     |                    |
+| litdata-mmap FFCVStyle         | 355,827     | 0.86x     |                    |
 
 **Target was 480k+ img/s → Achieved 775k-939k img/s (1.6-2x target)**
 
 ### CPU Decode + Transforms (NumbaBatchDecoder)
 
-| System | Decode Only | + CenterCrop | + RRC | Status |
-|--------|-------------|--------------|-------|--------|
-| **Slipstream NumbaBatchDecoder** | **17,366** | **15,749** | **13,851** | ✅ All targets met |
-| FFCV Reference | - | 15,840 | 13,250 | Target |
-| litdata-mmap CPU (Numba) | 17,425 | 1,308 | 2,039 | Reference |
+| System                           | Decode Only | + CenterCrop | + RRC      | Status             |
+| -------------------------------- | ----------- | ------------ | ---------- | ------------------ |
+| **Slipstream NumbaBatchDecoder** | **17,366**  | **15,749**   | **13,851** | ✅ All targets met |
+| FFCV Reference                   | -           | 15,840       | 13,250     | Target             |
+| litdata-mmap CPU (Numba)         | 17,425      | 1,308        | 2,039      | Reference          |
 
 **Analysis:**
+
 - ✅ **Decode-only matches target**: 17,366 vs 17,425 (litdata-mmap) — essentially identical
 - ✅ **CenterCrop at 99.4% of FFCV**: 15,749 vs 15,840
 - ✅ **RRC exceeds FFCV by 4.5%**: 13,851 vs 13,250
@@ -190,18 +192,19 @@ All benchmarks on **machina** (GPU workstation: AMD Threadripper PRO 3975WX, 64 
 
 ### SlipstreamLoader End-to-End (measured 2026-01-29)
 
-| Pipeline | Samples/sec | vs Direct Decoder | Status |
-|----------|-------------|-------------------|--------|
-| **Raw I/O (simple)** | **958,270** | 102% of OptimizedCache | ✅ |
-| **RRC (simple)** | **12,947** | 93% of direct | ✅ |
-| **RRC (threaded)** | **13,498** | 97% of direct | ✅ |
-| **CenterCrop (simple)** | **15,449** | 98% of direct | ✅ |
-| **CenterCrop (threaded)** | **14,768** | 94% of direct | ✅ |
-| **2x RRC fused multi-crop (simple)** | **10,653** | 48% faster than naive 2x | ✅ |
-| **2x RRC fused multi-crop (threaded)** | **10,453** | 46% faster than naive 2x | ✅ |
-| Raw I/O (threaded) | 76,409 | — | Threading overhead |
+| Pipeline                               | Samples/sec | vs Direct Decoder        | Status             |
+| -------------------------------------- | ----------- | ------------------------ | ------------------ |
+| **Raw I/O (simple)**                   | **958,270** | 102% of OptimizedCache   | ✅                 |
+| **RRC (simple)**                       | **12,947**  | 93% of direct            | ✅                 |
+| **RRC (threaded)**                     | **13,498**  | 97% of direct            | ✅                 |
+| **CenterCrop (simple)**                | **15,449**  | 98% of direct            | ✅                 |
+| **CenterCrop (threaded)**              | **14,768**  | 94% of direct            | ✅                 |
+| **2x RRC fused multi-crop (simple)**   | **10,653**  | 48% faster than naive 2x | ✅                 |
+| **2x RRC fused multi-crop (threaded)** | **10,453**  | 46% faster than naive 2x | ✅                 |
+| Raw I/O (threaded)                     | 76,409      | —                        | Threading overhead |
 
 **Analysis:**
+
 - ✅ Loader overhead is <7% for decode+crop pipelines
 - ✅ Fused multi-crop (decode-once, crop-N-times) gives ~48% speedup over naive 2x decode
 - Simple mode is preferred — threading adds overhead without benefit for this workload
@@ -209,11 +212,11 @@ All benchmarks on **machina** (GPU workstation: AMD Threadripper PRO 3975WX, 64 
 
 ### GPU Decode + Transforms (nvImageCodec)
 
-| System | Decode Only | + CenterCrop | + RRC | Status |
-|--------|-------------|--------------|-------|--------|
-| **Slipstream GPUDecoder** | TBD | TBD | TBD | ⬜ Not started |
-| FFCV Reference | - | - | - | No GPU decode |
-| litdata-mmap nvImageCodec | 10,000 | 5,250 | 4,880 | Reference |
+| System                    | Decode Only | + CenterCrop | + RRC | Status         |
+| ------------------------- | ----------- | ------------ | ----- | -------------- |
+| **Slipstream GPUDecoder** | TBD         | TBD          | TBD   | ⬜ Not started |
+| FFCV Reference            | -           | -            | -     | No GPU decode  |
+| litdata-mmap nvImageCodec | 10,000      | 5,250        | 4,880 | Reference      |
 
 **Note:** GPU decode is slower than optimized CPU decode for this dataset size. CPU path is preferred.
 
@@ -228,6 +231,7 @@ The gap between Slipstream and FFCV for crop operations was closed by eliminatin
 Profiling revealed that JPEG decode is 80-92% of per-image C++ time, with resize only 8-20%. The performance gap was caused by unnecessary `.copy()` calls on large numpy buffers (37-200MB per batch) when returning results. FFCV returns views into pre-allocated buffers with zero copies.
 
 Approaches tried and rejected:
+
 - **TurboJPEG scaled decode** (`decode_crop_resize`): No benefit for 256-512px source images
 - **JPEG-domain crop** (`tjTransform`): 30% slower due to per-image malloc/free in prange
 - **OpenCV cv::resize(INTER_AREA)**: <1% difference vs stb_image_resize2
@@ -245,6 +249,7 @@ uv run python libslipstream/setup.py build_ext --inplace
 ```
 
 Requires system libturbojpeg:
+
 - Linux: `/usr/libjpeg-turbo/include` and `/usr/libjpeg-turbo/lib64`
 - macOS: `brew install libjpeg-turbo`
 
@@ -267,9 +272,15 @@ slipstream/
 ├── slipstream/
 │   ├── __init__.py             # ✅ Package exports
 │   ├── dataset.py              # ✅ SlipstreamDataset (LitData wrapper)
-│   ├── cache.py                # ✅ OptimizedCache (V2 metadata format)
+│   ├── cache.py                # ✅ OptimizedCache (slip cache format)
 │   ├── loader.py               # ✅ SlipstreamLoader (multi-crop support)
-│   ├── ffcv_reader.py          # ⬜ Native .ffcv file reader
+│   ├── readers/                # ✅ Dataset format adapters
+│   │   ├── __init__.py         # ✅ Reader exports
+│   │   └── ffcv.py             # ✅ FFCVFileReader (.ffcv/.beton, S3 download)
+│   ├── backends/               # ✅ Low-level dataset backends
+│   │   ├── __init__.py         # ✅ Backend exports
+│   │   ├── ffcv_file.py        # ✅ FFCVFileDataset (Numba JIT batch loading)
+│   │   └── ffcv_style.py       # ✅ FFCVStyleDataset (mmap batch loading)
 │   ├── decoders/
 │   │   ├── __init__.py         # ✅ Decoder exports
 │   │   ├── cpu.py              # ✅ CPUDecoder (TurboJPEG + ThreadPool)
@@ -288,10 +299,12 @@ slipstream/
 │   ├── __init__.py             # ✅ Created
 │   ├── utils.py                # ✅ Benchmark utilities
 │   ├── benchmark_decode.py     # ✅ Decode benchmarks
-│   └── benchmark_loader.py     # ✅ Loader benchmarks (raw, RRC, CenterCrop, multi-crop)
+│   ├── benchmark_loader.py     # ✅ Loader benchmarks (raw, RRC, CenterCrop, multi-crop)
+│   └── benchmark_ffcv_loader.py # ✅ FFCV reader → SlipstreamLoader benchmark
 └── notebooks/
     ├── 00_environment_test.ipynb  # ✅ Environment verification
-    └── 01_dataset_basics.ipynb    # ✅ SlipstreamDataset tutorial
+    ├── 01_dataset_basics.ipynb    # ✅ SlipstreamDataset tutorial
+    └── 02_field_indexes.ipynb     # ✅ Field indexes & class-based subsetting
 ```
 
 ---
@@ -304,26 +317,26 @@ slipstream/
 2. ✅ Create basic package structure
 3. ✅ Set up dev environment (uv, jupyterlab, nbstripout)
 4. ✅ Port StreamingDatasetVisionlab → SlipstreamDataset
-   - Intuitive API: `remote_dir`, `cache_dir`, `local_dir`
-   - Automatic field type detection
-   - Pipeline support for per-field transforms
-   - `decode_images` and `to_pil` options
-   - `SLIPSTREAM_CACHE_DIR` env var support
-   - Falls back to LitData's default caching (`~/.lightning/`)
-   - Cluster symlink setup (`ensure_lightning_symlink_on_cluster`)
+    - Intuitive API: `remote_dir`, `cache_dir`, `local_dir`
+    - Automatic field type detection
+    - Pipeline support for per-field transforms
+    - `decode_images` and `to_pil` options
+    - `SLIPSTREAM_CACHE_DIR` env var support
+    - Falls back to LitData's default caching (`~/.lightning/`)
+    - Cluster symlink setup (`ensure_lightning_symlink_on_cluster`)
 5. ✅ Create `01_dataset_basics.ipynb` tutorial notebook
 
 ### Phase 2: Decoder Infrastructure ✅ COMPLETE
 
 1. ✅ Create libslipstream C++ extension
-   - TurboJPEG decode with thread-local handles
-   - stb_image_resize2 for crop + resize (no OpenCV needed)
-   - Linux and macOS build support
+    - TurboJPEG decode with thread-local handles
+    - stb_image_resize2 for crop + resize (no OpenCV needed)
+    - Linux and macOS build support
 2. ✅ Port OptimizedCache (V2 metadata format)
 3. ✅ Port NumbaBatchDecoder (Numba prange + libslipstream)
-   - `decode_batch_to_buffer()` - 17,366 samples/sec ✅
-   - `decode_batch_center_crop()` - 15,749 samples/sec ✅ (98.5% of FFCV)
-   - `decode_batch_random_crop()` - 13,851 samples/sec ✅ (104.5% of FFCV)
+    - `decode_batch_to_buffer()` - 17,366 samples/sec ✅
+    - `decode_batch_center_crop()` - 15,749 samples/sec ✅ (98.5% of FFCV)
+    - `decode_batch_random_crop()` - 13,851 samples/sec ✅ (104.5% of FFCV)
 4. ✅ Port CPUDecoder (TurboJPEG + ThreadPoolExecutor fallback)
 5. ✅ Port GPUDecoder (nvImageCodec) — optional, CPU path is faster
 6. ✅ Create decode benchmarks
@@ -336,11 +349,18 @@ slipstream/
 4. ✅ Seed support for reproducible multi-crop
 5. ✅ Deterministic seeded shuffle (`seed=`, epoch-varying via `seed + epoch`)
 6. ✅ Distributed training support (`distributed=True`, strided partitioning, `set_epoch()`)
-6b. ✅ Subset filtering (`indices=` param, matches FFCV's `indices` parameter)
-6c. ⬜ Label index metadata: store `labels_index.npy` in optimized cache (label → sample indices mapping), accessible as a dataset/cache attribute. Enables class-based subsetting without copying datasets — e.g. get indices for 100 ImageNet classes and pass them to `SlipstreamLoader(ds, indices=...)` for Imagenet100/Imagenette
+   6b. ✅ Subset filtering (`indices=` param, matches FFCV's `indices` parameter)
+   6c. ✅ Field index utility: `write_index(cache, fields=['label'])` builds `{field}_index.npy` in cache dir (unique value → sample indices mapping). Auto-discovered on `OptimizedCache.load()`, accessed via `cache.get_index('label')`. Works for any numeric or string field. Enables class-based subsetting — e.g. get indices for 10 ImageNet classes and pass to `SlipstreamLoader(ds, indices=...)` for Imagenette
 7. ⬜ Visual verification of loader outputs (view decoded images, multi-crop views, seed reproducibility)
-8. ⬜ Sample correctness: verify loader outputs match source streaming dataset samples
-9. ⬜ Port FFCVFileDataset (.beton reader)
+8. ✅ FFCVFileReader (.beton/.ffcv reader, no FFCV dependency)
+    - Reader protocol: `cache_path`, `field_types`, `__len__`, `__getitem__`, `read_all_fields()`
+    - Reads all FFCV field types: RGBImageField, IntField, FloatField, JSONField, BytesField
+    - Correct FFCV metadata parsing (compound dtype with `align=True`, matching ffcv source)
+    - Alloc table sorted by `sample_id` (FFCV writes in page order, not sample order)
+    - S3 download via s5cmd (fast, parallel) with fsspec fallback
+    - `read_all_fields()` fast path for bulk slip cache building
+    - `OptimizedCache.build()` extended with generic `read_all_fields()` hook
+    - Benchmarked: 14,914 samples/sec RRC (matches LitData path)
 
 ### Phase 4: Augmentations
 
@@ -353,7 +373,28 @@ slipstream/
 1. ✅ Decode benchmarks (benchmark_decode.py)
 2. ⬜ 3-epoch test framework
 3. ✅ End-to-end loader benchmarks (benchmark_loader.py)
-4. ⬜ Comparison vs FFCV baseline
+4. ✅ FFCV reader loader benchmark (benchmark_ffcv_loader.py)
+5. ⬜ Comparison vs FFCV baseline
+
+### Phase 5b: End-to-End Correctness Verification
+
+These tests verify that the slip cache format faithfully represents the source data, with zero errors across all samples. They require a **separate test environment** that installs both slipstream and the source format's native reader (e.g., ffcv-ssl for .beton files, litdata for streaming datasets).
+
+1. ⬜ **FFCV → slip cache correctness**: Per-sample comparison of FFCVFileReader output vs ffcv-ssl's native `Reader`/`Loader`. For every sample in the dataset, verify:
+    - Image bytes are identical (JPEG bitstream match)
+    - Labels, indices match exactly
+    - Path/metadata fields match
+    - Image dimensions (height, width) match
+    - Requires: separate repo/env with both `slipstream` and `ffcv-ssl` installed
+    - Test dataset: `imagenet1k-s256-l512-jpg-q100-cs100-val-7ac6386e.ffcv` (50k samples)
+
+2. ⬜ **LitData StreamingDataset → slip cache correctness**: Per-sample comparison of `SlipstreamDataset[i]` vs the slip cache built from it. For every sample:
+    - Image bytes match (accounting for JPEG EOI marker trimming)
+    - All non-image fields match exactly
+    - Dimensions from V2 metadata match JPEG header parse
+    - Test dataset: `s3://visionlab-datasets/imagenet1k/.../val/` (50k samples)
+
+3. ⬜ **Round-trip decode verification**: After building slip cache from any source, verify that decoded images (via NumbaBatchDecoder) produce correct pixel values by comparing against PIL/TurboJPEG reference decode of the original source bytes.
 
 ### Phase 6: Future Enhancements
 
@@ -371,7 +412,9 @@ slipstream/
 ## Important Notes for Claude
 
 ### DO NOT run benchmarks directly
+
 The benchmark scripts output progress bars that consume excessive tokens. Instead:
+
 1. Prepare code changes
 2. Ask the user to run benchmarks
 3. User will paste the results back

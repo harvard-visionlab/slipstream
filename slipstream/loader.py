@@ -105,7 +105,7 @@ class SlipstreamLoader:
 
     def __init__(
         self,
-        dataset: SlipstreamDataset,
+        dataset: Any,
         batch_size: int = 256,
         shuffle: bool = True,
         seed: int | None = None,
@@ -347,7 +347,7 @@ class SlipstreamLoader:
 
             # Build output batch
             batch = {
-                'indices': torch.from_numpy(batch_indices).to(self._device_str),
+                '_indices': torch.from_numpy(batch_indices).to(self._device_str),
             }
 
             # Load and add image data
@@ -470,7 +470,7 @@ class SlipstreamLoader:
 
                 # Build output batch
                 batch = {
-                    'indices': torch.from_numpy(batch_indices).to(self._device_str),
+                    '_indices': torch.from_numpy(batch_indices).to(self._device_str),
                 }
 
                 # Access image data from pre-allocated banks using slot index
@@ -549,7 +549,7 @@ class SlipstreamLoader:
         pipelines_str = "{" + ", ".join(pipeline_strs) + "}" if pipeline_strs else "{}"
 
         indices_str = (
-            f"    indices={len(self.indices):,} of {len(self.cache):,} samples,\n"
+            f"    indices=subset ({len(self.indices):,} of {len(self.cache):,} total),\n"
             if self.indices is not None else ""
         )
         seed_str = f"    seed={self.seed},\n" if self.seed is not None else ""
@@ -560,7 +560,7 @@ class SlipstreamLoader:
 
         return (
             f"SlipstreamLoader(\n"
-            f"    num_samples={len(self.cache):,},\n"
+            f"    num_samples={len(self.indices) if self.indices is not None else len(self.cache):,},\n"
             f"    batch_size={self.batch_size},\n"
             f"    shuffle={self.shuffle},\n"
             f"{indices_str}"
