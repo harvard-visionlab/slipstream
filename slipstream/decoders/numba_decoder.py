@@ -317,6 +317,61 @@ def _create_decode_with_crop_function() -> Any:
     return Compiler.compile(decode_crop_batch)
 
 
+def _create_decode_multi_crop_function() -> Any:
+    """Create decode-once + multi-crop function.
+
+    Decodes each image once to temp buffer, then applies N different
+    crop+resize operations from the same decoded data. This avoids
+    redundant JPEG decodes for multi-crop SSL.
+    """
+    imdecode_c = Compiler.compile(imdecode_simple_numba)
+    resize_crop_c = Compiler.compile(resize_crop_numba)
+    my_range = Compiler.get_iterator()
+
+    def decode_multi_crop_batch(
+        jpeg_data: np.ndarray,      # [B, max_size] uint8
+        sizes: np.ndarray,          # [B] uint64
+        heights: np.ndarray,        # [B] uint32
+        widths: np.ndarray,         # [B] uint32
+        all_crop_params: np.ndarray, # [num_crops, B, 4] int32
+        temp_buffer: np.ndarray,    # [B, max_h, max_w, 3] uint8
+        destinations: np.ndarray,   # [num_crops, B, target_h, target_w, 3] uint8
+        target_h: int,
+        target_w: int,
+        num_crops: int,
+    ) -> np.ndarray:
+        """Decode once + multi-crop+resize in parallel using prange."""
+        batch_size = len(sizes)
+        for i in my_range(batch_size):
+            size = int(sizes[i])
+            h = int(heights[i])
+            w = int(widths[i])
+
+            # Decode JPEG to temp buffer (ONCE per image)
+            source = jpeg_data[i, :size]
+            temp = temp_buffer[i, :h, :w, :]
+            imdecode_c(source, temp, h, w)
+
+            # Apply each crop from the same decoded image
+            for c in range(num_crops):
+                crop_x = int(all_crop_params[c, i, 0])
+                crop_y = int(all_crop_params[c, i, 1])
+                crop_w = int(all_crop_params[c, i, 2])
+                crop_h = int(all_crop_params[c, i, 3])
+
+                dest = destinations[c, i, :, :, :]
+                resize_crop_c(
+                    temp, h, w,
+                    crop_y, crop_x, crop_h, crop_w,
+                    dest, target_h, target_w,
+                )
+
+        return destinations
+
+    decode_multi_crop_batch.is_parallel = True
+    return Compiler.compile(decode_multi_crop_batch)
+
+
 @njit(parallel=True, cache=True, fastmath=True)
 def _transpose_hwc_to_chw(
     src: np.ndarray,   # [B, H, W, 3] uint8
@@ -341,6 +396,7 @@ def _transpose_hwc_to_chw(
 # Lazy-loaded compiled functions
 _decode_batch_compiled: Any = None
 _decode_crop_batch_compiled: Any = None
+_decode_multi_crop_batch_compiled: Any = None
 
 
 def _get_decode_batch() -> Any:
@@ -360,6 +416,15 @@ def _get_decode_crop_batch() -> Any:
         load_library()
         _decode_crop_batch_compiled = _create_decode_with_crop_function()
     return _decode_crop_batch_compiled
+
+
+def _get_decode_multi_crop_batch() -> Any:
+    """Get or create the compiled decode-once + multi-crop function."""
+    global _decode_multi_crop_batch_compiled
+    if _decode_multi_crop_batch_compiled is None:
+        load_library()
+        _decode_multi_crop_batch_compiled = _create_decode_multi_crop_function()
+    return _decode_multi_crop_batch_compiled
 
 
 # =============================================================================
@@ -499,6 +564,7 @@ class NumbaBatchDecoder:
         load_library()
         self._decode_fn = _get_decode_batch()
         self._decode_crop_fn = _get_decode_crop_batch()
+        self._decode_multi_crop_fn = _get_decode_multi_crop_batch()
 
         # Seed counter for random crops
         self._seed_counter = 0
@@ -507,6 +573,8 @@ class NumbaBatchDecoder:
         self._temp_buffer: np.ndarray | None = None
         self._dest_buffer: np.ndarray | None = None
         self._chw_buffer: np.ndarray | None = None
+        self._multi_crop_buffer: np.ndarray | None = None
+        self._multi_chw_buffer: np.ndarray | None = None
 
     def _ensure_temp_buffer(self, batch_size: int, max_h: int, max_w: int) -> np.ndarray:
         """Get or allocate temp buffer for decode."""
@@ -828,6 +896,92 @@ class NumbaBatchDecoder:
         # Tensor conversion + permute to [B, C, H, W] should happen in the pipeline
         return dest_buffer[:batch_size]
 
+    def decode_batch_multi_crop(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray,
+        heights: NDArray,
+        widths: NDArray,
+        num_crops: int = 2,
+        target_size: int = 224,
+        scale: tuple[float, float] = (0.08, 1.0),
+        ratio: tuple[float, float] = (3.0 / 4.0, 4.0 / 3.0),
+        seeds: list[int | None] | None = None,
+    ) -> list[NDArray[np.uint8]]:
+        """Decode batch once, then apply N random crops from decoded data.
+
+        Much faster than N separate decode_batch_random_crop calls because
+        JPEG decode (~80-92% of time) happens only once per image.
+
+        Args:
+            data: Padded JPEG data [B, max_size] uint8
+            sizes: Actual JPEG sizes [B]
+            heights: Image heights [B]
+            widths: Image widths [B]
+            num_crops: Number of random crops per image
+            target_size: Final output size (square)
+            scale: Scale range for random area
+            ratio: Aspect ratio range
+            seeds: Per-crop seeds for reproducibility. None = auto.
+
+        Returns:
+            List of num_crops arrays, each [B, target_size, target_size, 3] uint8
+        """
+        import math
+
+        batch_size = len(sizes)
+        max_h = int(np.max(heights))
+        max_w = int(np.max(widths))
+
+        # Ensure dtypes
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+        heights_i32 = heights if heights.dtype == np.int32 else np.ascontiguousarray(heights, dtype=np.int32)
+        widths_i32 = widths if widths.dtype == np.int32 else np.ascontiguousarray(widths, dtype=np.int32)
+
+        log_ratio_min = math.log(ratio[0])
+        log_ratio_max = math.log(ratio[1])
+
+        # Generate crop params for each crop view
+        all_crop_params = np.zeros((num_crops, batch_size, 4), dtype=np.int32)
+        for c in range(num_crops):
+            if seeds is not None and seeds[c] is not None:
+                self._seed_counter += 1
+                batch_seed = seeds[c] + self._seed_counter
+            else:
+                self._seed_counter += 1
+                batch_seed = self._seed_counter
+
+            all_crop_params[c] = _generate_random_crop_params_batch(
+                widths_i32, heights_i32,
+                scale[0], scale[1],
+                log_ratio_min, log_ratio_max,
+                batch_seed,
+            )
+
+        # Allocate buffers
+        temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
+
+        # Multi-crop destination: [num_crops, B, target_size, target_size, 3]
+        if (self._multi_crop_buffer is None or
+            self._multi_crop_buffer.shape[0] < num_crops or
+            self._multi_crop_buffer.shape[1] < batch_size or
+            self._multi_crop_buffer.shape[2] != target_size or
+            self._multi_crop_buffer.shape[3] != target_size):
+            self._multi_crop_buffer = np.zeros(
+                (num_crops, batch_size, target_size, target_size, 3), dtype=np.uint8)
+
+        # Decode once + multi-crop
+        self._decode_multi_crop_fn(
+            data, sizes_u64, heights_u32, widths_u32,
+            all_crop_params, temp_buffer, self._multi_crop_buffer,
+            target_size, target_size, num_crops,
+        )
+
+        # Return list of views, one per crop
+        return [self._multi_crop_buffer[c, :batch_size] for c in range(num_crops)]
+
     def hwc_to_chw(
         self,
         hwc: NDArray[np.uint8],
@@ -857,6 +1011,8 @@ class NumbaBatchDecoder:
         self._temp_buffer = None
         self._dest_buffer = None
         self._chw_buffer = None
+        self._multi_crop_buffer = None
+        self._multi_chw_buffer = None
 
     def __repr__(self) -> str:
         return f"NumbaBatchDecoder(num_threads={self.num_threads})"

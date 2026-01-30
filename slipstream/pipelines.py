@@ -159,6 +159,72 @@ class RandomResizedCrop(BatchTransform):
         )
 
 
+class MultiCropRandomResizedCrop(BatchTransform):
+    """Decode-once + N random crops for SSL multi-crop.
+
+    Decodes each JPEG once, then applies N different random crops from the
+    same decoded image. Much faster than N separate RandomResizedCrop stages
+    since JPEG decode (~80-92% of per-image time) happens only once.
+
+    Args:
+        num_crops: Number of random crop views per image.
+        size: Output size (square).
+        scale: Crop area range relative to original.
+        ratio: Aspect ratio range.
+        num_threads: Parallel decode threads. 0 = auto.
+        seeds: Per-crop seeds for reproducibility. None = auto.
+
+    Returns:
+        List of num_crops tensors, each [B, 3, size, size] uint8.
+
+    Example:
+        # Two random crop views for SimCLR/BYOL
+        multi_crop = MultiCropRandomResizedCrop(num_crops=2, size=224)
+        views = multi_crop(batch_data)  # [tensor1, tensor2]
+    """
+
+    def __init__(
+        self,
+        num_crops: int = 2,
+        size: int = 224,
+        scale: tuple[float, float] = (0.08, 1.0),
+        ratio: tuple[float, float] = (3 / 4, 4 / 3),
+        num_threads: int = 0,
+        seeds: list[int | None] | None = None,
+    ) -> None:
+        self.num_crops = num_crops
+        self.size = size
+        self.scale = scale
+        self.ratio = ratio
+        self.seeds = seeds
+        self._decoder = NumbaBatchDecoder(num_threads=num_threads)
+
+    def __call__(self, batch_data: dict[str, Any]) -> list[torch.Tensor]:
+        crops = self._decoder.decode_batch_multi_crop(
+            batch_data['data'], batch_data['sizes'],
+            batch_data['heights'], batch_data['widths'],
+            num_crops=self.num_crops, target_size=self.size,
+            scale=self.scale, ratio=self.ratio, seeds=self.seeds,
+        )
+        # Each hwc_to_chw call reuses the same _chw_buffer, so we must
+        # copy before the next call overwrites it. torch.from_numpy shares
+        # memory, so .clone() is needed.
+        results = []
+        for crop in crops:
+            chw = self._decoder.hwc_to_chw(crop)
+            results.append(torch.from_numpy(chw).clone())
+        return results
+
+    def shutdown(self) -> None:
+        self._decoder.shutdown()
+
+    def __repr__(self) -> str:
+        return (
+            f"MultiCropRandomResizedCrop(num_crops={self.num_crops}, size={self.size}, "
+            f"scale={self.scale}, ratio=({self.ratio[0]:.4f}, {self.ratio[1]:.4f}))"
+        )
+
+
 class ResizeCrop(BatchTransform):
     """Decode JPEG batch with resize shortest edge + center crop.
 
@@ -322,6 +388,7 @@ __all__ = [
     "DecodeOnly",
     "CenterCrop",
     "RandomResizedCrop",
+    "MultiCropRandomResizedCrop",
     "ResizeCrop",
     # Post-processing
     "Normalize",

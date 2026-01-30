@@ -34,6 +34,10 @@ These decisions were confirmed during project planning and should be followed:
      - Adds GPU/CPU decoders
      - Adds RandomResizedCrop, CenterCrop, normalization
      - Returns: decoded GPU tensors `[B, C, H, W]`
+     - Deterministic seeded shuffle (`seed=` param, epoch-varying via `seed + epoch`)
+     - Distributed training support (`distributed=True`, auto-detects rank/world_size)
+     - `set_epoch(n)` for manual epoch control (standard PyTorch distributed pattern)
+     - Subset filtering (`indices=` param, for debugging/few-shot/custom sampling)
 
 - **Dataset sources**: Start with LitData variant only, expand later
   - Future: `SlipstreamDataset.from_litdata()`, `.from_imagefolder()`, `.from_huggingface()`
@@ -184,6 +188,25 @@ All benchmarks on **machina** (GPU workstation: AMD Threadripper PRO 3975WX, 64 
 - ✅ **7-10x faster than litdata-mmap's crop path**
 - No OpenCV required — stb_image_resize2 is sufficient (resize is only 8-20% of per-image time)
 
+### SlipstreamLoader End-to-End (measured 2026-01-29)
+
+| Pipeline | Samples/sec | vs Direct Decoder | Status |
+|----------|-------------|-------------------|--------|
+| **Raw I/O (simple)** | **958,270** | 102% of OptimizedCache | ✅ |
+| **RRC (simple)** | **12,947** | 93% of direct | ✅ |
+| **RRC (threaded)** | **13,498** | 97% of direct | ✅ |
+| **CenterCrop (simple)** | **15,449** | 98% of direct | ✅ |
+| **CenterCrop (threaded)** | **14,768** | 94% of direct | ✅ |
+| **2x RRC fused multi-crop (simple)** | **10,653** | 48% faster than naive 2x | ✅ |
+| **2x RRC fused multi-crop (threaded)** | **10,453** | 46% faster than naive 2x | ✅ |
+| Raw I/O (threaded) | 76,409 | — | Threading overhead |
+
+**Analysis:**
+- ✅ Loader overhead is <7% for decode+crop pipelines
+- ✅ Fused multi-crop (decode-once, crop-N-times) gives ~48% speedup over naive 2x decode
+- Simple mode is preferred — threading adds overhead without benefit for this workload
+- Threaded raw I/O is slow due to `parallel=False` constraint (Numba workqueue not thread-safe for concurrent access)
+
 ### GPU Decode + Transforms (nvImageCodec)
 
 | System | Decode Only | + CenterCrop | + RRC | Status |
@@ -311,7 +334,13 @@ slipstream/
 2. ✅ Multi-crop SSL support (list-of-pipelines per field)
 3. ✅ Pipeline stages: DecodeOnly, CenterCrop, RandomResizedCrop, ResizeCrop
 4. ✅ Seed support for reproducible multi-crop
-5. ⬜ Port FFCVFileDataset (.beton reader)
+5. ✅ Deterministic seeded shuffle (`seed=`, epoch-varying via `seed + epoch`)
+6. ✅ Distributed training support (`distributed=True`, strided partitioning, `set_epoch()`)
+6b. ✅ Subset filtering (`indices=` param, matches FFCV's `indices` parameter)
+6c. ⬜ Label index metadata: store `labels_index.npy` in optimized cache (label → sample indices mapping), accessible as a dataset/cache attribute. Enables class-based subsetting without copying datasets — e.g. get indices for 100 ImageNet classes and pass them to `SlipstreamLoader(ds, indices=...)` for Imagenet100/Imagenette
+7. ⬜ Visual verification of loader outputs (view decoded images, multi-crop views, seed reproducibility)
+8. ⬜ Sample correctness: verify loader outputs match source streaming dataset samples
+9. ⬜ Port FFCVFileDataset (.beton reader)
 
 ### Phase 4: Augmentations
 
@@ -323,10 +352,15 @@ slipstream/
 
 1. ✅ Decode benchmarks (benchmark_decode.py)
 2. ⬜ 3-epoch test framework
-3. ⬜ End-to-end loader benchmarks
+3. ✅ End-to-end loader benchmarks (benchmark_loader.py)
 4. ⬜ Comparison vs FFCV baseline
 
-### Phase 6: Documentation
+### Phase 6: Future Enhancements
+
+1. ⬜ Additional dataset sources: `SlipstreamDataset.from_imagefolder()` (torchvision ImageFolder), `.from_huggingface()` (HuggingFace datasets). Note: HuggingFace and ImageFolder can also be wrapped via LitData StreamingDataset, so direct support may not be needed — evaluate whether the LitData path is sufficient or if native adapters offer meaningful benefits (e.g., skipping the streaming conversion step).
+2. ⬜ Alternative image storage formats: investigate JPEG XL (jxl) and QOI as alternatives to JPEG in the optimized cache. Both decode significantly faster than JPEG — QOI is ~3-4x faster decode, JPEG XL offers better compression with faster decode than TurboJPEG. Would require extending `OptimizedCache.build()` to transcode on ingest and adding decoder paths in `libslipstream.cpp` / NumbaBatchDecoder.
+
+### Phase 7: Documentation
 
 1. ⬜ README with usage examples
 2. ⬜ API documentation

@@ -47,7 +47,9 @@ def benchmark_loader(
 ) -> BenchmarkResult:
     """Benchmark SlipstreamLoader with specified pipeline."""
     from slipstream import SlipstreamLoader
-    from slipstream.pipelines import CenterCrop, RandomResizedCrop
+    from slipstream.pipelines import (
+        CenterCrop, RandomResizedCrop, MultiCropRandomResizedCrop,
+    )
 
     mode = "threaded" if use_threading else "simple"
 
@@ -68,11 +70,12 @@ def benchmark_loader(
     elif pipeline_type == "multi-crop":
         pipelines = {
             "image": [
-                [RandomResizedCrop(target_size, num_threads=num_threads)],
-                [RandomResizedCrop(target_size, num_threads=num_threads)],
+                MultiCropRandomResizedCrop(
+                    num_crops=2, size=target_size, num_threads=num_threads,
+                ),
             ],
         }
-        name = f"SlipstreamLoader (2x RRC multi-crop, {mode})"
+        name = f"SlipstreamLoader (2x RRC fused multi-crop, {mode})"
     else:  # raw
         pipelines = None
         name = f"SlipstreamLoader (raw, {mode})"
@@ -160,6 +163,7 @@ def main():
     parser.add_argument("--target-size", type=int, default=224, help="Target crop size")
     parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results")
     parser.add_argument("--skip-multi-crop", action="store_true", help="Skip multi-crop benchmark")
+    parser.add_argument("--multi-crop", action="store_true", help="Only run multi-crop benchmark")
     parser.add_argument("--save", action="store_true", help="Save results to JSON file")
     parser.add_argument("--output", type=str, default=None, help="Output JSON path (implies --save)")
     args = parser.parse_args()
@@ -187,24 +191,25 @@ def main():
 
     results = []
 
-    # Benchmark each pipeline type with simple mode (less overhead)
-    for pipeline_type in ["raw", "train", "val"]:
-        result = benchmark_loader(
-            dataset, args.batch_size, args.epochs, args.warmup,
-            pipeline_type=pipeline_type, num_threads=args.num_threads,
-            target_size=args.target_size, use_threading=False,
-        )
-        results.append(result)
+    # Benchmark each pipeline type (skip if --multi-crop)
+    if not args.multi_crop:
+        for pipeline_type in ["raw", "train", "val"]:
+            result = benchmark_loader(
+                dataset, args.batch_size, args.epochs, args.warmup,
+                pipeline_type=pipeline_type, num_threads=args.num_threads,
+                target_size=args.target_size, use_threading=False,
+            )
+            results.append(result)
 
-        result = benchmark_loader(
-            dataset, args.batch_size, args.epochs, args.warmup,
-            pipeline_type=pipeline_type, num_threads=args.num_threads,
-            target_size=args.target_size, use_threading=True,
-        )
-        results.append(result)
+            result = benchmark_loader(
+                dataset, args.batch_size, args.epochs, args.warmup,
+                pipeline_type=pipeline_type, num_threads=args.num_threads,
+                target_size=args.target_size, use_threading=True,
+            )
+            results.append(result)
 
     # Multi-crop SSL benchmark
-    if not args.skip_multi_crop:
+    if args.multi_crop or not args.skip_multi_crop:
         result = benchmark_loader(
             dataset, args.batch_size, args.epochs, args.warmup,
             pipeline_type="multi-crop", num_threads=args.num_threads,

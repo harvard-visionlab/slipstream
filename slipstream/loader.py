@@ -45,6 +45,7 @@ Performance:
 
 from __future__ import annotations
 
+import math
 import queue
 import threading
 from collections.abc import Callable, Sequence
@@ -107,6 +108,9 @@ class SlipstreamLoader:
         dataset: SlipstreamDataset,
         batch_size: int = 256,
         shuffle: bool = True,
+        seed: int | None = None,
+        distributed: bool = False,
+        indices: Sequence[int] | np.ndarray | None = None,
         drop_last: bool = True,
         batches_ahead: int = 3,
         pipelines: dict[str, Sequence[BatchTransform] | BatchTransform | Callable] | None = None,
@@ -123,6 +127,14 @@ class SlipstreamLoader:
             dataset: SlipstreamDataset to load from
             batch_size: Number of samples per batch
             shuffle: Shuffle indices each epoch
+            seed: Random seed for deterministic shuffle. If None, shuffle is
+                non-deterministic. When set, epoch N uses seed (seed + N).
+            distributed: Enable distributed training partitioning. Requires
+                torch.distributed to be initialized. Each rank gets a
+                disjoint strided subset of the shuffled indices.
+            indices: Subset of dataset sample indices to use. If None, all
+                samples are used. Useful for debugging, few-shot experiments,
+                or custom sampling strategies.
             drop_last: Drop incomplete final batch
             batches_ahead: Number of batches to prefetch
             pipelines: Dict mapping field names to transform pipelines.
@@ -139,7 +151,25 @@ class SlipstreamLoader:
         self.dataset = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
+        self.seed = seed
+        self.indices = np.asarray(indices, dtype=np.int64) if indices is not None else None
         self.drop_last = drop_last
+        self._epoch = 0
+
+        # Distributed setup
+        if distributed:
+            import torch.distributed as dist
+            if not dist.is_initialized():
+                raise RuntimeError(
+                    "torch.distributed must be initialized before creating "
+                    "a distributed SlipstreamLoader"
+                )
+            self.rank = dist.get_rank()
+            self.world_size = dist.get_world_size()
+        else:
+            self.rank = 0
+            self.world_size = 1
+        self.distributed = distributed
         self.batches_ahead = batches_ahead
         self.image_field = image_field
         self.exclude_fields = set(exclude_fields or [])
@@ -191,6 +221,49 @@ class SlipstreamLoader:
 
         # Pre-allocate memory banks for prefetching (only for image field)
         self._setup_prefetch_banks()
+
+    def _generate_indices(self, epoch: int) -> np.ndarray:
+        """Generate sample indices for an epoch.
+
+        When shuffle is enabled, indices are shuffled using a deterministic
+        RNG if seed is set, otherwise non-deterministic. When distributed,
+        indices are padded to be evenly divisible by world_size, then each
+        rank takes a strided subset (matching PyTorch DistributedSampler).
+
+        Args:
+            epoch: Current epoch number, used with seed for deterministic ordering.
+
+        Returns:
+            Array of sample indices for this rank to process.
+        """
+        if self.indices is not None:
+            indices = self.indices.copy()
+            n = len(indices)
+        else:
+            n = len(self.cache)
+            indices = np.arange(n, dtype=np.int64)
+
+        if self.shuffle:
+            rng_seed = (self.seed + epoch) if self.seed is not None else None
+            rng = np.random.default_rng(rng_seed)
+            rng.shuffle(indices)
+
+        if self.distributed:
+            total = math.ceil(n / self.world_size) * self.world_size
+            if total > n:
+                indices = np.concatenate([indices, indices[:total - n]])
+            indices = indices[self.rank::self.world_size]
+
+        return indices
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set epoch for deterministic shuffle ordering.
+
+        In distributed training, call this before each epoch to ensure
+        different shuffle orderings across epochs while keeping all
+        ranks synchronized.
+        """
+        self._epoch = epoch
 
     def _setup_prefetch_banks(self) -> None:
         """Set up pre-allocated memory banks for async prefetching."""
@@ -256,9 +329,8 @@ class SlipstreamLoader:
 
     def _iter_simple(self):
         """Simple iteration without threading (for debugging/profiling)."""
-        indices = np.arange(len(self.cache), dtype=np.int64)
-        if self.shuffle:
-            np.random.shuffle(indices)
+        indices = self._generate_indices(self._epoch)
+        self._epoch += 1
 
         num_batches = len(indices) // self.batch_size
         if not self.drop_last and len(indices) % self.batch_size != 0:
@@ -318,9 +390,8 @@ class SlipstreamLoader:
 
     def _iter_threaded(self):
         """Threaded iteration with async prefetching."""
-        indices = np.arange(len(self.cache), dtype=np.int64)
-        if self.shuffle:
-            np.random.shuffle(indices)
+        indices = self._generate_indices(self._epoch)
+        self._epoch += 1
 
         num_batches = len(indices) // self.batch_size
         if not self.drop_last and len(indices) % self.batch_size != 0:
@@ -436,9 +507,14 @@ class SlipstreamLoader:
 
     def __len__(self) -> int:
         """Return number of batches per epoch."""
+        total = len(self.indices) if self.indices is not None else len(self.cache)
+        if self.distributed:
+            per_rank = math.ceil(total / self.world_size)
+        else:
+            per_rank = total
         if self.drop_last:
-            return len(self.cache) // self.batch_size
-        return (len(self.cache) + self.batch_size - 1) // self.batch_size
+            return per_rank // self.batch_size
+        return (per_rank + self.batch_size - 1) // self.batch_size
 
     def shutdown(self) -> None:
         """Release resources."""
@@ -472,10 +548,24 @@ class SlipstreamLoader:
 
         pipelines_str = "{" + ", ".join(pipeline_strs) + "}" if pipeline_strs else "{}"
 
+        indices_str = (
+            f"    indices={len(self.indices):,} of {len(self.cache):,} samples,\n"
+            if self.indices is not None else ""
+        )
+        seed_str = f"    seed={self.seed},\n" if self.seed is not None else ""
+        dist_str = (
+            f"    distributed=True (rank={self.rank}, world_size={self.world_size}),\n"
+            if self.distributed else ""
+        )
+
         return (
             f"SlipstreamLoader(\n"
             f"    num_samples={len(self.cache):,},\n"
             f"    batch_size={self.batch_size},\n"
+            f"    shuffle={self.shuffle},\n"
+            f"{indices_str}"
+            f"{seed_str}"
+            f"{dist_str}"
             f"    pipelines={pipelines_str},\n"
             f"    device='{self._device_str}',\n"
             f"    fields={self._fields_to_load},\n"
