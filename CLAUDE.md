@@ -304,7 +304,8 @@ slipstream/
 └── notebooks/
     ├── 00_environment_test.ipynb  # ✅ Environment verification
     ├── 01_dataset_basics.ipynb    # ✅ SlipstreamDataset tutorial
-    └── 02_field_indexes.ipynb     # ✅ Field indexes & class-based subsetting
+    ├── 02_field_indexes.ipynb     # ✅ Field indexes & class-based subsetting
+    └── 03_visual_verification.ipynb # ✅ Visual verification of loader outputs
 ```
 
 ---
@@ -351,7 +352,7 @@ slipstream/
 6. ✅ Distributed training support (`distributed=True`, strided partitioning, `set_epoch()`)
    6b. ✅ Subset filtering (`indices=` param, matches FFCV's `indices` parameter)
    6c. ✅ Field index utility: `write_index(cache, fields=['label'])` builds `{field}_index.npy` in cache dir (unique value → sample indices mapping). Auto-discovered on `OptimizedCache.load()`, accessed via `cache.get_index('label')`. Works for any numeric or string field. Enables class-based subsetting — e.g. get indices for 10 ImageNet classes and pass to `SlipstreamLoader(ds, indices=...)` for Imagenette
-7. ⬜ Visual verification of loader outputs (view decoded images, multi-crop views, seed reproducibility)
+7. ✅ Visual verification of loader outputs (view decoded images, multi-crop views, seed reproducibility)
 8. ✅ FFCVFileReader (.beton/.ffcv reader, no FFCV dependency)
     - Reader protocol: `cache_path`, `field_types`, `__len__`, `__getitem__`, `read_all_fields()`
     - Reads all FFCV field types: RGBImageField, IntField, FloatField, JSONField, BytesField
@@ -368,13 +369,13 @@ slipstream/
 2. ⬜ TODO markers for cleanup/standardization
 3. ⬜ Implement DirectRandomResizedCrop (analytic, no rejection sampling)
 
-### Phase 5: Testing & Benchmarks
+### Phase 5: Testing & Benchmarks ✅ COMPLETE
 
 1. ✅ Decode benchmarks (benchmark_decode.py)
-2. ⬜ 3-epoch test framework
+2. ✅ Multi-epoch benchmarks with warmup (benchmark_loader.py — covers cold/warm epoch testing)
 3. ✅ End-to-end loader benchmarks (benchmark_loader.py)
 4. ✅ FFCV reader loader benchmark (benchmark_ffcv_loader.py)
-5. ⬜ Comparison vs FFCV baseline
+5. ✅ FFCV baseline comparison (all targets met or exceeded — see Benchmark Results above)
 
 ### Phase 5b: End-to-End Correctness Verification
 
@@ -399,7 +400,11 @@ These tests verify that the slip cache format faithfully represents the source d
 ### Phase 6: Future Enhancements
 
 1. ⬜ Additional dataset sources: `SlipstreamDataset.from_imagefolder()` (torchvision ImageFolder), `.from_huggingface()` (HuggingFace datasets). Note: HuggingFace and ImageFolder can also be wrapped via LitData StreamingDataset, so direct support may not be needed — evaluate whether the LitData path is sufficient or if native adapters offer meaningful benefits (e.g., skipping the streaming conversion step).
-2. ⬜ Alternative image storage formats: investigate JPEG XL (jxl) and QOI as alternatives to JPEG in the optimized cache. Both decode significantly faster than JPEG — QOI is ~3-4x faster decode, JPEG XL offers better compression with faster decode than TurboJPEG. Would require extending `OptimizedCache.build()` to transcode on ingest and adding decoder paths in `libslipstream.cpp` / NumbaBatchDecoder.
+2. ✅ Alternative image storage formats: **investigated and benchmarked** (see `experiments/format_comparison/`).
+    - **JPEG XL: eliminated.** Tested lossless (Modular), lossy (VarDCT d=1.0), and fast lossy (d=2.0, effort=1, decodingspeed=4). All 2.5-19x *slower* than TurboJPEG. JXL is not competitive for this workload.
+    - **QOI: 1.22x faster** decode than JPEG (Python single-threaded). Modest but could improve with C/Numba integration (QOI's simpler algorithm may benefit more from prange parallelism). Storage cost: 2.06x JPEG. Worth revisiting if decode headroom is needed.
+    - **Raw RGB: 35x faster** (no decode, just memcpy). Confirms decode is 95% of per-image time. 3.9x storage cost makes this impractical but useful as a ceiling measurement.
+    - **Conclusion:** TurboJPEG is near-optimal for 256-512px images. No format change justified at this time.
 
 ### Phase 7: Documentation
 
