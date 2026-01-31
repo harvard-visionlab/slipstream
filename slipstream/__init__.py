@@ -89,6 +89,8 @@ from slipstream.pipelines import (
     CenterCrop,
     Compose,
     DecodeOnly,
+    DecodeYUVFullRes,
+    DecodeYUVPlanes,
     MultiCropRandomResizedCrop,
     IMAGENET_MEAN,
     IMAGENET_STD,
@@ -102,6 +104,10 @@ from slipstream.pipelines import (
 
 # Readers (dataset format adapters)
 from slipstream.readers import FFCVFileReader
+
+# Utilities
+from slipstream.s3_sync import sync_s3_dataset
+from slipstream.stats import compute_normalization_stats
 
 # Crop utilities
 from slipstream.utils.crop import (
@@ -126,6 +132,8 @@ __all__ = [
     "BatchTransform",
     "Compose",
     "DecodeOnly",
+    "DecodeYUVFullRes",
+    "DecodeYUVPlanes",
     "RandomResizedCrop",
     "MultiCropRandomResizedCrop",
     "CenterCrop",
@@ -156,4 +164,7 @@ __all__ = [
     "FFCVFilePrefetchingDataLoader",
     # Readers
     "FFCVFileReader",
+    # Utilities
+    "sync_s3_dataset",
+    "compute_normalization_stats",
 ]

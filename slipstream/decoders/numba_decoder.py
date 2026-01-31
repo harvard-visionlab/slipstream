@@ -98,18 +98,19 @@ def load_library() -> CDLL:
     _lib.jpeg_header.argtypes = [c_void_p, c_uint64, POINTER(c_uint32), POINTER(c_uint32)]
     _lib.jpeg_header.restype = c_int
 
-    # imdecode_simple(input, size, output, height, width) -> int
+    # imdecode_simple(input, size, output, height, width, out_stride) -> int
     _lib.imdecode_simple.argtypes = [
-        c_void_p, c_uint64, c_void_p, c_uint32, c_uint32
+        c_void_p, c_uint64, c_void_p, c_uint32, c_uint32, c_uint32
     ]
     _lib.imdecode_simple.restype = c_int
 
     # resize_crop(source_p, source_h, source_w, crop_y, crop_x, crop_h, crop_w,
-    #             dest_p, target_h, target_w) -> int
+    #             dest_p, target_h, target_w, source_stride_w) -> int
     _lib.resize_crop.argtypes = [
         c_int64, c_int64, c_int64,  # source_p, source_h, source_w
         c_int64, c_int64, c_int64, c_int64,  # crop_y, crop_x, crop_h, crop_w
         c_int64, c_int64, c_int64,  # dest_p, target_h, target_w
+        c_int64,  # source_stride_w
     ]
     _lib.resize_crop.restype = c_int
 
@@ -145,6 +146,7 @@ def imdecode_simple_numba(
     dst: np.ndarray,
     height: int,
     width: int,
+    out_stride: int,
 ) -> int:
     """Numba-compatible imdecode_simple wrapper.
 
@@ -157,7 +159,7 @@ def imdecode_simple_numba(
     return _ctypes_imdecode_simple(
         source.ctypes.data, source.size,
         dst.ctypes.data,
-        height, width,
+        height, width, out_stride,
     )
 
 
@@ -172,6 +174,7 @@ def resize_crop_numba(
     dest: np.ndarray,
     target_h: int,
     target_w: int,
+    source_stride_w: int,
 ) -> int:
     """Numba-compatible resize_crop wrapper."""
     global _ctypes_resize_crop
@@ -181,6 +184,7 @@ def resize_crop_numba(
         source.ctypes.data, source_h, source_w,
         crop_y, crop_x, crop_h, crop_w,
         dest.ctypes.data, target_h, target_w,
+        source_stride_w,
     )
 
 
@@ -269,7 +273,7 @@ def _create_decode_function() -> Any:
             dst = destination[i, :h, :w, :]
 
             # Call the compiled imdecode
-            imdecode_c(source, dst, h, w)
+            imdecode_c(source, dst, h, w, destination.shape[2])
 
         return destination[:batch_size]
 
@@ -308,8 +312,8 @@ def _create_decode_with_crop_function() -> Any:
             source = jpeg_data[i, :size]
             temp = temp_buffer[i, :h, :w, :]
 
-            # Decode to temp buffer
-            imdecode_c(source, temp, h, w)
+            # Decode to temp buffer (packed stride=w for cache efficiency)
+            imdecode_c(source, temp, h, w, w)
 
             # Get crop parameters
             crop_x = int(crop_params[i, 0])
@@ -323,6 +327,7 @@ def _create_decode_with_crop_function() -> Any:
                 temp, h, w,
                 crop_y, crop_x, crop_h, crop_w,
                 dest, target_h, target_w,
+                w,
             )
 
         return destination[:batch_size]
@@ -361,10 +366,10 @@ def _create_decode_multi_crop_function() -> Any:
             h = int(heights[i])
             w = int(widths[i])
 
-            # Decode JPEG to temp buffer (ONCE per image)
+            # Decode JPEG to temp buffer (packed stride=w for cache efficiency)
             source = jpeg_data[i, :size]
             temp = temp_buffer[i, :h, :w, :]
-            imdecode_c(source, temp, h, w)
+            imdecode_c(source, temp, h, w, w)
 
             # Apply each crop from the same decoded image
             for c in range(num_crops):
@@ -378,6 +383,7 @@ def _create_decode_multi_crop_function() -> Any:
                     temp, h, w,
                     crop_y, crop_x, crop_h, crop_w,
                     dest, target_h, target_w,
+                    w,
                 )
 
         return destinations

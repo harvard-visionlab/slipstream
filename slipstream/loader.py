@@ -119,6 +119,9 @@ class SlipstreamLoader:
         exclude_fields: list[str] | None = None,
         image_format: str = "jpeg",
         force_rebuild: bool = False,
+        presync_s3: bool = False,
+        presync_s3_workers: int = 32,
+        presync_s3_endpoint_url: str | None = None,
         verbose: bool = True,
         use_threading: bool = True,
     ) -> None:
@@ -148,6 +151,13 @@ class SlipstreamLoader:
                 for ~1.7-1.9x faster decode (built on demand from JPEG cache).
             exclude_fields: List of field names to exclude from loading
             force_rebuild: Force rebuilding the optimized cache
+            presync_s3: If True, use s5cmd to sync the dataset's S3 remote
+                directory to local disk before building the optimized cache.
+                Much faster than LitData's built-in download for large datasets.
+                Requires s5cmd to be installed.
+            presync_s3_workers: Number of parallel s5cmd workers for presync.
+            presync_s3_endpoint_url: S3-compatible endpoint URL for presync
+                (e.g. for Wasabi).
             verbose: Print progress messages
             use_threading: Use background thread for prefetching (default True).
                 Set to False for debugging to isolate threading overhead.
@@ -202,6 +212,21 @@ class SlipstreamLoader:
                     self.pipelines[field_name] = list(pipeline)
                 else:
                     self.pipelines[field_name] = [pipeline]
+
+        # Pre-sync S3 data to local disk if requested
+        if presync_s3:
+            remote = getattr(dataset, 'remote_dir', None)
+            if remote is not None:
+                from slipstream.s3_sync import sync_s3_dataset
+                sync_s3_dataset(
+                    remote,
+                    cache_dir=dataset.cache_path,
+                    endpoint_url=presync_s3_endpoint_url,
+                    numworkers=presync_s3_workers,
+                    verbose=verbose,
+                )
+            elif verbose:
+                print("presync_s3=True but dataset has no remote_dir, skipping sync")
 
         # Build or load optimized cache
         cache_dir = dataset.cache_path

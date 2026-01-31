@@ -31,18 +31,74 @@ from slipstream.decoders.numba_decoder import (
 __all__ = ["YUV420NumbaBatchDecoder"]
 
 _ctypes_yuv420_decode: Any = None
+_ctypes_yuv420_to_yuv_fullres: Any = None
+_ctypes_yuv420_extract_planes: Any = None
 
 
 def _setup_yuv420_ctypes() -> None:
-    global _ctypes_yuv420_decode
+    global _ctypes_yuv420_decode, _ctypes_yuv420_to_yuv_fullres, _ctypes_yuv420_extract_planes
     if _ctypes_yuv420_decode is not None:
         return
     lib = load_library()
     lib.yuv420p_to_rgb_buffer.argtypes = [
-        c_void_p, c_uint64, c_void_p, c_uint32, c_uint32
+        c_void_p, c_uint64, c_void_p, c_uint32, c_uint32, c_uint32
     ]
     lib.yuv420p_to_rgb_buffer.restype = c_int
     _ctypes_yuv420_decode = lib.yuv420p_to_rgb_buffer
+
+    lib.yuv420p_to_yuv_fullres.argtypes = [
+        c_void_p, c_uint64, c_void_p, c_uint32, c_uint32, c_uint32
+    ]
+    lib.yuv420p_to_yuv_fullres.restype = c_int
+    _ctypes_yuv420_to_yuv_fullres = lib.yuv420p_to_yuv_fullres
+
+    lib.yuv420p_extract_planes.argtypes = [
+        c_void_p, c_uint64, c_void_p, c_void_p, c_void_p, c_uint32, c_uint32,
+        c_uint32, c_uint32
+    ]
+    lib.yuv420p_extract_planes.restype = c_int
+    _ctypes_yuv420_extract_planes = lib.yuv420p_extract_planes
+
+
+def _make_yuv420_fullres_wrapper() -> Any:
+    """Create YUV420→fullres YUV wrapper after ctypes are initialized."""
+    fn = _ctypes_yuv420_to_yuv_fullres
+
+    def yuv420_to_yuv_fullres_numba(
+        source: np.ndarray,
+        dst: np.ndarray,
+        height: int,
+        width: int,
+        out_stride: int,
+    ) -> int:
+        return fn(
+            source.ctypes.data, source.size,
+            dst.ctypes.data,
+            height, width, out_stride,
+        )
+    return yuv420_to_yuv_fullres_numba
+
+
+def _make_yuv420_extract_planes_wrapper() -> Any:
+    """Create YUV420 plane extraction wrapper after ctypes are initialized."""
+    fn = _ctypes_yuv420_extract_planes
+
+    def yuv420_extract_planes_numba(
+        source: np.ndarray,
+        y_out: np.ndarray,
+        u_out: np.ndarray,
+        v_out: np.ndarray,
+        height: int,
+        width: int,
+        y_out_stride: int,
+        uv_out_stride: int,
+    ) -> int:
+        return fn(
+            source.ctypes.data, source.size,
+            y_out.ctypes.data, u_out.ctypes.data, v_out.ctypes.data,
+            height, width, y_out_stride, uv_out_stride,
+        )
+    return yuv420_extract_planes_numba
 
 
 def yuv420_decode_numba(
@@ -50,6 +106,7 @@ def yuv420_decode_numba(
     dst: np.ndarray,
     height: int,
     width: int,
+    out_stride: int,
 ) -> int:
     global _ctypes_yuv420_decode
     if _ctypes_yuv420_decode is None:
@@ -57,7 +114,7 @@ def yuv420_decode_numba(
     return _ctypes_yuv420_decode(
         source.ctypes.data, source.size,
         dst.ctypes.data,
-        height, width,
+        height, width, out_stride,
     )
 
 
@@ -73,13 +130,14 @@ def _create_yuv420_decode_function() -> Any:
         destination: np.ndarray,
     ) -> np.ndarray:
         batch_size = len(sizes)
+        out_stride = destination.shape[2]
         for i in my_range(batch_size):
             size = int(sizes[i])
             h = int(heights[i])
             w = int(widths[i])
             source = yuv_data[i, :size]
             dst = destination[i, :h, :w, :]
-            yuv_c(source, dst, h, w)
+            yuv_c(source, dst, h, w, out_stride)
         return destination[:batch_size]
 
     decode_batch.is_parallel = True
@@ -109,7 +167,7 @@ def _create_yuv420_decode_with_crop_function() -> Any:
             w = int(widths[i])
             source = yuv_data[i, :size]
             temp = temp_buffer[i, :h, :w, :]
-            yuv_c(source, temp, h, w)
+            yuv_c(source, temp, h, w, w)
 
             crop_x = int(crop_params[i, 0])
             crop_y = int(crop_params[i, 1])
@@ -121,6 +179,7 @@ def _create_yuv420_decode_with_crop_function() -> Any:
                 temp, h, w,
                 crop_y, crop_x, crop_h, crop_w,
                 dest, target_h, target_w,
+                w,
             )
 
         return destination[:batch_size]
@@ -154,7 +213,7 @@ def _create_yuv420_decode_multi_crop_function() -> Any:
 
             source = yuv_data[i, :size]
             temp = temp_buffer[i, :h, :w, :]
-            yuv_c(source, temp, h, w)
+            yuv_c(source, temp, h, w, w)
 
             for c in range(num_crops):
                 crop_x = int(all_crop_params[c, i, 0])
@@ -167,6 +226,7 @@ def _create_yuv420_decode_multi_crop_function() -> Any:
                     temp, h, w,
                     crop_y, crop_x, crop_h, crop_w,
                     dest, target_h, target_w,
+                    w,
                 )
 
         return destinations
@@ -175,9 +235,66 @@ def _create_yuv420_decode_multi_crop_function() -> Any:
     return Compiler.compile(decode_multi_crop_batch)
 
 
+def _create_yuv420_to_yuv_fullres_function() -> Any:
+    yuv_fullres_c = Compiler.compile(_make_yuv420_fullres_wrapper())
+    my_range = Compiler.get_iterator()
+
+    def decode_yuv_fullres_batch(
+        yuv_data: np.ndarray,
+        sizes: np.ndarray,
+        heights: np.ndarray,
+        widths: np.ndarray,
+        destination: np.ndarray,
+    ) -> np.ndarray:
+        batch_size = len(sizes)
+        out_stride = destination.shape[2]
+        for i in my_range(batch_size):
+            size = int(sizes[i])
+            h = int(heights[i])
+            w = int(widths[i])
+            source = yuv_data[i, :size]
+            dst = destination[i, :h, :w, :]
+            yuv_fullres_c(source, dst, h, w, out_stride)
+        return destination[:batch_size]
+
+    decode_yuv_fullres_batch.is_parallel = True
+    return Compiler.compile(decode_yuv_fullres_batch)
+
+
+def _create_yuv420_extract_planes_function() -> Any:
+    extract_c = Compiler.compile(_make_yuv420_extract_planes_wrapper())
+    my_range = Compiler.get_iterator()
+
+    def extract_planes_batch(
+        yuv_data: np.ndarray,
+        sizes: np.ndarray,
+        heights: np.ndarray,
+        widths: np.ndarray,
+        y_dest: np.ndarray,
+        u_dest: np.ndarray,
+        v_dest: np.ndarray,
+    ) -> int:
+        batch_size = len(sizes)
+        for i in my_range(batch_size):
+            size = int(sizes[i])
+            h = int(heights[i])
+            w = int(widths[i])
+            source = yuv_data[i, :size]
+            y_out = y_dest[i, :h, :w]
+            u_out = u_dest[i, :h // 2, :w // 2]
+            v_out = v_dest[i, :h // 2, :w // 2]
+            extract_c(source, y_out, u_out, v_out, h, w, y_dest.shape[2], u_dest.shape[2])
+        return batch_size
+
+    extract_planes_batch.is_parallel = True
+    return Compiler.compile(extract_planes_batch)
+
+
 _yuv420_decode_compiled: Any = None
 _yuv420_decode_crop_compiled: Any = None
 _yuv420_decode_multi_crop_compiled: Any = None
+_yuv420_yuv_fullres_compiled: Any = None
+_yuv420_extract_planes_compiled: Any = None
 
 
 def _get_yuv420_decode() -> Any:
@@ -204,6 +321,22 @@ def _get_yuv420_decode_multi_crop() -> Any:
     return _yuv420_decode_multi_crop_compiled
 
 
+def _get_yuv420_yuv_fullres() -> Any:
+    global _yuv420_yuv_fullres_compiled
+    if _yuv420_yuv_fullres_compiled is None:
+        _setup_yuv420_ctypes()
+        _yuv420_yuv_fullres_compiled = _create_yuv420_to_yuv_fullres_function()
+    return _yuv420_yuv_fullres_compiled
+
+
+def _get_yuv420_extract_planes() -> Any:
+    global _yuv420_extract_planes_compiled
+    if _yuv420_extract_planes_compiled is None:
+        _setup_yuv420_ctypes()
+        _yuv420_extract_planes_compiled = _create_yuv420_extract_planes_function()
+    return _yuv420_extract_planes_compiled
+
+
 class YUV420NumbaBatchDecoder:
     """High-performance batch YUV420P→RGB decoder using Numba prange + C extension.
 
@@ -220,6 +353,8 @@ class YUV420NumbaBatchDecoder:
         self._decode_fn = _get_yuv420_decode()
         self._decode_crop_fn = _get_yuv420_decode_crop()
         self._decode_multi_crop_fn = _get_yuv420_decode_multi_crop()
+        self._yuv_fullres_fn = _get_yuv420_yuv_fullres()
+        self._extract_planes_fn = _get_yuv420_extract_planes()
         self._seed_counter = 0
 
         self._temp_buffer: np.ndarray | None = None
@@ -227,6 +362,10 @@ class YUV420NumbaBatchDecoder:
         self._chw_buffer: np.ndarray | None = None
         self._multi_crop_buffer: np.ndarray | None = None
         self._multi_chw_buffer: np.ndarray | None = None
+        self._yuv_fullres_buffer: np.ndarray | None = None
+        self._y_plane_buffer: np.ndarray | None = None
+        self._u_plane_buffer: np.ndarray | None = None
+        self._v_plane_buffer: np.ndarray | None = None
 
     def _ensure_temp_buffer(self, batch_size: int, max_h: int, max_w: int) -> np.ndarray:
         if (self._temp_buffer is None or
@@ -534,12 +673,97 @@ class YUV420NumbaBatchDecoder:
 
         return results
 
+    def decode_batch_yuv_fullres(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray,
+        heights: NDArray,
+        widths: NDArray,
+    ) -> list[NDArray[np.uint8]]:
+        """Decode YUV420P to full-resolution YUV (nearest-neighbor U/V upsample).
+
+        Returns a list of [H, W, 3] uint8 arrays where channels are (Y, U, V)
+        at full resolution. Same shape as RGB output but in YUV colorspace.
+        """
+        batch_size = len(sizes)
+        max_h = int(np.max(heights))
+        max_w = int(np.max(widths))
+
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+
+        if (self._yuv_fullres_buffer is None or
+            self._yuv_fullres_buffer.shape[0] < batch_size or
+            self._yuv_fullres_buffer.shape[1] < max_h or
+            self._yuv_fullres_buffer.shape[2] < max_w):
+            self._yuv_fullres_buffer = np.zeros((batch_size, max_h, max_w, 3), dtype=np.uint8)
+
+        self._yuv_fullres_fn(data, sizes_u64, heights_u32, widths_u32, self._yuv_fullres_buffer)
+
+        results = []
+        for i in range(batch_size):
+            h, w = int(heights[i]), int(widths[i])
+            results.append(self._yuv_fullres_buffer[i, :h, :w, :].copy())
+        return results
+
+    def decode_batch_yuv_planes(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray,
+        heights: NDArray,
+        widths: NDArray,
+    ) -> list[tuple[NDArray[np.uint8], NDArray[np.uint8], NDArray[np.uint8]]]:
+        """Extract raw YUV420P planes without conversion.
+
+        Returns a list of (Y, U, V) tuples where:
+        - Y: [H, W] uint8
+        - U: [H/2, W/2] uint8
+        - V: [H/2, W/2] uint8
+
+        This is the fastest possible decode — just memcpy of planes.
+        """
+        batch_size = len(sizes)
+        max_h = int(np.max(heights))
+        max_w = int(np.max(widths))
+
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+
+        # Allocate/reuse plane buffers
+        if (self._y_plane_buffer is None or
+            self._y_plane_buffer.shape[0] < batch_size or
+            self._y_plane_buffer.shape[1] < max_h or
+            self._y_plane_buffer.shape[2] < max_w):
+            self._y_plane_buffer = np.zeros((batch_size, max_h, max_w), dtype=np.uint8)
+            self._u_plane_buffer = np.zeros((batch_size, max_h // 2, max_w // 2), dtype=np.uint8)
+            self._v_plane_buffer = np.zeros((batch_size, max_h // 2, max_w // 2), dtype=np.uint8)
+
+        self._extract_planes_fn(
+            data, sizes_u64, heights_u32, widths_u32,
+            self._y_plane_buffer, self._u_plane_buffer, self._v_plane_buffer,
+        )
+
+        results = []
+        for i in range(batch_size):
+            h, w = int(heights[i]), int(widths[i])
+            y = self._y_plane_buffer[i, :h, :w].copy()
+            u = self._u_plane_buffer[i, :h // 2, :w // 2].copy()
+            v = self._v_plane_buffer[i, :h // 2, :w // 2].copy()
+            results.append((y, u, v))
+        return results
+
     def shutdown(self) -> None:
         self._temp_buffer = None
         self._dest_buffer = None
         self._chw_buffer = None
         self._multi_crop_buffer = None
         self._multi_chw_buffer = None
+        self._yuv_fullres_buffer = None
+        self._y_plane_buffer = None
+        self._u_plane_buffer = None
+        self._v_plane_buffer = None
 
     def __repr__(self) -> str:
         return f"YUV420NumbaBatchDecoder(num_threads={self.num_threads})"

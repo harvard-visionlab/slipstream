@@ -100,13 +100,15 @@ int imdecode_simple(
     uint64_t input_size,
     unsigned char *output_buffer,
     uint32_t height,
-    uint32_t width
+    uint32_t width,
+    uint32_t out_stride
 ) {
     tjhandle decompressor = get_decompressor();
 
+    // pitch = out_stride * 3 (bytes per row in output buffer)
     int result = tjDecompress2(
         decompressor, input_buffer, input_size, output_buffer,
-        width, 0, height, TJPF_RGB, TJFLAG_FASTDCT | TJFLAG_NOREALLOC
+        width, out_stride * 3, height, TJPF_RGB, TJFLAG_FASTDCT | TJFLAG_NOREALLOC
     );
 
     return result;
@@ -140,14 +142,15 @@ int resize_crop(
     int64_t crop_w,
     int64_t dest_p,
     int64_t target_h,
-    int64_t target_w
+    int64_t target_w,
+    int64_t source_stride_w
 ) {
     uint8_t *source = (uint8_t *)source_p;
     uint8_t *dest = (uint8_t *)dest_p;
 
     // Calculate pointer to crop region start
-    // Source is RGB with row stride = source_w * 3
-    int source_stride = (int)source_w * 3;
+    // Source stride may differ from source_w when decoding into padded buffers
+    int source_stride = (int)source_stride_w * 3;
     uint8_t *crop_start = source + crop_y * source_stride + crop_x * 3;
 
     // Use stb_image_resize2 for the resize
@@ -238,7 +241,8 @@ void my_memcpy(void *source, void *dst, uint64_t size) {
  */
 int yuv420p_to_rgb_buffer(
     unsigned char *input, uint64_t input_size,
-    unsigned char *output, uint32_t height, uint32_t width
+    unsigned char *output, uint32_t height, uint32_t width,
+    uint32_t out_stride
 ) {
     uint64_t y_size = (uint64_t)height * width;
     uint64_t uv_size = ((uint64_t)height / 2) * (width / 2);
@@ -266,7 +270,7 @@ int yuv420p_to_rgb_buffer(
         unsigned char *y_row = y_plane + (uint64_t)row * width;
         unsigned char *u_row = u_plane + (uint64_t)uv_row * uv_stride;
         unsigned char *v_row = v_plane + (uint64_t)uv_row * uv_stride;
-        unsigned char *out_row = output + (uint64_t)row * width * 3;
+        unsigned char *out_row = output + (uint64_t)row * out_stride * 3;
 
         for (uint32_t col = 0; col < width; col++) {
             int32_t y_val = (int32_t)y_row[col];
@@ -282,6 +286,101 @@ int yuv420p_to_rgb_buffer(
             out_row[col * 3 + 1] = (uint8_t)(g < 0 ? 0 : (g > 255 ? 255 : g));
             out_row[col * 3 + 2] = (uint8_t)(b < 0 ? 0 : (b > 255 ? 255 : b));
         }
+    }
+
+    return 0;
+}
+
+/**
+ * Convert planar YUV420P to full-resolution YUV (nearest-neighbor U/V upsample).
+ *
+ * Output is [height * width * 3] with channels (Y, U, V) at full resolution.
+ * U and V are upsampled by duplicating chroma samples (nearest-neighbor).
+ *
+ * @param input       YUV420P data (Y + U + V planes contiguous)
+ * @param input_size  Total size of YUV data
+ * @param output      Pre-allocated output buffer [height * width * 3]
+ * @param height      Image height (must be even)
+ * @param width       Image width (must be even)
+ * @return 0 on success, -1 on error
+ */
+int yuv420p_to_yuv_fullres(
+    unsigned char *input, uint64_t input_size,
+    unsigned char *output, uint32_t height, uint32_t width,
+    uint32_t out_stride
+) {
+    uint64_t y_size = (uint64_t)height * width;
+    uint64_t uv_size = ((uint64_t)height / 2) * (width / 2);
+    uint64_t expected_size = y_size + 2 * uv_size;
+
+    if (input_size < expected_size) return -1;
+
+    unsigned char *y_plane = input;
+    unsigned char *u_plane = input + y_size;
+    unsigned char *v_plane = input + y_size + uv_size;
+
+    uint32_t uv_stride = width / 2;
+
+    for (uint32_t row = 0; row < height; row++) {
+        uint32_t uv_row = row >> 1;
+        unsigned char *y_row = y_plane + (uint64_t)row * width;
+        unsigned char *u_row = u_plane + (uint64_t)uv_row * uv_stride;
+        unsigned char *v_row = v_plane + (uint64_t)uv_row * uv_stride;
+        unsigned char *out_row = output + (uint64_t)row * out_stride * 3;
+
+        for (uint32_t col = 0; col < width; col++) {
+            out_row[col * 3 + 0] = y_row[col];
+            out_row[col * 3 + 1] = u_row[col >> 1];
+            out_row[col * 3 + 2] = v_row[col >> 1];
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Extract raw YUV420P planes into separate buffers (zero conversion).
+ *
+ * Simply copies Y, U, V planes into separate output buffers.
+ * This is the fastest possible "decode" — just 3x memcpy.
+ *
+ * @param input       YUV420P data (Y + U + V planes contiguous)
+ * @param input_size  Total size of YUV data
+ * @param y_out       Output Y plane [height * width]
+ * @param u_out       Output U plane [(height/2) * (width/2)]
+ * @param v_out       Output V plane [(height/2) * (width/2)]
+ * @param height      Image height (must be even)
+ * @param width       Image width (must be even)
+ * @return 0 on success, -1 on error
+ */
+int yuv420p_extract_planes(
+    unsigned char *input, uint64_t input_size,
+    unsigned char *y_out, unsigned char *u_out, unsigned char *v_out,
+    uint32_t height, uint32_t width,
+    uint32_t y_out_stride, uint32_t uv_out_stride
+) {
+    uint64_t y_size = (uint64_t)height * width;
+    uint32_t uv_h = height / 2;
+    uint32_t uv_w = width / 2;
+    uint64_t uv_size = (uint64_t)uv_h * uv_w;
+    uint64_t expected_size = y_size + 2 * uv_size;
+
+    if (input_size < expected_size) return -1;
+
+    unsigned char *src_y = input;
+    unsigned char *src_u = input + y_size;
+    unsigned char *src_v = input + y_size + uv_size;
+
+    // Copy row-by-row to handle output stride
+    for (uint32_t row = 0; row < height; row++) {
+        memcpy(y_out + (uint64_t)row * y_out_stride,
+               src_y + (uint64_t)row * width, width);
+    }
+    for (uint32_t row = 0; row < uv_h; row++) {
+        memcpy(u_out + (uint64_t)row * uv_out_stride,
+               src_u + (uint64_t)row * uv_w, uv_w);
+        memcpy(v_out + (uint64_t)row * uv_out_stride,
+               src_v + (uint64_t)row * uv_w, uv_w);
     }
 
     return 0;

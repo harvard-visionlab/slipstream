@@ -152,11 +152,10 @@ Benchmark environments: macOS laptop (CPU), GPU workstation, cluster
 | CPU + RRC        | ~13,250     | **13,851 img/s**  | **27,955 img/s**    | ✅ YUV420: 2.04x JPEG        |
 | CPU + 2x Multi   | —           | **11,482 img/s**  | **18,294 img/s**    | ✅ YUV420: 1.59x JPEG        |
 | GPU Decode Only  | -           | ~10k img/s        | —                   | ✅ (CPU path preferred)      |
-| Cold Start       | baseline    | -                 | —                   | ⬜ Not measured              |
 
-Above: M4 Pro laptop (14 cores). On FASRC cluster (Xeon Platinum 8358, 16 cores), YUV420 advantage is even larger: **2.41x RRC, 2.76x CenterCrop, 1.94x multi-crop** — see cluster benchmark section below.
+Above: M4 Pro laptop (14 cores). On FASRC H100 node (EPYC 9454, 23 threads), YUV420 peaks at **2.69x RRC (44,987 img/s), 2.83x CenterCrop (54,460 img/s)** — see H100 benchmark section below.
 
-All CPU decode targets met or exceeded. YUV420 format provides ~2-2.8x throughput at 1.73x storage cost (advantage scales with how CPU-constrained JPEG decode is). No OpenCV dependency required — stb_image_resize2 matches OpenCV's cv::resize(INTER_AREA) performance for this workload.
+All CPU decode targets met or exceeded. YUV420 format provides **2-2.8x throughput** at 1.73x storage cost (advantage scales with available cores and how CPU-constrained JPEG decode is). No OpenCV dependency required — stb_image_resize2 matches OpenCV's cv::resize(INTER_AREA) performance for this workload.
 
 ---
 
@@ -237,7 +236,7 @@ All benchmarks on **machina** (GPU workstation: AMD Threadripper PRO 3975WX, 64 
 
 Cluster node: Intel Xeon Platinum 8358 @ 2.60GHz, 16 allocated cores, 192 GB RAM, A100-SXM4-40GB MIG 3g.20gb. Partition: `gpu_test`. `--num-threads 12`. ImageNet-1k val (50k samples), batch_size=256.
 
-**Note:** Production training uses H100 nodes with 96 cores / 4 GPUs (24 cores per GPU). These results are from `gpu_test` with 16 cores — H100 benchmarks with 24 threads are TODO.
+These results are from `gpu_test` partition with 16 allocated cores. See H100 section below for production training hardware.
 
 | Pipeline                               | JPEG       | YUV420     | YUV/JPEG   |
 | -------------------------------------- | ---------- | ---------- | ---------- |
@@ -256,6 +255,43 @@ Cluster node: Intel Xeon Platinum 8358 @ 2.60GHz, 16 allocated cores, 192 GB RAM
 - ✅ Multi-crop shows **2.0x** speedup (vs 1.6x on M4 Pro) — JPEG decode was so dominant here that the second crop cost is relatively small
 - ✅ YUV420 RRC at 18.5k img/s means the data loader is no longer the bottleneck for most single-GPU training workloads
 - Threaded mode is slightly faster than simple on the cluster (opposite of M4 Pro) — likely due to NFS latency benefiting from async prefetch
+
+### SlipstreamLoader End-to-End — FASRC H100 Node (measured 2026-01-31)
+
+H100 node: AMD EPYC 9454 48-Core @ 2.75GHz, 24 allocated cores (1 GPU), 250 GB RAM, NVIDIA H100 80GB HBM3. ImageNet-1k val (50k samples), batch_size=256.
+
+#### Default threads (23 = available - 1)
+
+| Pipeline                               | JPEG          | YUV420         | YUV/JPEG   |
+| -------------------------------------- | ------------- | -------------- | ---------- |
+| **Raw I/O (simple)**                   | 1,930,867     | 1,201,282      | 0.62x      |
+| **RRC (simple)**                       | **16,715**    | **44,987**     | **2.69x**  |
+| **RRC (threaded)**                     | **13,865**    | **30,293**     | **2.18x**  |
+| **CenterCrop (simple)**                | **19,254**    | **54,460**     | **2.83x**  |
+| **CenterCrop (threaded)**              | **18,490**    | **31,846**     | **1.72x**  |
+| **2x RRC fused multi-crop (simple)**   | **15,328**    | **28,475**     | **1.86x**  |
+| **2x RRC fused multi-crop (threaded)** | **13,158**    | **33,332**     | **2.53x**  |
+
+#### 12 threads (for cross-machine comparison)
+
+| Pipeline                               | JPEG          | YUV420         | YUV/JPEG   |
+| -------------------------------------- | ------------- | -------------- | ---------- |
+| **Raw I/O (simple)**                   | 1,913,122     | 1,221,489      | 0.64x      |
+| **RRC (simple)**                       | **9,887**     | **25,112**     | **2.54x**  |
+| **RRC (threaded)**                     | **9,846**     | **24,723**     | **2.51x**  |
+| **CenterCrop (simple)**                | **10,635**    | **30,702**     | **2.89x**  |
+| **CenterCrop (threaded)**              | **9,831**     | **30,634**     | **3.12x**  |
+| **2x RRC fused multi-crop (simple)**   | **8,555**     | **18,027**     | **2.11x**  |
+| **2x RRC fused multi-crop (threaded)** | **8,505**     | **18,462**     | **2.17x**  |
+
+**Analysis:**
+
+- ✅ **2.7-2.8x YUV420 speedup at 23 threads** — best single-crop results of any machine
+- ✅ **YUV420 CenterCrop at 54,460 img/s** — approaching raw I/O speed of threaded mode (68k)
+- ✅ **YUV420 RRC at 44,987 img/s** — data loader is definitively not the training bottleneck
+- ✅ JPEG scales well 12→23 threads (9.9k→16.7k RRC), but YUV420 scales even better (25k→45k) — 1.8x from 1.9x more threads
+- ✅ Simple mode preferred for YUV420 — threading overhead hurts when decode is already fast
+- ✅ At 23 threads with YUV420, a single CPU can feed an H100 at 45k img/s RRC — well beyond what the GPU training loop consumes
 
 ### GPU Decode + Transforms (nvImageCodec)
 
@@ -418,13 +454,14 @@ slipstream/
     - `set_image_format()` on all pipeline classes (auto-swaps decoder)
     - Benchmarked: 2.04x RRC, 2.05x CenterCrop, 1.65x multi-crop vs JPEG loader
 
-### Phase 4: Augmentations
+### Phase 4: Cache & Format Enhancements
 
-1. ⬜ Port fastaugs (direct port)
-2. ⬜ TODO markers for cleanup/standardization
-3. ⬜ Implement DirectRandomResizedCrop (analytic, no rejection sampling)
+1. ✅ **Dataset stats**: `compute_normalization_stats()` computes per-channel RGB mean/std from a slip cache. JPEG path uses PyTurboJPEG (accurate DCT, matches PIL/torchvision exactly). YUV420 path uses YUV420NumbaBatchDecoder.
+2. ✅ **YUV output mode**: `DecodeYUVFullRes` (nearest-neighbor U/V upsample → [H,W,3] YUV) and `DecodeYUVPlanes` (raw Y/U/V planes) pipelines. C kernels: `yuv420p_to_yuv_fullres`, `yuv420p_extract_planes`.
+3. ✅ **Fast S3→local sync**: `sync_s3_dataset()` utility using s5cmd. Integrated into `SlipstreamLoader` via `presync_s3=True`.
+4. ⬜ **YUV crop pipelines**: `CenterCropYUV`, `RandomResizedCropYUV` — crop+resize while keeping YUV colorspace (currently YUV output is full-res only, no batching of variable-size images).
 
-### Phase 5: Testing & Benchmarks ✅ COMPLETE
+### Phase 5: Augmentations & Pipelines ✅ BENCHMARKS COMPLETE
 
 1. ✅ Decode benchmarks (benchmark_decode.py)
 2. ✅ Multi-epoch benchmarks with warmup (benchmark_loader.py — covers cold/warm epoch testing)
@@ -432,7 +469,33 @@ slipstream/
 4. ✅ FFCV reader loader benchmark (benchmark_ffcv_loader.py)
 5. ✅ FFCV baseline comparison (all targets met or exceeded — see Benchmark Results above)
 
-### Phase 5b: End-to-End Correctness Verification
+#### Phase 5a: Port fastaugs
+
+1. ⬜ Port fastaugs GPU batch augmentations (direct port from lrm-ssl)
+2. ⬜ TODO markers for cleanup/standardization
+3. ⬜ Implement DirectRandomResizedCrop (analytic, no rejection sampling)
+
+#### Phase 5b: Standard Pipelines & Demos
+
+1. ⬜ Create standard pipeline presets (training, validation, SSL multi-crop) for demos and API validation
+2. ⬜ Notebook demonstrating pipeline presets and common training workflows
+
+#### Phase 5c: Multi-Crop API Enhancements
+
+1. ⬜ **Named field emission**: `MultiCropRandomResizedCrop` should optionally emit named fields (e.g., `image_0`, `image_1`) instead of a list `[crop0, crop1]` — less ambiguous downstream
+2. ⬜ **Per-crop parameter control**: All params (size, scale, ratio, seed) should optionally accept a list of per-crop settings. Enables:
+    - Different sized crops (e.g., 2 global 224px + 4 local 96px)
+    - Yoked crops (same seed → same center point, different scale → zoomed-in / zoomed-out pair)
+    - Different scale ranges per crop (e.g., global `(0.4, 1.0)` + local `(0.05, 0.4)`)
+3. ⬜ Notebook demonstrating multi-crop configurations (named fields, yoked crops, mixed sizes)
+
+### Phase 6: Additional Dataset Sources
+
+1. ⬜ `SlipstreamDataset.from_imagefolder()` (torchvision ImageFolder)
+2. ⬜ `SlipstreamDataset.from_huggingface()` (HuggingFace datasets)
+3. Note: Both can also be wrapped via LitData StreamingDataset, so direct support may not be needed — evaluate whether the LitData path is sufficient or if native adapters offer meaningful benefits (e.g., skipping the streaming conversion step).
+
+### Phase 7: End-to-End Correctness Verification
 
 These tests verify that the slip cache format faithfully represents the source data, with zero errors across all samples. They require a **separate test environment** that installs both slipstream and the source format's native reader (e.g., ffcv-ssl for .beton files, litdata for streaming datasets).
 
@@ -452,36 +515,37 @@ These tests verify that the slip cache format faithfully represents the source d
 
 3. ⬜ **Round-trip decode verification**: After building slip cache from any source, verify that decoded images (via NumbaBatchDecoder) produce correct pixel values by comparing against PIL/TurboJPEG reference decode of the original source bytes.
 
-### Phase 6: Future Enhancements
+4. ⬜ **YUV420 round-trip verification**: Verify pixel differences from chroma subsampling are within expected bounds (mean ~5, max <200) across all samples.
 
-1. ⬜ Additional dataset sources: `SlipstreamDataset.from_imagefolder()` (torchvision ImageFolder), `.from_huggingface()` (HuggingFace datasets). Note: HuggingFace and ImageFolder can also be wrapped via LitData StreamingDataset, so direct support may not be needed — evaluate whether the LitData path is sufficient or if native adapters offer meaningful benefits (e.g., skipping the streaming conversion step).
-2. ✅ Alternative image storage formats: **investigated and benchmarked** (see `experiments/format_comparison/`).
-    - **JPEG XL: eliminated.** Tested lossless (Modular), lossy (VarDCT d=1.0), and fast lossy (d=2.0, effort=1, decodingspeed=4). All 2.5-19x *slower* than TurboJPEG. JXL is not competitive for this workload.
-    - **QOI: eliminated.** Python single-threaded showed 1.22x faster decode, but this was misleading (measured wrapper overhead, not raw decode). C implementation through Numba prange pipeline (tested 2026-01-30 on machina, `experiment/qoi-decode` branch, deleted): **only 1.05-1.07x vs JPEG**. TurboJPEG has SIMD (NEON/AVX2) that scalar QOI can't match, QOI decode is inherently sequential per-pixel, and with 12 prange threads both formats saturate memory write bandwidth. At 1.05x speedup with 2.06x storage cost, QOI is not viable.
-    - **Raw RGB: 35x faster** (no decode, just memcpy). Confirms decode is 95% of per-image time. 3.9x storage cost makes this impractical at ImageNet scale. Could be considered for tiny subsets (e.g., Imagenette/IN-100) for fast iteration, but likely not worthwhile given the modest decode bottleneck.
-    - **Conclusion (round 1):** Alternative *codecs* cannot beat SIMD-accelerated TurboJPEG. The bottleneck is Huffman decode + IDCT, not the codec algorithm's complexity. But raw RGB (72k img/s vs 15k JPEG on machina) proves the compute gap is real — the question is whether we can eliminate the JPEG bitstream parsing while keeping storage practical.
-
-3. ✅ Alternative storage formats — round 2: **bypass JPEG decode entirely** (tested 2026-01-30, `experiment/yuv420-decode` branch).
-    - **Insight**: JPEG's bottleneck is entropy decode (Huffman) + IDCT, not resize/crop. Raw RGB eliminates this but costs 3.9x storage. Round 2 targeted the middle ground.
-    - **Experiment A — Raw YUV420: WINNER.** Store decoded images as raw planar YUV 4:2:0 (Y: H×W, U: H/2×W/2, V: H/2×W/2). "Decode" is just a fixed-point BT.601 color conversion (no bitstream parsing). Benchmarked on machina (50k ImageNet val, batch_size=256, num_workers=12):
-
-        | Mode             | JPEG       | YUV420     | YUV/JPEG |
-        |------------------|------------|------------|----------|
-        | Decode Only      | 14,322/s   | 27,370/s   | **1.91x** |
-        | + CenterCrop(224)| 13,005/s   | 23,257/s   | **1.79x** |
-        | + RRC(224)       | 12,398/s   | 20,828/s   | **1.68x** |
-
-        Storage: 6.54 GB (1.73x JPEG). No new dependencies. C kernel: `yuv420p_to_rgb_buffer()` in libslipstream.cpp. Python: `YUV420NumbaBatchDecoder` in `slipstream/decoders/yuv420_decoder.py`. Converter: `experiments/format_comparison/convert_yuv420.py`.
-
-    - **Experiment B — LZ4+YUV420: eliminated.** Per-image `lz4.block.decompress()` in Python reintroduces the serial bottleneck. Storage improved to 5.63 GB (1.49x JPEG), but throughput collapsed to **1.06-1.10x JPEG** — nearly all YUV420 advantage lost. Would require C-level LZ4 decompression inside the prange loop to be viable, adding `liblz4` dependency for marginal storage savings (1.49x vs 1.73x JPEG). Not worth the complexity.
-
-    - **Conclusion (round 2):** Raw YUV420 is the optimal format for decode-bound workloads. 1.68-1.91x JPEG throughput at 1.73x storage with zero new dependencies. ✅ **Integrated** as `SlipstreamLoader(dataset, image_format="yuv420")` — see Phase 3 item 9.
-
-### Phase 7: Documentation
+### Phase 8: Documentation
 
 1. ⬜ README with usage examples
 2. ⬜ API documentation
-3. ⬜ Performance guide
+3. ⬜ Performance guide (benchmarking section with cold/warm results across machines)
+
+### Appendix: Image Format Experiments (completed)
+
+✅ Alternative image storage formats: **investigated and benchmarked** (see `experiments/format_comparison/`).
+- **JPEG XL: eliminated.** Tested lossless (Modular), lossy (VarDCT d=1.0), and fast lossy (d=2.0, effort=1, decodingspeed=4). All 2.5-19x *slower* than TurboJPEG. JXL is not competitive for this workload.
+- **QOI: eliminated.** Python single-threaded showed 1.22x faster decode, but this was misleading (measured wrapper overhead, not raw decode). C implementation through Numba prange pipeline (tested 2026-01-30 on machina, `experiment/qoi-decode` branch, deleted): **only 1.05-1.07x vs JPEG**. TurboJPEG has SIMD (NEON/AVX2) that scalar QOI can't match, QOI decode is inherently sequential per-pixel, and with 12 prange threads both formats saturate memory write bandwidth. At 1.05x speedup with 2.06x storage cost, QOI is not viable.
+- **Raw RGB: 35x faster** (no decode, just memcpy). Confirms decode is 95% of per-image time. 3.9x storage cost makes this impractical at ImageNet scale. Could be considered for tiny subsets (e.g., Imagenette/IN-100) for fast iteration, but likely not worthwhile given the modest decode bottleneck.
+- **Conclusion (round 1):** Alternative *codecs* cannot beat SIMD-accelerated TurboJPEG. The bottleneck is Huffman decode + IDCT, not the codec algorithm's complexity. But raw RGB (72k img/s vs 15k JPEG on machina) proves the compute gap is real — the question is whether we can eliminate the JPEG bitstream parsing while keeping storage practical.
+
+✅ Alternative storage formats — round 2: **bypass JPEG decode entirely** (tested 2026-01-30, `experiment/yuv420-decode` branch).
+- **Insight**: JPEG's bottleneck is entropy decode (Huffman) + IDCT, not resize/crop. Raw RGB eliminates this but costs 3.9x storage. Round 2 targeted the middle ground.
+- **Experiment A — Raw YUV420: WINNER.** Store decoded images as raw planar YUV 4:2:0 (Y: H×W, U: H/2×W/2, V: H/2×W/2). "Decode" is just a fixed-point BT.601 color conversion (no bitstream parsing). Benchmarked on machina (50k ImageNet val, batch_size=256, num_workers=12):
+
+    | Mode             | JPEG       | YUV420     | YUV/JPEG |
+    |------------------|------------|------------|----------|
+    | Decode Only      | 14,322/s   | 27,370/s   | **1.91x** |
+    | + CenterCrop(224)| 13,005/s   | 23,257/s   | **1.79x** |
+    | + RRC(224)       | 12,398/s   | 20,828/s   | **1.68x** |
+
+    Storage: 6.54 GB (1.73x JPEG). No new dependencies. C kernel: `yuv420p_to_rgb_buffer()` in libslipstream.cpp. Python: `YUV420NumbaBatchDecoder` in `slipstream/decoders/yuv420_decoder.py`. Converter: `experiments/format_comparison/convert_yuv420.py`.
+
+- **Experiment B — LZ4+YUV420: eliminated.** Per-image `lz4.block.decompress()` in Python reintroduces the serial bottleneck. Storage improved to 5.63 GB (1.49x JPEG), but throughput collapsed to **1.06-1.10x JPEG** — nearly all YUV420 advantage lost. Would require C-level LZ4 decompression inside the prange loop to be viable, adding `liblz4` dependency for marginal storage savings (1.49x vs 1.73x JPEG). Not worth the complexity.
+
+- **Conclusion (round 2):** Raw YUV420 is the optimal format for decode-bound workloads. 1.68-1.91x JPEG throughput at 1.73x storage with zero new dependencies. ✅ **Integrated** as `SlipstreamLoader(dataset, image_format="yuv420")` — see Phase 3 item 9.
 
 ---
 
