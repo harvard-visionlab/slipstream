@@ -10,6 +10,8 @@ Tests complete training/validation pipelines with:
 Usage:
     uv run python benchmarks/benchmark_loader.py
     uv run python benchmarks/benchmark_loader.py --batch-size 256 --epochs 3
+    uv run python benchmarks/benchmark_loader.py --image-format yuv420
+    uv run python benchmarks/benchmark_loader.py --image-format all
     uv run python benchmarks/benchmark_loader.py --output results/loader.json
 """
 
@@ -44,6 +46,7 @@ def benchmark_loader(
     num_threads: int = 0,
     target_size: int = 224,
     use_threading: bool = True,
+    image_format: str = "jpeg",
 ) -> BenchmarkResult:
     """Benchmark SlipstreamLoader with specified pipeline."""
     from slipstream import SlipstreamLoader
@@ -52,6 +55,7 @@ def benchmark_loader(
     )
 
     mode = "threaded" if use_threading else "simple"
+    fmt_label = f", {image_format}" if image_format != "jpeg" else ""
 
     if pipeline_type == "train":
         pipelines = {
@@ -59,14 +63,14 @@ def benchmark_loader(
                 RandomResizedCrop(target_size, num_threads=num_threads),
             ],
         }
-        name = f"SlipstreamLoader (RRC, {mode})"
+        name = f"SlipstreamLoader (RRC, {mode}{fmt_label})"
     elif pipeline_type == "val":
         pipelines = {
             "image": [
                 CenterCrop(target_size, num_threads=num_threads),
             ],
         }
-        name = f"SlipstreamLoader (CenterCrop, {mode})"
+        name = f"SlipstreamLoader (CenterCrop, {mode}{fmt_label})"
     elif pipeline_type == "multi-crop":
         pipelines = {
             "image": [
@@ -75,10 +79,10 @@ def benchmark_loader(
                 ),
             ],
         }
-        name = f"SlipstreamLoader (2x RRC fused multi-crop, {mode})"
+        name = f"SlipstreamLoader (2x RRC fused multi-crop, {mode}{fmt_label})"
     else:  # raw
         pipelines = None
-        name = f"SlipstreamLoader (raw, {mode})"
+        name = f"SlipstreamLoader (raw, {mode}{fmt_label})"
 
     loader = SlipstreamLoader(
         dataset,
@@ -88,6 +92,7 @@ def benchmark_loader(
         pipelines=pipelines,
         exclude_fields=["path"],
         use_threading=use_threading,
+        image_format=image_format,
     )
 
     def run_epoch():
@@ -148,6 +153,7 @@ def benchmark_loader(
             "batch_size": batch_size,
             "num_threads": num_threads,
             "use_threading": use_threading,
+            "image_format": image_format,
         },
     )
 
@@ -162,6 +168,9 @@ def main():
     parser.add_argument("--num-threads", type=int, default=0, help="NumbaBatchDecoder threads (0=auto)")
     parser.add_argument("--target-size", type=int, default=224, help="Target crop size")
     parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results")
+    parser.add_argument("--image-format", type=str, default="jpeg",
+                        choices=["jpeg", "yuv420", "all"],
+                        help="Image format: jpeg, yuv420, or all (run both)")
     parser.add_argument("--skip-multi-crop", action="store_true", help="Skip multi-crop benchmark")
     parser.add_argument("--multi-crop", action="store_true", help="Only run multi-crop benchmark")
     parser.add_argument("--save", action="store_true", help="Save results to JSON file")
@@ -191,38 +200,54 @@ def main():
 
     results = []
 
-    # Benchmark each pipeline type (skip if --multi-crop)
-    if not args.multi_crop:
-        for pipeline_type in ["raw", "train", "val"]:
+    # Determine which formats to benchmark
+    if args.image_format == "all":
+        formats = ["jpeg", "yuv420"]
+    else:
+        formats = [args.image_format]
+
+    for image_format in formats:
+        if len(formats) > 1:
+            print(f"\n{'=' * 60}")
+            print(f"FORMAT: {image_format.upper()}")
+            print(f"{'=' * 60}")
+
+        # Benchmark each pipeline type (skip if --multi-crop)
+        if not args.multi_crop:
+            for pipeline_type in ["raw", "train", "val"]:
+                result = benchmark_loader(
+                    dataset, args.batch_size, args.epochs, args.warmup,
+                    pipeline_type=pipeline_type, num_threads=args.num_threads,
+                    target_size=args.target_size, use_threading=False,
+                    image_format=image_format,
+                )
+                results.append(result)
+
+                result = benchmark_loader(
+                    dataset, args.batch_size, args.epochs, args.warmup,
+                    pipeline_type=pipeline_type, num_threads=args.num_threads,
+                    target_size=args.target_size, use_threading=True,
+                    image_format=image_format,
+                )
+                results.append(result)
+
+        # Multi-crop SSL benchmark
+        if args.multi_crop or not args.skip_multi_crop:
             result = benchmark_loader(
                 dataset, args.batch_size, args.epochs, args.warmup,
-                pipeline_type=pipeline_type, num_threads=args.num_threads,
+                pipeline_type="multi-crop", num_threads=args.num_threads,
                 target_size=args.target_size, use_threading=False,
+                image_format=image_format,
             )
             results.append(result)
 
             result = benchmark_loader(
                 dataset, args.batch_size, args.epochs, args.warmup,
-                pipeline_type=pipeline_type, num_threads=args.num_threads,
+                pipeline_type="multi-crop", num_threads=args.num_threads,
                 target_size=args.target_size, use_threading=True,
+                image_format=image_format,
             )
             results.append(result)
-
-    # Multi-crop SSL benchmark
-    if args.multi_crop or not args.skip_multi_crop:
-        result = benchmark_loader(
-            dataset, args.batch_size, args.epochs, args.warmup,
-            pipeline_type="multi-crop", num_threads=args.num_threads,
-            target_size=args.target_size, use_threading=False,
-        )
-        results.append(result)
-
-        result = benchmark_loader(
-            dataset, args.batch_size, args.epochs, args.warmup,
-            pipeline_type="multi-crop", num_threads=args.num_threads,
-            target_size=args.target_size, use_threading=True,
-        )
-        results.append(result)
 
     # Summary
     print("\n" + "=" * 60)
@@ -234,7 +259,7 @@ def main():
     print("  Raw I/O: ~775k-939k samples/sec")
     print("  Decode + RRC: ~13,851 samples/sec")
     print("  Decode + CenterCrop: ~15,749 samples/sec")
-    print("  Multi-crop (2x RRC): ~7,000 samples/sec (expected)")
+    print("  Multi-crop (2x RRC fused): ~10,500 samples/sec (decode once, crop twice)")
 
     # Save results
     if args.output:
