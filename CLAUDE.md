@@ -402,9 +402,23 @@ These tests verify that the slip cache format faithfully represents the source d
 1. ⬜ Additional dataset sources: `SlipstreamDataset.from_imagefolder()` (torchvision ImageFolder), `.from_huggingface()` (HuggingFace datasets). Note: HuggingFace and ImageFolder can also be wrapped via LitData StreamingDataset, so direct support may not be needed — evaluate whether the LitData path is sufficient or if native adapters offer meaningful benefits (e.g., skipping the streaming conversion step).
 2. ✅ Alternative image storage formats: **investigated and benchmarked** (see `experiments/format_comparison/`).
     - **JPEG XL: eliminated.** Tested lossless (Modular), lossy (VarDCT d=1.0), and fast lossy (d=2.0, effort=1, decodingspeed=4). All 2.5-19x *slower* than TurboJPEG. JXL is not competitive for this workload.
-    - **QOI: 1.22x faster** decode than JPEG (Python single-threaded). Modest but could improve with C/Numba integration (QOI's simpler algorithm may benefit more from prange parallelism). Storage cost: 2.06x JPEG. Worth revisiting if decode headroom is needed.
-    - **Raw RGB: 35x faster** (no decode, just memcpy). Confirms decode is 95% of per-image time. 3.9x storage cost makes this impractical but useful as a ceiling measurement.
-    - **Conclusion:** TurboJPEG is near-optimal for 256-512px images. No format change justified at this time.
+    - **QOI: eliminated.** Python single-threaded showed 1.22x faster decode, but this was misleading (measured wrapper overhead, not raw decode). C implementation through Numba prange pipeline (tested 2026-01-30 on machina, `experiment/qoi-decode` branch, deleted): **only 1.05-1.07x vs JPEG**. TurboJPEG has SIMD (NEON/AVX2) that scalar QOI can't match, QOI decode is inherently sequential per-pixel, and with 12 prange threads both formats saturate memory write bandwidth. At 1.05x speedup with 2.06x storage cost, QOI is not viable.
+    - **Raw RGB: 35x faster** (no decode, just memcpy). Confirms decode is 95% of per-image time. 3.9x storage cost makes this impractical at ImageNet scale. Could be considered for tiny subsets (e.g., Imagenette/IN-100) for fast iteration, but likely not worthwhile given the modest decode bottleneck.
+    - **Conclusion (round 1):** Alternative *codecs* cannot beat SIMD-accelerated TurboJPEG. The bottleneck is Huffman decode + IDCT, not the codec algorithm's complexity. But raw RGB (72k img/s vs 15k JPEG on machina) proves the compute gap is real — the question is whether we can eliminate the JPEG bitstream parsing while keeping storage practical.
+
+3. ⬜ Alternative storage formats — round 2: **bypass JPEG decode entirely** (see experiments below).
+    - **Insight**: JPEG's bottleneck is entropy decode (Huffman) + IDCT, not resize/crop. Raw RGB eliminates this but costs 3.9x storage. The next experiments target the middle ground: eliminate the serial bitstream parse while keeping storage ≤2x JPEG.
+    - **Experiment A — Raw YUV420**: Store decoded images as raw planar YUV 4:2:0 (Y: H×W, U: H/2×W/2, V: H/2×W/2). This gives 2:1 compression vs RGB from chroma subsampling alone, with zero bitstream parsing — decode is just a SIMD-friendly 3×3 matrix multiply per pixel. Storage: ~1.95x JPEG. Target: ≥30k img/s (2x current JPEG throughput).
+        - C kernel: `yuv420p_to_rgb_batch()` in libslipstream.cpp with NEON/AVX2 intrinsics
+        - Converter: offline JPEG→YUV420 transcoder (decode JPEG, convert RGB→YUV420, store raw planes)
+        - Same slip cache metadata format (data_ptr, data_size, height, width)
+        - Numba prange integration via `YUV420NumbaBatchDecoder`
+    - **Experiment B — LZ4-compressed raw (RGB or YUV420)**: LZ4 decompresses at 2-5 GB/s (near memory speed), adding negligible CPU cost. Applied on top of raw YUV420, this could approach JPEG storage sizes while keeping decode nearly free. LZ4 on natural images typically achieves 1.5-2.5x compression.
+        - C kernel: LZ4 decompress → YUV→RGB (or just LZ4 → RGB) in a fused pipeline
+        - Requires `liblz4` system dependency
+        - Storage estimate: LZ4(YUV420) ≈ 1.0-1.3x JPEG, LZ4(RGB) ≈ 1.5-2.5x JPEG
+    - **Experiment order**: A first (simpler, no new dependency), then B if A's storage cost is too high.
+    - **Success criteria**: ≥1.5x JPEG throughput at ≤2x JPEG storage. If both fail, JPEG is confirmed optimal and format investigation is truly closed.
 
 ### Phase 7: Documentation
 
