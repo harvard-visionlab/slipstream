@@ -150,11 +150,13 @@ Benchmark environments: macOS laptop (CPU), GPU workstation, cluster
 | CPU Decode Only  | ~17k        | **17,366 img/s**  | —                   | ✅ Target met                |
 | CPU + CenterCrop | ~15,840     | **15,749 img/s**  | **32,864 img/s**    | ✅ YUV420: 2.05x JPEG        |
 | CPU + RRC        | ~13,250     | **13,851 img/s**  | **27,955 img/s**    | ✅ YUV420: 2.04x JPEG        |
-| CPU + 2x Multi   | —           | **11,017 img/s**  | **18,175 img/s**    | ✅ YUV420: 1.65x JPEG        |
+| CPU + 2x Multi   | —           | **11,482 img/s**  | **18,294 img/s**    | ✅ YUV420: 1.59x JPEG        |
 | GPU Decode Only  | -           | ~10k img/s        | —                   | ✅ (CPU path preferred)      |
 | Cold Start       | baseline    | -                 | —                   | ⬜ Not measured              |
 
-All CPU decode targets met or exceeded. YUV420 format provides ~2x throughput at 1.73x storage cost. No OpenCV dependency required — stb_image_resize2 matches OpenCV's cv::resize(INTER_AREA) performance for this workload.
+Above: M4 Pro laptop (14 cores). On FASRC cluster (Xeon Platinum 8358, 16 cores), YUV420 advantage is even larger: **2.41x RRC, 2.76x CenterCrop, 1.94x multi-crop** — see cluster benchmark section below.
+
+All CPU decode targets met or exceeded. YUV420 format provides ~2-2.8x throughput at 1.73x storage cost (advantage scales with how CPU-constrained JPEG decode is). No OpenCV dependency required — stb_image_resize2 matches OpenCV's cv::resize(INTER_AREA) performance for this workload.
 
 ---
 
@@ -211,7 +213,7 @@ All benchmarks on **machina** (GPU workstation: AMD Threadripper PRO 3975WX, 64 
 - Simple mode is preferred — threading adds overhead without benefit for this workload
 - Threaded raw I/O is slow due to `parallel=False` constraint (Numba workqueue not thread-safe for concurrent access)
 
-### SlipstreamLoader End-to-End — YUV420 (measured 2026-01-30)
+### SlipstreamLoader End-to-End — YUV420, M4 Pro laptop (measured 2026-01-30)
 
 | Pipeline                                        | Samples/sec | vs JPEG Loader | Status |
 | ----------------------------------------------- | ----------- | -------------- | ------ |
@@ -220,16 +222,40 @@ All benchmarks on **machina** (GPU workstation: AMD Threadripper PRO 3975WX, 64 
 | **RRC (threaded, yuv420)**                      | **28,541**  | **1.95x**      | ✅     |
 | **CenterCrop (simple, yuv420)**                 | **32,864**  | **2.05x**      | ✅     |
 | **CenterCrop (threaded, yuv420)**               | **33,361**  | **2.12x**      | ✅     |
-| **2x RRC fused multi-crop (simple, yuv420)**    | **18,175**  | **1.65x**      | ✅     |
-| **2x RRC fused multi-crop (threaded, yuv420)**  | **16,781**  | **1.56x**      | ✅     |
+| **2x RRC fused multi-crop (simple, yuv420)**    | **18,294**  | **1.59x**      | ✅     |
+| **2x RRC fused multi-crop (threaded, yuv420)**  | **18,418**  | **1.61x**      | ✅     |
 | Raw I/O (threaded, yuv420)                      | 47,076      | —              | Threading overhead |
 
 **Analysis:**
 
 - ✅ **2x speedup** for all decode+crop pipelines vs JPEG
-- ✅ Multi-crop speedup is lower (1.65x vs 2.04x) because crop+resize cost (~19 µs/image) is fixed regardless of format — with YUV420's cheaper decode, the second crop is a larger relative cost
-- ✅ Raw I/O is slower (639k vs 882k) because YUV420 images are 1.73x larger (more bytes to mmap-read per batch)
+- ✅ Multi-crop speedup is lower (1.6x vs 2.0x) because crop+resize cost is fixed regardless of format — with YUV420's cheaper decode, the second crop is a larger relative cost
+- ✅ Raw I/O is slower (640k vs 882k) because YUV420 images are 1.73x larger (more bytes to mmap-read per batch)
 - ✅ No regressions in JPEG path — all JPEG benchmarks within normal run-to-run variance
+
+### SlipstreamLoader End-to-End — FASRC Cluster (measured 2026-01-30)
+
+Cluster node: Intel Xeon Platinum 8358 @ 2.60GHz, 16 allocated cores, 192 GB RAM, A100-SXM4-40GB MIG 3g.20gb. Partition: `gpu_test`. `--num-threads 12`. ImageNet-1k val (50k samples), batch_size=256.
+
+**Note:** Production training uses H100 nodes with 96 cores / 4 GPUs (24 cores per GPU). These results are from `gpu_test` with 16 cores — H100 benchmarks with 24 threads are TODO.
+
+| Pipeline                               | JPEG       | YUV420     | YUV/JPEG   |
+| -------------------------------------- | ---------- | ---------- | ---------- |
+| **Raw I/O (simple)**                   | 1,139,398  | 639,071    | 0.56x      |
+| **RRC (simple)**                       | **7,709**  | **18,544** | **2.41x**  |
+| **RRC (threaded)**                     | **7,786**  | **19,551** | **2.51x**  |
+| **CenterCrop (simple)**                | **8,422**  | **23,241** | **2.76x**  |
+| **CenterCrop (threaded)**              | **8,541**  | **25,006** | **2.93x**  |
+| **2x RRC fused multi-crop (simple)**   | **6,538**  | **12,696** | **1.94x**  |
+| **2x RRC fused multi-crop (threaded)** | **6,606**  | **13,239** | **2.00x**  |
+
+**Analysis:**
+
+- ✅ **2.4-2.9x YUV420 speedup** — the strongest of all tested machines
+- ✅ YUV420 advantage scales with how CPU-constrained JPEG decode is. With 16 cores on Xeon (no AVX-512 turbo for TurboJPEG), JPEG decode is the dominant bottleneck. YUV420 bypasses it entirely.
+- ✅ Multi-crop shows **2.0x** speedup (vs 1.6x on M4 Pro) — JPEG decode was so dominant here that the second crop cost is relatively small
+- ✅ YUV420 RRC at 18.5k img/s means the data loader is no longer the bottleneck for most single-GPU training workloads
+- Threaded mode is slightly faster than simple on the cluster (opposite of M4 Pro) — likely due to NFS latency benefiting from async prefetch
 
 ### GPU Decode + Transforms (nvImageCodec)
 
