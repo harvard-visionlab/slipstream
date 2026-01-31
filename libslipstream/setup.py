@@ -18,11 +18,12 @@ os.chdir(script_dir)
 
 # Base configuration
 sources = ["libslipstream.cpp"]
-include_dirs = ["/usr/local/include", "/usr/include"]
-library_dirs = ["/usr/local/lib", "/usr/lib", "/usr/lib/x86_64-linux-gnu"]
+home = os.path.expanduser("~")
+include_dirs = ["/usr/local/include", "/usr/include", f"{home}/.local/include"]
+library_dirs = ["/usr/local/lib", "/usr/lib", "/usr/lib/x86_64-linux-gnu", f"{home}/.local/lib"]
 libraries = ["turbojpeg"]
 extra_compile_args = ["-std=c++11", "-O3", "-fPIC"]
-extra_link_args = ["-Wl,-rpath,/usr/local/lib"]
+extra_link_args = ["-Wl,-rpath,/usr/local/lib", f"-Wl,-rpath,{home}/.local/lib"]
 
 # Linux-specific paths (libjpeg-turbo from package or manual install)
 if sys.platform == "linux":
