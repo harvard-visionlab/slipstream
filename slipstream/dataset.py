@@ -159,7 +159,7 @@ def ensure_lightning_symlink_on_cluster() -> None:
 
     home = pathlib.Path.home()
     symlink_path = home / ".lightning"
-    target_path = pathlib.Path("/n/netscratch/alvarez_lab/Everyone/alvarez/.lightning")
+    target_path = pathlib.Path("/n/netscratch/alvarez_lab/Everyone/.lightning")
 
     # Case 1: Symlink already exists and points correctly
     if symlink_path.is_symlink():
