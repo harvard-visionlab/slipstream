@@ -240,14 +240,10 @@ class MultiCropRandomResizedCrop(BatchTransform):
             num_crops=self.num_crops, target_size=self.size,
             scale=self.scale, ratio=self.ratio, seeds=self.seeds,
         )
-        # Each hwc_to_chw call reuses the same _chw_buffer, so we must
-        # copy before the next call overwrites it. torch.from_numpy shares
-        # memory, so .clone() is needed.
-        results = []
-        for crop in crops:
-            chw = self._decoder.hwc_to_chw(crop)
-            results.append(torch.from_numpy(chw).clone())
-        return results
+        # multi_hwc_to_chw uses separate pre-allocated buffers per crop,
+        # so no .clone() is needed (unlike hwc_to_chw which reuses one buffer).
+        chw_crops = self._decoder.multi_hwc_to_chw(crops)
+        return [torch.from_numpy(chw) for chw in chw_crops]
 
     def shutdown(self) -> None:
         self._decoder.shutdown()

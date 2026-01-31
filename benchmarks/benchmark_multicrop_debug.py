@@ -115,12 +115,22 @@ def main():
     no_clone_time = (time.perf_counter() - t0) / N
     print(f"6. Multi-crop + transpose (no clone):{bs / no_clone_time:>7,.0f} img/s  ({no_clone_time * 1000:.1f}ms/batch)")
 
+    # Test 7: multi_hwc_to_chw (separate buffers, no clone needed)
+    t0 = time.perf_counter()
+    for _ in range(N):
+        crops = decoder.decode_batch_multi_crop(data, sizes, heights, widths, num_crops=2, target_size=224)
+        chw_crops = decoder.multi_hwc_to_chw(crops)
+        results = [torch.from_numpy(chw) for chw in chw_crops]
+    multi_chw_time = (time.perf_counter() - t0) / N
+    print(f"7. multi_hwc_to_chw (new, no clone): {bs / multi_chw_time:>10,.0f} img/s  ({multi_chw_time * 1000:.1f}ms/batch)")
+
     print()
     print("Analysis:")
     print(f"  Decode overhead (multi vs single):  {multi_time / single_time:.2f}x")
     print(f"  Transpose overhead:                 +{(transpose_time - single_time) * 1000:.1f}ms")
     print(f"  Clone overhead (test 5 vs 6):       +{(full_time - no_clone_time) * 1000:.1f}ms")
     print(f"  Full pipeline vs decoder-only:      {full_time / multi_time:.2f}x")
+    print(f"  New pipeline (7) vs old (5):        {full_time / multi_chw_time:.2f}x speedup")
 
 
 if __name__ == "__main__":

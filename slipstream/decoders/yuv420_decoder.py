@@ -226,6 +226,7 @@ class YUV420NumbaBatchDecoder:
         self._dest_buffer: np.ndarray | None = None
         self._chw_buffer: np.ndarray | None = None
         self._multi_crop_buffer: np.ndarray | None = None
+        self._multi_chw_buffer: np.ndarray | None = None
 
     def _ensure_temp_buffer(self, batch_size: int, max_h: int, max_w: int) -> np.ndarray:
         if (self._temp_buffer is None or
@@ -506,11 +507,39 @@ class YUV420NumbaBatchDecoder:
         _transpose_hwc_to_chw(hwc, chw_buffer, batch_size)
         return chw_buffer[:batch_size]
 
+    def multi_hwc_to_chw(
+        self,
+        crops: list[NDArray[np.uint8]],
+    ) -> list[NDArray[np.uint8]]:
+        """Transpose N crop arrays [B, H, W, 3] → [B, 3, H, W] into separate buffers."""
+        num_crops = len(crops)
+        if not crops:
+            return []
+
+        batch_size = crops[0].shape[0]
+        H, W = crops[0].shape[1], crops[0].shape[2]
+
+        if (self._multi_chw_buffer is None or
+            self._multi_chw_buffer.shape[0] < num_crops or
+            self._multi_chw_buffer.shape[1] < batch_size or
+            self._multi_chw_buffer.shape[3] != H or
+            self._multi_chw_buffer.shape[4] != W):
+            self._multi_chw_buffer = np.zeros(
+                (num_crops, batch_size, 3, H, W), dtype=np.uint8)
+
+        results = []
+        for c in range(num_crops):
+            _transpose_hwc_to_chw(crops[c], self._multi_chw_buffer[c], batch_size)
+            results.append(self._multi_chw_buffer[c, :batch_size])
+
+        return results
+
     def shutdown(self) -> None:
         self._temp_buffer = None
         self._dest_buffer = None
         self._chw_buffer = None
         self._multi_crop_buffer = None
+        self._multi_chw_buffer = None
 
     def __repr__(self) -> str:
         return f"YUV420NumbaBatchDecoder(num_threads={self.num_threads})"
