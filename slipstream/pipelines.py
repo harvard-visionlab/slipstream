@@ -39,6 +39,12 @@ import torch
 from slipstream.decoders.numba_decoder import NumbaBatchDecoder
 
 
+def _get_yuv420_decoder_class() -> type:
+    """Lazy import to avoid loading Numba/ctypes unless needed."""
+    from slipstream.decoders.yuv420_decoder import YUV420NumbaBatchDecoder
+    return YUV420NumbaBatchDecoder
+
+
 # ImageNet defaults
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -50,6 +56,10 @@ class BatchTransform(ABC):
     @abstractmethod
     def __call__(self, batch_data: Any) -> Any:
         ...
+
+    def set_image_format(self, image_format: str) -> None:
+        """Called by loader to configure decoder for cache format. No-op by default."""
+        pass
 
     def shutdown(self) -> None:
         pass
@@ -66,6 +76,12 @@ class DecodeOnly(BatchTransform):
 
     def __init__(self, num_threads: int = 0) -> None:
         self._decoder = NumbaBatchDecoder(num_threads=num_threads)
+
+    def set_image_format(self, image_format: str) -> None:
+        if image_format == "yuv420" and not isinstance(self._decoder, _get_yuv420_decoder_class()):
+            nt = self._decoder.num_threads
+            self._decoder.shutdown()
+            self._decoder = _get_yuv420_decoder_class()(num_threads=nt)
 
     def __call__(self, batch_data: dict[str, Any]) -> list[np.ndarray]:
         return self._decoder.decode_batch(
@@ -94,6 +110,12 @@ class CenterCrop(BatchTransform):
     def __init__(self, size: int = 224, num_threads: int = 0) -> None:
         self.size = size
         self._decoder = NumbaBatchDecoder(num_threads=num_threads)
+
+    def set_image_format(self, image_format: str) -> None:
+        if image_format == "yuv420" and not isinstance(self._decoder, _get_yuv420_decoder_class()):
+            nt = self._decoder.num_threads
+            self._decoder.shutdown()
+            self._decoder = _get_yuv420_decoder_class()(num_threads=nt)
 
     def __call__(self, batch_data: dict[str, Any]) -> torch.Tensor:
         result = self._decoder.decode_batch_center_crop(
@@ -138,6 +160,12 @@ class RandomResizedCrop(BatchTransform):
         self.ratio = ratio
         self.seed = seed
         self._decoder = NumbaBatchDecoder(num_threads=num_threads)
+
+    def set_image_format(self, image_format: str) -> None:
+        if image_format == "yuv420" and not isinstance(self._decoder, _get_yuv420_decoder_class()):
+            nt = self._decoder.num_threads
+            self._decoder.shutdown()
+            self._decoder = _get_yuv420_decoder_class()(num_threads=nt)
 
     def __call__(self, batch_data: dict[str, Any]) -> torch.Tensor:
         result = self._decoder.decode_batch_random_crop(
@@ -199,6 +227,12 @@ class MultiCropRandomResizedCrop(BatchTransform):
         self.seeds = seeds
         self._decoder = NumbaBatchDecoder(num_threads=num_threads)
 
+    def set_image_format(self, image_format: str) -> None:
+        if image_format == "yuv420" and not isinstance(self._decoder, _get_yuv420_decoder_class()):
+            nt = self._decoder.num_threads
+            self._decoder.shutdown()
+            self._decoder = _get_yuv420_decoder_class()(num_threads=nt)
+
     def __call__(self, batch_data: dict[str, Any]) -> list[torch.Tensor]:
         crops = self._decoder.decode_batch_multi_crop(
             batch_data['data'], batch_data['sizes'],
@@ -250,6 +284,12 @@ class ResizeCrop(BatchTransform):
         self.resize_size = resize_size
         self.crop_size = crop_size
         self._decoder = NumbaBatchDecoder(num_threads=num_threads)
+
+    def set_image_format(self, image_format: str) -> None:
+        if image_format == "yuv420" and not isinstance(self._decoder, _get_yuv420_decoder_class()):
+            nt = self._decoder.num_threads
+            self._decoder.shutdown()
+            self._decoder = _get_yuv420_decoder_class()(num_threads=nt)
 
     def __call__(self, batch_data: dict[str, Any]) -> torch.Tensor:
         result = self._decoder.decode_batch_resize_crop(

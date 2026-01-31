@@ -1341,6 +1341,153 @@ def write_index(
         source._discover_indexes()
 
 
+# =============================================================================
+# YUV420 Cache Utilities
+# =============================================================================
+
+def load_yuv420_cache(
+    cache_dir: Path,
+    image_field: str = "image",
+) -> ImageBytesStorage | None:
+    """Load existing YUV420 image storage if it exists.
+
+    Args:
+        cache_dir: The .slipstream cache directory.
+        image_field: Name of the image field.
+
+    Returns:
+        ImageBytesStorage for YUV420 data, or None if not built yet.
+    """
+    yuv_field = f"{image_field}_yuv420"
+    data_path = cache_dir / f"{yuv_field}.bin"
+    meta_path = cache_dir / f"{yuv_field}.meta.npy"
+
+    if not data_path.exists() or not meta_path.exists():
+        return None
+
+    data_mmap = np.memmap(data_path, dtype=np.uint8, mode='r')
+    meta_array = np.load(meta_path, mmap_mode='r')
+    max_size = int(np.max(meta_array['data_size']) * 1.2)
+
+    return ImageBytesStorage(yuv_field, data_mmap, meta_array, max_size)
+
+
+def build_yuv420_cache(
+    cache_dir: Path,
+    image_field: str = "image",
+    batch_size: int = 256,
+    verbose: bool = True,
+) -> ImageBytesStorage:
+    """Build YUV420 cache from existing JPEG cache.
+
+    Reads JPEG images from the slip cache, decodes them, converts RGB to
+    YUV420P, and writes the result as a sibling storage.
+
+    Args:
+        cache_dir: The .slipstream cache directory.
+        image_field: Name of the image field.
+        batch_size: Processing batch size (for progress reporting).
+        verbose: Print progress.
+
+    Returns:
+        ImageBytesStorage for the YUV420 data.
+    """
+    from turbojpeg import TurboJPEG
+
+    data_path = cache_dir / f"{image_field}.bin"
+    meta_path = cache_dir / f"{image_field}.meta.npy"
+
+    if not data_path.exists():
+        raise FileNotFoundError(f"No image data at {data_path}")
+
+    data_mmap = np.memmap(data_path, dtype=np.uint8, mode='r')
+    metadata = np.load(meta_path, mmap_mode='r')
+    num_samples = len(metadata)
+
+    yuv_field = f"{image_field}_yuv420"
+    out_data_path = cache_dir / f"{yuv_field}.bin"
+    out_meta_path = cache_dir / f"{yuv_field}.meta.npy"
+
+    # Check if already exists with correct sample count
+    if out_data_path.exists() and out_meta_path.exists():
+        existing_meta = np.load(out_meta_path, mmap_mode='r')
+        if len(existing_meta) == num_samples:
+            if verbose:
+                print(f"YUV420 cache already exists ({num_samples:,} samples)")
+            return load_yuv420_cache(cache_dir, image_field)  # type: ignore[return-value]
+
+    turbo = TurboJPEG()
+
+    if verbose:
+        print(f"Building YUV420 cache: {num_samples:,} samples")
+
+    out_metadata = np.zeros(num_samples, dtype=VARIABLE_METADATA_DTYPE)
+    current_ptr = 0
+
+    iterator = range(num_samples)
+    if verbose:
+        iterator = tqdm(iterator, desc="  JPEG → YUV420")
+
+    with open(out_data_path, 'wb') as f:
+        for i in iterator:
+            ptr = int(metadata[i]['data_ptr'])
+            size = int(metadata[i]['data_size'])
+            jpeg_bytes = bytes(data_mmap[ptr:ptr + size])
+
+            # Decode JPEG → RGB
+            rgb = turbo.decode(jpeg_bytes, pixel_format=0)  # TJPF_RGB
+
+            # Convert RGB → YUV420P
+            h, w = rgb.shape[:2]
+            pad_h = h + (h % 2)
+            pad_w = w + (w % 2)
+            if pad_h != h or pad_w != w:
+                padded = np.zeros((pad_h, pad_w, 3), dtype=np.uint8)
+                padded[:h, :w, :] = rgb
+                if pad_h > h:
+                    padded[h, :w, :] = rgb[h - 1, :, :]
+                if pad_w > w:
+                    padded[:h, w, :] = rgb[:, w - 1, :]
+                if pad_h > h and pad_w > w:
+                    padded[h, w, :] = rgb[h - 1, w - 1, :]
+                rgb = padded
+
+            r = rgb[:, :, 0].astype(np.float32)
+            g = rgb[:, :, 1].astype(np.float32)
+            b = rgb[:, :, 2].astype(np.float32)
+
+            y = np.clip(0.299 * r + 0.587 * g + 0.114 * b, 0, 255).astype(np.uint8)
+            u = np.clip(-0.168736 * r - 0.331264 * g + 0.5 * b + 128.0, 0, 255).astype(np.uint8)
+            v = np.clip(0.5 * r - 0.418688 * g - 0.081312 * b + 128.0, 0, 255).astype(np.uint8)
+
+            u_sub = u.reshape(pad_h // 2, 2, pad_w // 2, 2).mean(axis=(1, 3))
+            v_sub = v.reshape(pad_h // 2, 2, pad_w // 2, 2).mean(axis=(1, 3))
+            u_sub = np.clip(u_sub, 0, 255).astype(np.uint8)
+            v_sub = np.clip(v_sub, 0, 255).astype(np.uint8)
+
+            yuv_bytes = y.tobytes() + u_sub.tobytes() + v_sub.tobytes()
+            enc_size = len(yuv_bytes)
+
+            f.write(yuv_bytes)
+
+            out_metadata[i]['data_ptr'] = current_ptr
+            out_metadata[i]['data_size'] = enc_size
+            out_metadata[i]['height'] = pad_h
+            out_metadata[i]['width'] = pad_w
+
+            current_ptr += enc_size
+
+    np.save(out_meta_path, out_metadata)
+
+    if verbose:
+        total_bytes = current_ptr
+        jpeg_total = sum(int(metadata[i]['data_size']) for i in range(num_samples))
+        ratio = total_bytes / jpeg_total if jpeg_total > 0 else 0
+        print(f"  Size: {total_bytes / 1e9:.2f} GB ({ratio:.2f}x JPEG)")
+
+    return load_yuv420_cache(cache_dir, image_field)  # type: ignore[return-value]
+
+
 __all__ = [
     "OptimizedCache",
     "FieldStorage",
@@ -1349,4 +1496,6 @@ __all__ = [
     "StringStorage",
     "CACHE_SUBDIR",
     "write_index",
+    "build_yuv420_cache",
+    "load_yuv420_cache",
 ]
