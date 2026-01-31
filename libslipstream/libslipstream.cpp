@@ -211,6 +211,82 @@ void my_memcpy(void *source, void *dst, uint64_t size) {
     memcpy(dst, source, size);
 }
 
+/**
+ * Convert planar YUV420P image to packed RGB in a pre-allocated buffer.
+ *
+ * YUV420P layout (I420):
+ *   Y plane: height * width bytes
+ *   U plane: (height/2) * (width/2) bytes
+ *   V plane: (height/2) * (width/2) bytes
+ *
+ * All three planes are stored contiguously in `input`:
+ *   [Y data][U data][V data]
+ *
+ * BT.601 conversion (standard for JPEG/sRGB content):
+ *   R = Y + 1.402 * (V - 128)
+ *   G = Y - 0.344136 * (U - 128) - 0.714136 * (V - 128)
+ *   B = Y + 1.772 * (U - 128)
+ *
+ * Uses fixed-point arithmetic (shift 16) for speed without floats.
+ *
+ * @param input       YUV420P data (Y + U + V planes contiguous)
+ * @param input_size  Total size of YUV data
+ * @param output      Pre-allocated RGB output buffer [height * width * 3]
+ * @param height      Image height (must be even)
+ * @param width       Image width (must be even)
+ * @return 0 on success, -1 on error
+ */
+int yuv420p_to_rgb_buffer(
+    unsigned char *input, uint64_t input_size,
+    unsigned char *output, uint32_t height, uint32_t width
+) {
+    uint64_t y_size = (uint64_t)height * width;
+    uint64_t uv_size = ((uint64_t)height / 2) * (width / 2);
+    uint64_t expected_size = y_size + 2 * uv_size;
+
+    if (input_size < expected_size) return -1;
+
+    unsigned char *y_plane = input;
+    unsigned char *u_plane = input + y_size;
+    unsigned char *v_plane = input + y_size + uv_size;
+
+    uint32_t uv_stride = width / 2;
+
+    // Fixed-point coefficients (BT.601, shift 16)
+    // R = Y + 1.402 * (V-128)         → coeff_rv = 91881
+    // G = Y - 0.344136*(U-128) - 0.714136*(V-128) → coeff_gu = 22554, coeff_gv = 46802
+    // B = Y + 1.772 * (U-128)         → coeff_bu = 116130
+    const int32_t coeff_rv =  91881;
+    const int32_t coeff_gu = -22554;
+    const int32_t coeff_gv = -46802;
+    const int32_t coeff_bu = 116130;
+
+    for (uint32_t row = 0; row < height; row++) {
+        uint32_t uv_row = row >> 1;
+        unsigned char *y_row = y_plane + (uint64_t)row * width;
+        unsigned char *u_row = u_plane + (uint64_t)uv_row * uv_stride;
+        unsigned char *v_row = v_plane + (uint64_t)uv_row * uv_stride;
+        unsigned char *out_row = output + (uint64_t)row * width * 3;
+
+        for (uint32_t col = 0; col < width; col++) {
+            int32_t y_val = (int32_t)y_row[col];
+            int32_t u_val = (int32_t)u_row[col >> 1] - 128;
+            int32_t v_val = (int32_t)v_row[col >> 1] - 128;
+
+            int32_t r = y_val + ((coeff_rv * v_val + 32768) >> 16);
+            int32_t g = y_val + ((coeff_gu * u_val + coeff_gv * v_val + 32768) >> 16);
+            int32_t b = y_val + ((coeff_bu * u_val + 32768) >> 16);
+
+            // Clamp to [0, 255]
+            out_row[col * 3 + 0] = (uint8_t)(r < 0 ? 0 : (r > 255 ? 255 : r));
+            out_row[col * 3 + 1] = (uint8_t)(g < 0 ? 0 : (g > 255 ? 255 : g));
+            out_row[col * 3 + 2] = (uint8_t)(b < 0 ? 0 : (b > 255 ? 255 : b));
+        }
+    }
+
+    return 0;
+}
+
 // Python module definition (minimal - we use ctypes for actual bindings)
 static PyMethodDef libslipstreamMethods[] = {
     {NULL, NULL, 0, NULL}
@@ -219,7 +295,7 @@ static PyMethodDef libslipstreamMethods[] = {
 static struct PyModuleDef libslipstreammodule = {
     PyModuleDef_HEAD_INIT,
     "_libslipstream",
-    "Fast JPEG decode with TurboJPEG + stb resize - accessed via ctypes",
+    "Fast JPEG/YUV decode with TurboJPEG + stb resize - accessed via ctypes",
     -1,
     libslipstreamMethods
 };

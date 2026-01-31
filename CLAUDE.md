@@ -406,19 +406,21 @@ These tests verify that the slip cache format faithfully represents the source d
     - **Raw RGB: 35x faster** (no decode, just memcpy). Confirms decode is 95% of per-image time. 3.9x storage cost makes this impractical at ImageNet scale. Could be considered for tiny subsets (e.g., Imagenette/IN-100) for fast iteration, but likely not worthwhile given the modest decode bottleneck.
     - **Conclusion (round 1):** Alternative *codecs* cannot beat SIMD-accelerated TurboJPEG. The bottleneck is Huffman decode + IDCT, not the codec algorithm's complexity. But raw RGB (72k img/s vs 15k JPEG on machina) proves the compute gap is real — the question is whether we can eliminate the JPEG bitstream parsing while keeping storage practical.
 
-3. ⬜ Alternative storage formats — round 2: **bypass JPEG decode entirely** (see experiments below).
-    - **Insight**: JPEG's bottleneck is entropy decode (Huffman) + IDCT, not resize/crop. Raw RGB eliminates this but costs 3.9x storage. The next experiments target the middle ground: eliminate the serial bitstream parse while keeping storage ≤2x JPEG.
-    - **Experiment A — Raw YUV420**: Store decoded images as raw planar YUV 4:2:0 (Y: H×W, U: H/2×W/2, V: H/2×W/2). This gives 2:1 compression vs RGB from chroma subsampling alone, with zero bitstream parsing — decode is just a SIMD-friendly 3×3 matrix multiply per pixel. Storage: ~1.95x JPEG. Target: ≥30k img/s (2x current JPEG throughput).
-        - C kernel: `yuv420p_to_rgb_batch()` in libslipstream.cpp with NEON/AVX2 intrinsics
-        - Converter: offline JPEG→YUV420 transcoder (decode JPEG, convert RGB→YUV420, store raw planes)
-        - Same slip cache metadata format (data_ptr, data_size, height, width)
-        - Numba prange integration via `YUV420NumbaBatchDecoder`
-    - **Experiment B — LZ4-compressed raw (RGB or YUV420)**: LZ4 decompresses at 2-5 GB/s (near memory speed), adding negligible CPU cost. Applied on top of raw YUV420, this could approach JPEG storage sizes while keeping decode nearly free. LZ4 on natural images typically achieves 1.5-2.5x compression.
-        - C kernel: LZ4 decompress → YUV→RGB (or just LZ4 → RGB) in a fused pipeline
-        - Requires `liblz4` system dependency
-        - Storage estimate: LZ4(YUV420) ≈ 1.0-1.3x JPEG, LZ4(RGB) ≈ 1.5-2.5x JPEG
-    - **Experiment order**: A first (simpler, no new dependency), then B if A's storage cost is too high.
-    - **Success criteria**: ≥1.5x JPEG throughput at ≤2x JPEG storage. If both fail, JPEG is confirmed optimal and format investigation is truly closed.
+3. ✅ Alternative storage formats — round 2: **bypass JPEG decode entirely** (tested 2026-01-30, `experiment/yuv420-decode` branch).
+    - **Insight**: JPEG's bottleneck is entropy decode (Huffman) + IDCT, not resize/crop. Raw RGB eliminates this but costs 3.9x storage. Round 2 targeted the middle ground.
+    - **Experiment A — Raw YUV420: WINNER.** Store decoded images as raw planar YUV 4:2:0 (Y: H×W, U: H/2×W/2, V: H/2×W/2). "Decode" is just a fixed-point BT.601 color conversion (no bitstream parsing). Benchmarked on machina (50k ImageNet val, batch_size=256, num_workers=12):
+
+        | Mode             | JPEG       | YUV420     | YUV/JPEG |
+        |------------------|------------|------------|----------|
+        | Decode Only      | 14,322/s   | 27,370/s   | **1.91x** |
+        | + CenterCrop(224)| 13,005/s   | 23,257/s   | **1.79x** |
+        | + RRC(224)       | 12,398/s   | 20,828/s   | **1.68x** |
+
+        Storage: 6.54 GB (1.73x JPEG). No new dependencies. C kernel: `yuv420p_to_rgb_buffer()` in libslipstream.cpp. Python: `YUV420NumbaBatchDecoder` in `slipstream/decoders/yuv420_decoder.py`. Converter: `experiments/format_comparison/convert_yuv420.py`.
+
+    - **Experiment B — LZ4+YUV420: eliminated.** Per-image `lz4.block.decompress()` in Python reintroduces the serial bottleneck. Storage improved to 5.63 GB (1.49x JPEG), but throughput collapsed to **1.06-1.10x JPEG** — nearly all YUV420 advantage lost. Would require C-level LZ4 decompression inside the prange loop to be viable, adding `liblz4` dependency for marginal storage savings (1.49x vs 1.73x JPEG). Not worth the complexity.
+
+    - **Conclusion (round 2):** Raw YUV420 is the optimal format for decode-bound workloads. 1.68-1.91x JPEG throughput at 1.73x storage with zero new dependencies. Next step: integrate as a first-class cache format option in `OptimizedCache` (e.g., `OptimizedCache.build(dataset, format="yuv420")`).
 
 ### Phase 7: Documentation
 

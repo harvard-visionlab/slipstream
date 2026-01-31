@@ -117,6 +117,7 @@ class SlipstreamLoader:
         device: int | str = 'cpu',
         image_field: str = "image",
         exclude_fields: list[str] | None = None,
+        image_format: str = "jpeg",
         force_rebuild: bool = False,
         verbose: bool = True,
         use_threading: bool = True,
@@ -142,6 +143,9 @@ class SlipstreamLoader:
                 or a callable. If None, raw data is returned.
             device: Device for non-pipelined fields (labels, indices)
             image_field: Name of the image field in the dataset
+            image_format: Image storage format to use. "jpeg" (default) uses
+                the standard JPEG cache. "yuv420" uses raw YUV420P storage
+                for ~1.7-1.9x faster decode (built on demand from JPEG cache).
             exclude_fields: List of field names to exclude from loading
             force_rebuild: Force rebuilding the optimized cache
             verbose: Print progress messages
@@ -172,6 +176,7 @@ class SlipstreamLoader:
         self.distributed = distributed
         self.batches_ahead = batches_ahead
         self.image_field = image_field
+        self.image_format = image_format
         self.exclude_fields = set(exclude_fields or [])
         self.verbose = verbose
         self.use_threading = use_threading
@@ -212,6 +217,38 @@ class SlipstreamLoader:
             self.cache = OptimizedCache.build(dataset, cache_dir, verbose=verbose)
         else:
             self.cache = OptimizedCache.load(cache_dir, verbose=verbose)
+
+        # Build/load alternative image format if requested
+        if image_format == "yuv420":
+            from slipstream.cache import build_yuv420_cache, load_yuv420_cache
+
+            yuv_storage = load_yuv420_cache(self.cache.cache_dir, self.image_field)
+            if yuv_storage is None:
+                if verbose:
+                    print("Building YUV420 cache (one-time conversion from JPEG)...")
+                yuv_storage = build_yuv420_cache(
+                    self.cache.cache_dir, self.image_field, verbose=verbose,
+                )
+            elif verbose:
+                print(f"Loaded YUV420 cache ({yuv_storage.num_samples:,} samples)")
+            self._image_storage = yuv_storage
+        else:
+            self._image_storage = self.cache.fields.get(self.image_field)
+
+        # Configure pipelines for the selected image format
+        if image_format != "jpeg":
+            for field_name, pipeline in self.pipelines.items():
+                if field_name != self.image_field:
+                    continue
+                if field_name in self._multi_pipeline_fields:
+                    for sub_pipeline in pipeline:
+                        for transform in sub_pipeline:
+                            if hasattr(transform, 'set_image_format'):
+                                transform.set_image_format(image_format)
+                else:
+                    for transform in pipeline:
+                        if hasattr(transform, 'set_image_format'):
+                            transform.set_image_format(image_format)
 
         # Determine which fields to load
         self._fields_to_load = [
@@ -270,8 +307,8 @@ class SlipstreamLoader:
         num_slots = self.batches_ahead + 2
 
         # Get image storage to know max size
-        if self.image_field in self.cache.fields:
-            image_storage = self.cache.fields[self.image_field]
+        image_storage = self._image_storage
+        if image_storage is not None:
             max_size = image_storage.max_size
 
             self._data_banks = [
@@ -336,7 +373,7 @@ class SlipstreamLoader:
         if not self.drop_last and len(indices) % self.batch_size != 0:
             num_batches += 1
 
-        image_storage = self.cache.fields.get(self.image_field)
+        image_storage = self._image_storage
         has_image_field = image_storage is not None and self._data_banks is not None
 
         for batch_idx in range(num_batches):
@@ -404,7 +441,7 @@ class SlipstreamLoader:
         num_slots = len(self._data_banks) if self._data_banks else 1
 
         # Get the image field storage for direct access
-        image_storage = self.cache.fields.get(self.image_field)
+        image_storage = self._image_storage
         has_image_field = image_storage is not None and self._data_banks is not None
 
         def prefetch_worker():
