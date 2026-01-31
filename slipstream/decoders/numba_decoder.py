@@ -29,13 +29,27 @@ Usage:
 from __future__ import annotations
 
 from ctypes import CDLL, POINTER, c_int, c_int64, c_uint32, c_uint64, c_void_p
-from multiprocessing import cpu_count
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from numba import njit, prange, set_num_threads
 from numpy.typing import NDArray
+
+def _available_cpus() -> int:
+    """Return the number of CPUs available to this process, minus one.
+
+    Reserves one core for the main thread. Uses os.sched_getaffinity
+    (respects cgroups/SLURM) where available, falls back to os.cpu_count()
+    on macOS/Windows.
+    """
+    try:
+        n = len(os.sched_getaffinity(0))
+    except AttributeError:
+        n = os.cpu_count() or 2
+    return max(1, n - 1)
+
 
 __all__ = [
     "NumbaBatchDecoder",
@@ -187,7 +201,7 @@ class Compiler:
     @classmethod
     def set_num_threads(cls, n: int) -> None:
         if n < 1:
-            n = cpu_count()
+            n = _available_cpus()
         cls.num_threads = n
         set_num_threads(n)
 
@@ -214,7 +228,7 @@ class Compiler:
 # Initialize compiler with default thread count
 # Note: set_num_threads must be called before any parallel jit compilation
 try:
-    Compiler.set_num_threads(cpu_count())
+    Compiler.set_num_threads(_available_cpus())
 except ValueError:
     # Already set, ignore
     pass
@@ -556,7 +570,7 @@ class NumbaBatchDecoder:
             num_threads: Number of parallel decode threads. 0 = auto (cpu_count)
         """
         if num_threads < 1:
-            num_threads = cpu_count()
+            num_threads = _available_cpus()
         self.num_threads = num_threads
         Compiler.set_num_threads(num_threads)
 

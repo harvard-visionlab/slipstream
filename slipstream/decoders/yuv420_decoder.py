@@ -13,7 +13,7 @@ Usage:
 from __future__ import annotations
 
 from ctypes import c_int, c_uint32, c_uint64, c_void_p
-from multiprocessing import cpu_count
+from slipstream.decoders.numba_decoder import _available_cpus
 from typing import Any
 
 import numpy as np
@@ -212,7 +212,7 @@ class YUV420NumbaBatchDecoder:
 
     def __init__(self, num_threads: int = 0) -> None:
         if num_threads < 1:
-            num_threads = cpu_count()
+            num_threads = _available_cpus()
         self.num_threads = num_threads
         Compiler.set_num_threads(num_threads)
 
