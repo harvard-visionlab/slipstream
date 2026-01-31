@@ -232,6 +232,26 @@ All benchmarks on **machina** (GPU workstation: AMD Threadripper PRO 3975WX, 64 
 - ✅ Raw I/O is slower (640k vs 882k) because YUV420 images are 1.73x larger (more bytes to mmap-read per batch)
 - ✅ No regressions in JPEG path — all JPEG benchmarks within normal run-to-run variance
 
+### SlipstreamLoader End-to-End — Machina (measured 2026-01-31)
+
+GPU workstation: AMD Threadripper PRO 3975WX, 64 cores, NVIDIA RTX A6000. `--num-threads 12`. ImageNet-1k val (50k samples), batch_size=256. Best of 3 epochs (warm).
+
+| Pipeline                               | JPEG       | YUV420     | YUV/JPEG   |
+| -------------------------------------- | ---------- | ---------- | ---------- |
+| **Raw I/O (simple)**                   | 940,903    | 644,181    | 0.68x      |
+| **RRC (simple)**                       | **12,920** | **19,173** | **1.48x**  |
+| **RRC (threaded)**                     | **12,660** | **18,401** | **1.45x**  |
+| **CenterCrop (simple)**               | **14,483** | **21,806** | **1.51x**  |
+| **CenterCrop (threaded)**             | **14,151** | **21,790** | **1.54x**  |
+| **2x RRC fused multi-crop (simple)**  | **10,186** | **13,660** | **1.34x**  |
+| **2x RRC fused multi-crop (threaded)**| **10,016** | **13,634** | **1.36x**  |
+
+**Analysis:**
+
+- ✅ YUV420 speedup is 1.3-1.5x on machina — lower than M4 Pro (2.0x) and cluster (2.4-2.9x) because Threadripper's AVX2 makes JPEG decode relatively faster, narrowing the gap
+- ✅ JPEG numbers match prior baselines (12,947 RRC from 2026-01-29) — no regression from stride fix
+- ✅ Simple mode slightly preferred over threaded on this machine
+
 ### SlipstreamLoader End-to-End — FASRC Cluster (measured 2026-01-30)
 
 Cluster node: Intel Xeon Platinum 8358 @ 2.60GHz, 16 allocated cores, 192 GB RAM, A100-SXM4-40GB MIG 3g.20gb. Partition: `gpu_test`. `--num-threads 12`. ImageNet-1k val (50k samples), batch_size=256.
