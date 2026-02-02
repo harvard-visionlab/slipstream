@@ -91,6 +91,7 @@ from slipstream.pipelines import (
     DecodeOnly,
     DecodeYUVFullRes,
     DecodeYUVPlanes,
+    DirectRandomResizedCrop,
     MultiCropRandomResizedCrop,
     IMAGENET_MEAN,
     IMAGENET_STD,
@@ -100,6 +101,7 @@ from slipstream.pipelines import (
     ToDevice,
     make_train_pipeline,
     make_val_pipeline,
+    estimate_rejection_fallback_rate,
 )
 
 # Readers (dataset format adapters)

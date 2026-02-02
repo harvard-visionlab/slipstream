@@ -187,6 +187,68 @@ class RandomResizedCrop(BatchTransform):
         )
 
 
+class DirectRandomResizedCrop(BatchTransform):
+    """Decode JPEG batch with analytic random resized crop (no rejection sampling).
+
+    Unlike RandomResizedCrop which uses torchvision's 10-attempt rejection loop,
+    this computes valid crop parameters analytically in a single pass by clamping
+    the ratio range to values that guarantee a valid crop.
+
+    The distribution differs slightly from torchvision's — rejection sampling
+    biases toward certain regions of (scale, ratio) space. This method produces
+    a uniform distribution over the valid parameter space.
+
+    Args:
+        size: Output size (square).
+        scale: Crop area range relative to original.
+        ratio: Aspect ratio range.
+        num_threads: Parallel decode threads. 0 = auto.
+        seed: Seed for reproducible crops. None = non-reproducible.
+
+    Returns:
+        Tensor [B, 3, size, size] uint8.
+    """
+
+    def __init__(
+        self,
+        size: int = 224,
+        scale: tuple[float, float] = (0.08, 1.0),
+        ratio: tuple[float, float] = (3 / 4, 4 / 3),
+        num_threads: int = 0,
+        seed: int | None = None,
+    ) -> None:
+        self.size = size
+        self.scale = scale
+        self.ratio = ratio
+        self.seed = seed
+        self._decoder = NumbaBatchDecoder(num_threads=num_threads)
+
+    def set_image_format(self, image_format: str) -> None:
+        if image_format == "yuv420" and not isinstance(self._decoder, _get_yuv420_decoder_class()):
+            nt = self._decoder.num_threads
+            self._decoder.shutdown()
+            self._decoder = _get_yuv420_decoder_class()(num_threads=nt)
+
+    def __call__(self, batch_data: dict[str, Any]) -> torch.Tensor:
+        result = self._decoder.decode_batch_direct_random_crop(
+            batch_data['data'], batch_data['sizes'],
+            batch_data['heights'], batch_data['widths'],
+            target_size=self.size, scale=self.scale, ratio=self.ratio,
+            seed=self.seed,
+        )
+        chw = self._decoder.hwc_to_chw(result)
+        return torch.from_numpy(chw)
+
+    def shutdown(self) -> None:
+        self._decoder.shutdown()
+
+    def __repr__(self) -> str:
+        return (
+            f"DirectRandomResizedCrop(size={self.size}, scale={self.scale}, "
+            f"ratio=({self.ratio[0]:.4f}, {self.ratio[1]:.4f}), seed={self.seed})"
+        )
+
+
 class MultiCropRandomResizedCrop(BatchTransform):
     """Decode-once + N random crops for SSL multi-crop.
 
@@ -474,6 +536,80 @@ def make_val_pipeline(
     return Compose(transforms)
 
 
+def estimate_rejection_fallback_rate(
+    widths: np.ndarray | list[int],
+    heights: np.ndarray | list[int],
+    scale: tuple[float, float] = (0.08, 1.0),
+    ratio: tuple[float, float] = (3 / 4, 4 / 3),
+    n_samples: int = 50000,
+    seed: int = 42,
+) -> dict[str, float]:
+    """Estimate how often rejection-sampling RRC falls back to center crop.
+
+    Generates ``n_samples`` crop parameters per unique (width, height) pair
+    using the rejection-sampling method and counts how many hit the
+    center-crop fallback. If the fallback rate exceeds ~5%, consider using
+    ``DirectRandomResizedCrop`` which guarantees a valid crop analytically.
+
+    Args:
+        widths: Image widths (one per image, or representative set).
+        heights: Image heights (one per image, or representative set).
+        scale: Scale range for random area.
+        ratio: Aspect ratio range.
+        n_samples: Samples to generate per unique (w, h) pair.
+        seed: RNG seed.
+
+    Returns:
+        Dict with keys:
+        - ``"fallback_rate"``: fraction of samples that hit center-crop fallback
+        - ``"fallback_count"``: number of fallback samples
+        - ``"total_samples"``: total samples tested
+        - ``"recommend_direct"``: True if fallback_rate > 5%
+    """
+    import math
+    from slipstream.decoders.numba_decoder import _generate_random_crop_params_batch
+
+    widths = np.asarray(widths, dtype=np.int32)
+    heights = np.asarray(heights, dtype=np.int32)
+
+    log_ratio_min = math.log(ratio[0])
+    log_ratio_max = math.log(ratio[1])
+
+    # Get unique (w, h) pairs to avoid redundant computation
+    pairs = np.unique(np.column_stack([widths, heights]), axis=0)
+
+    total_fallbacks = 0
+    total_tested = 0
+
+    for row in pairs:
+        w, h = int(row[0]), int(row[1])
+        ws = np.full(n_samples, w, dtype=np.int32)
+        hs = np.full(n_samples, h, dtype=np.int32)
+
+        params = _generate_random_crop_params_batch(
+            ws, hs, scale[0], scale[1], log_ratio_min, log_ratio_max, seed,
+        )
+
+        # Fallback signature: crop_w == crop_h == min(w,h), centered
+        min_dim = min(w, h)
+        cx = (w - min_dim) // 2
+        cy = (h - min_dim) // 2
+        is_fallback = (
+            (params[:, 2] == min_dim) & (params[:, 3] == min_dim) &
+            (params[:, 0] == cx) & (params[:, 1] == cy)
+        )
+        total_fallbacks += int(is_fallback.sum())
+        total_tested += n_samples
+
+    rate = total_fallbacks / total_tested if total_tested > 0 else 0.0
+    return {
+        "fallback_rate": rate,
+        "fallback_count": total_fallbacks,
+        "total_samples": total_tested,
+        "recommend_direct": rate > 0.05,
+    }
+
+
 __all__ = [
     # Base
     "BatchTransform",
@@ -484,6 +620,7 @@ __all__ = [
     "DecodeYUVPlanes",
     "CenterCrop",
     "RandomResizedCrop",
+    "DirectRandomResizedCrop",
     "MultiCropRandomResizedCrop",
     "ResizeCrop",
     # Post-processing
@@ -492,6 +629,7 @@ __all__ = [
     # Convenience
     "make_train_pipeline",
     "make_val_pipeline",
+    "estimate_rejection_fallback_rate",
     # Constants
     "IMAGENET_MEAN",
     "IMAGENET_STD",

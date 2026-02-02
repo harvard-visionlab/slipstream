@@ -508,6 +508,111 @@ def _generate_random_crop_params_batch(
     return params
 
 
+@njit(cache=True, fastmath=True)
+def _generate_direct_random_crop_params_batch(
+    widths: NDArray[np.int32],
+    heights: NDArray[np.int32],
+    scale_min: float,
+    scale_max: float,
+    log_ratio_min: float,
+    log_ratio_max: float,
+    seed: int,
+) -> NDArray[np.int32]:
+    """Generate random crop parameters using analytic (direct) sampling.
+
+    Instead of rejection sampling (up to 10 attempts), this computes valid
+    crop parameters in a single pass by clamping the ratio range to values
+    that guarantee a valid crop, then sampling scale within the valid range
+    for the chosen ratio.
+
+    Returns:
+        Array of shape [B, 4] with (x, y, crop_w, crop_h) for each image
+    """
+    np.random.seed(seed)
+    batch_size = len(widths)
+    params = np.zeros((batch_size, 4), dtype=np.int32)
+
+    # Precompute constants outside the loop — avoids per-sample exp/log
+    ratio_min = np.exp(log_ratio_min)
+    ratio_max = np.exp(log_ratio_max)
+
+    for i in range(batch_size):
+        w = widths[i]
+        h = heights[i]
+        area = float(w * h)
+
+        # For ratio r and scale s: crop_w = sqrt(s*area*r), crop_h = sqrt(s*area/r)
+        # crop_w <= w  =>  s <= w/(h*r)
+        # crop_h <= h  =>  s <= h*r/w
+        # For s_min to be achievable: r in [w*s_min/h, w/(h*s_min)]
+        wf = float(w)
+        hf = float(h)
+        inv_h = 1.0 / hf
+        inv_w = 1.0 / wf
+
+        r_lo = wf * scale_min * inv_h
+        r_hi = wf / (hf * scale_min)
+
+        # Clamp to user-specified ratio range
+        # Fast path: if user range is fully valid (common for square-ish images),
+        # reuse precomputed log values — avoids 2× np.log() per sample.
+        if r_lo <= ratio_min and r_hi >= ratio_max:
+            log_r_lo = log_ratio_min
+            log_r_hi = log_ratio_max
+        else:
+            if ratio_min > r_lo:
+                r_lo = ratio_min
+            if ratio_max < r_hi:
+                r_hi = ratio_max
+            if r_lo > r_hi:
+                # No valid (ratio, scale) combination — center crop fallback
+                crop_size = min(w, h)
+                params[i, 0] = (w - crop_size) // 2
+                params[i, 1] = (h - crop_size) // 2
+                params[i, 2] = crop_size
+                params[i, 3] = crop_size
+                continue
+            log_r_lo = np.log(r_lo)
+            log_r_hi = np.log(r_hi)
+        r = np.exp(np.random.uniform(log_r_lo, log_r_hi))
+
+        # Max valid scale for this ratio
+        s_max_w = wf * inv_h / r     # w / (h * r)
+        s_max_h = hf * r * inv_w     # h * r / w
+        ms = s_max_w if s_max_w < s_max_h else s_max_h
+        if scale_max < ms:
+            ms = scale_max
+        if ms < scale_min:
+            ms = scale_min
+        s = np.random.uniform(scale_min, ms)
+
+        # Compute crop dimensions — guaranteed to fit
+        sa = s * area
+        crop_w = int(np.sqrt(sa * r) + 0.5)
+        crop_h = int(np.sqrt(sa / r) + 0.5)
+
+        # Clamp to image bounds (floating-point rounding edge cases)
+        if crop_w > w:
+            crop_w = w
+        if crop_h > h:
+            crop_h = h
+        if crop_w < 1:
+            crop_w = 1
+        if crop_h < 1:
+            crop_h = 1
+
+        # Sample position
+        crop_x = np.random.randint(0, w - crop_w + 1)
+        crop_y = np.random.randint(0, h - crop_h + 1)
+
+        params[i, 0] = crop_x
+        params[i, 1] = crop_y
+        params[i, 2] = crop_w
+        params[i, 3] = crop_h
+
+    return params
+
+
 @njit(cache=True, parallel=True)
 def _generate_center_crop_params_batch(
     widths: NDArray[np.int32],
@@ -914,6 +1019,77 @@ class NumbaBatchDecoder:
 
         # Return view (no copy — caller should not hold reference across batches)
         # Tensor conversion + permute to [B, C, H, W] should happen in the pipeline
+        return dest_buffer[:batch_size]
+
+    def decode_batch_direct_random_crop(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray,
+        heights: NDArray,
+        widths: NDArray,
+        target_size: int = 224,
+        scale: tuple[float, float] = (0.08, 1.0),
+        ratio: tuple[float, float] = (3.0 / 4.0, 4.0 / 3.0),
+        seed: int | None = None,
+        destination: NDArray[np.uint8] | None = None,
+    ) -> NDArray[np.uint8]:
+        """Decode batch with DirectRandomResizedCrop (analytic, no rejection sampling).
+
+        Same API as decode_batch_random_crop but uses analytic parameter generation
+        that guarantees a valid crop on every sample without looping.
+
+        Args:
+            data: Padded JPEG data [B, max_size] uint8
+            sizes: Actual JPEG sizes [B]
+            heights: Image heights [B]
+            widths: Image widths [B]
+            target_size: Final output size (square)
+            scale: Scale range for random area
+            ratio: Aspect ratio range
+            seed: Seed for reproducibility
+            destination: Unused (for API compatibility)
+
+        Returns:
+            Array [B, target_size, target_size, 3] uint8
+        """
+        import math
+
+        batch_size = len(sizes)
+        max_h = int(np.max(heights))
+        max_w = int(np.max(widths))
+
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+        heights_i32 = heights if heights.dtype == np.int32 else np.ascontiguousarray(heights, dtype=np.int32)
+        widths_i32 = widths if widths.dtype == np.int32 else np.ascontiguousarray(widths, dtype=np.int32)
+
+        log_ratio_min = math.log(ratio[0])
+        log_ratio_max = math.log(ratio[1])
+
+        if seed is not None:
+            self._seed_counter += 1
+            batch_seed = seed + self._seed_counter
+        else:
+            self._seed_counter += 1
+            batch_seed = self._seed_counter
+
+        crop_params = _generate_direct_random_crop_params_batch(
+            widths_i32, heights_i32,
+            scale[0], scale[1],
+            log_ratio_min, log_ratio_max,
+            batch_seed,
+        )
+
+        temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
+        dest_buffer = self._ensure_dest_buffer(batch_size, target_size, target_size)
+
+        self._decode_crop_fn(
+            data, sizes_u64, heights_u32, widths_u32,
+            crop_params, temp_buffer, dest_buffer,
+            target_size, target_size,
+        )
+
         return dest_buffer[:batch_size]
 
     def decode_batch_multi_crop(

@@ -225,7 +225,7 @@ def benchmark_numba_decode(
     batch_size: int,
     num_epochs: int,
     num_warmup: int,
-    with_crop: str | None = None,  # None, "rrc", "center"
+    with_crop: str | None = None,  # None, "rrc", "center", "direct_rrc"
     target_size: int = 224,
 ) -> BenchmarkResult:
     """Benchmark Numba decoder throughput.
@@ -240,6 +240,8 @@ def benchmark_numba_decode(
     crop_str = ""
     if with_crop == "rrc":
         crop_str = " + RRC"
+    elif with_crop == "direct_rrc":
+        crop_str = " + DirectRRC"
     elif with_crop == "center":
         crop_str = " + CenterCrop"
 
@@ -280,6 +282,12 @@ def benchmark_numba_decode(
             if with_crop == "rrc":
                 # Returns tensor [B, 3, target_size, target_size]
                 images = decoder.decode_batch_random_crop(
+                    data, sizes, heights, widths,
+                    target_size=target_size,
+                    scale=(0.08, 1.0),
+                )
+            elif with_crop == "direct_rrc":
+                images = decoder.decode_batch_direct_random_crop(
                     data, sizes, heights, widths,
                     target_size=target_size,
                     scale=(0.08, 1.0),
@@ -444,7 +452,14 @@ def main():
             )
             results.append(result)
 
-            # 3. Numba decode + CenterCrop
+            # 3. Numba decode + DirectRandomResizedCrop
+            result = benchmark_numba_decode(
+                cache, numba_decoder, args.batch_size, args.epochs, args.warmup,
+                with_crop="direct_rrc", target_size=args.target_size,
+            )
+            results.append(result)
+
+            # 4. Numba decode + CenterCrop
             result = benchmark_numba_decode(
                 cache, numba_decoder, args.batch_size, args.epochs, args.warmup,
                 with_crop="center", target_size=args.target_size,

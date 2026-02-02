@@ -37,6 +37,7 @@ dev = [
     "matplotlib",
     "seaborn",
     "nbstripout",
+    "scipy>=1.15.3",
 ]
 
 # Experimental image format comparison (QOI, JPEG XL)

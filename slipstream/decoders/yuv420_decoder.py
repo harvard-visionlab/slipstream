@@ -22,6 +22,7 @@ from numpy.typing import NDArray
 from slipstream.decoders.numba_decoder import (
     Compiler,
     _generate_center_crop_params_batch,
+    _generate_direct_random_crop_params_batch,
     _generate_random_crop_params_batch,
     _transpose_hwc_to_chw,
     load_library,
@@ -455,6 +456,53 @@ class YUV420NumbaBatchDecoder:
         batch_seed = (seed + self._seed_counter) if seed is not None else self._seed_counter
 
         crop_params = _generate_random_crop_params_batch(
+            widths_i32, heights_i32,
+            scale[0], scale[1],
+            log_ratio_min, log_ratio_max,
+            batch_seed,
+        )
+
+        temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
+        dest_buffer = self._ensure_dest_buffer(batch_size, target_size, target_size)
+
+        self._decode_crop_fn(
+            data, sizes_u64, heights_u32, widths_u32,
+            crop_params, temp_buffer, dest_buffer,
+            target_size, target_size,
+        )
+        return dest_buffer[:batch_size]
+
+    def decode_batch_direct_random_crop(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray,
+        heights: NDArray,
+        widths: NDArray,
+        target_size: int = 224,
+        scale: tuple[float, float] = (0.08, 1.0),
+        ratio: tuple[float, float] = (3.0 / 4.0, 4.0 / 3.0),
+        seed: int | None = None,
+    ) -> NDArray[np.uint8]:
+        """Decode batch with DirectRandomResizedCrop (analytic, no rejection sampling)."""
+        import math
+
+        batch_size = len(sizes)
+        max_h = int(np.max(heights))
+        max_w = int(np.max(widths))
+
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+        heights_i32 = heights if heights.dtype == np.int32 else np.ascontiguousarray(heights, dtype=np.int32)
+        widths_i32 = widths if widths.dtype == np.int32 else np.ascontiguousarray(widths, dtype=np.int32)
+
+        log_ratio_min = math.log(ratio[0])
+        log_ratio_max = math.log(ratio[1])
+
+        self._seed_counter += 1
+        batch_seed = (seed + self._seed_counter) if seed is not None else self._seed_counter
+
+        crop_params = _generate_direct_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
