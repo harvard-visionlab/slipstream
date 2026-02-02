@@ -311,14 +311,16 @@ slipstream/
 1. ⬜ Create standard pipeline presets (training, validation, SSL multi-crop) for demos and API validation
 2. ⬜ Notebook demonstrating pipeline presets and common training workflows
 
-#### Phase 5c: Multi-Crop API Enhancements
+#### Phase 5c: Multi-Crop API Enhancements ✅ CORE COMPLETE
 
-1. ⬜ **Named field emission**: `MultiCropRandomResizedCrop` should optionally emit named fields (e.g., `image_0`, `image_1`) instead of a list `[crop0, crop1]` — less ambiguous downstream
-2. ⬜ **Per-crop parameter control**: All params (size, scale, ratio, seed) should optionally accept a list of per-crop settings. Enables:
+1. ✅ **Named field emission**: `MultiRandomResizedCrop` emits named top-level batch keys (e.g., `batch["global_0"]`) instead of a list. `MultiCropPipeline` applies per-crop transform chains.
+2. ✅ **Per-crop parameter control**: All params (size, scale, ratio, seed) accept per-crop settings via dict API. Enables:
     - Different sized crops (e.g., 2 global 224px + 4 local 96px)
-    - Yoked crops (same seed → same center point, different scale → zoomed-in / zoomed-out pair)
     - Different scale ranges per crop (e.g., global `(0.4, 1.0)` + local `(0.05, 0.4)`)
-3. ⬜ Notebook demonstrating multi-crop configurations (named fields, yoked crops, mixed sizes)
+    - Per-crop seeds for reproducibility
+    - Single JPEG decode per image with `dest_stride_w` support in libslipstream for varied-size output buffers
+3. ✅ Notebook demonstrating multi-crop configurations (`notebooks/08_multi_crop_named.ipynb`)
+4. ⬜ Yoked crops (same seed → same center point, different scale → zoomed-in / zoomed-out pair)
 
 ### Phase 6: Additional Dataset Sources
 

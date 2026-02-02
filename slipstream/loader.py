@@ -430,9 +430,13 @@ class SlipstreamLoader:
                 }
 
                 if self.image_field in self.pipelines:
-                    batch[self.image_field] = self._apply_pipeline(
+                    pipeline_result = self._apply_pipeline(
                         self.image_field, image_data
                     )
+                    if isinstance(pipeline_result, dict):
+                        batch.update(pipeline_result)
+                    else:
+                        batch[self.image_field] = pipeline_result
                 else:
                     batch[self.image_field] = image_data
 
@@ -545,9 +549,13 @@ class SlipstreamLoader:
                     }
 
                     if self.image_field in self.pipelines:
-                        batch[self.image_field] = self._apply_pipeline(
+                        pipeline_result = self._apply_pipeline(
                             self.image_field, image_data
                         )
+                        if isinstance(pipeline_result, dict):
+                            batch.update(pipeline_result)
+                        else:
+                            batch[self.image_field] = pipeline_result
                     else:
                         # No pipeline - return raw data dict
                         batch[self.image_field] = image_data

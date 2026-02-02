@@ -143,7 +143,8 @@ int resize_crop(
     int64_t dest_p,
     int64_t target_h,
     int64_t target_w,
-    int64_t source_stride_w
+    int64_t source_stride_w,
+    int64_t dest_stride_w
 ) {
     uint8_t *source = (uint8_t *)source_p;
     uint8_t *dest = (uint8_t *)dest_p;
@@ -152,6 +153,9 @@ int resize_crop(
     // Source stride may differ from source_w when decoding into padded buffers
     int source_stride = (int)source_stride_w * 3;
     uint8_t *crop_start = source + crop_y * source_stride + crop_x * 3;
+
+    // Dest stride: 0 = packed (target_w * 3), otherwise dest_stride_w * 3
+    int dest_stride = (dest_stride_w == 0) ? 0 : (int)dest_stride_w * 3;
 
     // Use stb_image_resize2 for the resize
     // STBIR_RGB = 3 channels, no alpha
@@ -163,7 +167,7 @@ int resize_crop(
         dest,                          // output pixels
         (int)target_w,                 // output width
         (int)target_h,                 // output height
-        0,                             // output stride (0 = packed)
+        dest_stride,                   // output stride (0 = packed)
         STBIR_RGB                      // pixel layout
     );
 

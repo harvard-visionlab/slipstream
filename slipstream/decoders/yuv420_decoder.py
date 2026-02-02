@@ -180,7 +180,7 @@ def _create_yuv420_decode_with_crop_function() -> Any:
                 temp, h, w,
                 crop_y, crop_x, crop_h, crop_w,
                 dest, target_h, target_w,
-                w,
+                w, 0,
             )
 
         return destination[:batch_size]
@@ -227,13 +227,62 @@ def _create_yuv420_decode_multi_crop_function() -> Any:
                     temp, h, w,
                     crop_y, crop_x, crop_h, crop_w,
                     dest, target_h, target_w,
-                    w,
+                    w, 0,
                 )
 
         return destinations
 
     decode_multi_crop_batch.is_parallel = True
     return Compiler.compile(decode_multi_crop_batch)
+
+
+def _create_yuv420_decode_multi_crop_varied_function() -> Any:
+    """Create YUV420 decode-once + varied-size multi-crop function."""
+    yuv_c = Compiler.compile(yuv420_decode_numba)
+    resize_crop_c = Compiler.compile(resize_crop_numba)
+    my_range = Compiler.get_iterator()
+
+    def decode_multi_crop_varied_batch(
+        yuv_data: np.ndarray,
+        sizes: np.ndarray,
+        heights: np.ndarray,
+        widths: np.ndarray,
+        all_crop_params: np.ndarray,
+        temp_buffer: np.ndarray,
+        destinations: np.ndarray,
+        target_sizes: np.ndarray,
+        num_crops: int,
+    ) -> np.ndarray:
+        batch_size = len(sizes)
+        max_target = destinations.shape[2]
+        for i in my_range(batch_size):
+            size = int(sizes[i])
+            h = int(heights[i])
+            w = int(widths[i])
+
+            source = yuv_data[i, :size]
+            temp = temp_buffer[i, :h, :w, :]
+            yuv_c(source, temp, h, w, w)
+
+            for c in range(num_crops):
+                crop_x = int(all_crop_params[c, i, 0])
+                crop_y = int(all_crop_params[c, i, 1])
+                crop_w = int(all_crop_params[c, i, 2])
+                crop_h = int(all_crop_params[c, i, 3])
+                ts = int(target_sizes[c])
+
+                dest = destinations[c, i, :ts, :ts, :]
+                resize_crop_c(
+                    temp, h, w,
+                    crop_y, crop_x, crop_h, crop_w,
+                    dest, ts, ts,
+                    w, max_target,
+                )
+
+        return destinations
+
+    decode_multi_crop_varied_batch.is_parallel = True
+    return Compiler.compile(decode_multi_crop_varied_batch)
 
 
 def _create_yuv420_to_yuv_fullres_function() -> Any:
@@ -294,6 +343,7 @@ def _create_yuv420_extract_planes_function() -> Any:
 _yuv420_decode_compiled: Any = None
 _yuv420_decode_crop_compiled: Any = None
 _yuv420_decode_multi_crop_compiled: Any = None
+_yuv420_decode_multi_crop_varied_compiled: Any = None
 _yuv420_yuv_fullres_compiled: Any = None
 _yuv420_extract_planes_compiled: Any = None
 
@@ -320,6 +370,14 @@ def _get_yuv420_decode_multi_crop() -> Any:
         _setup_yuv420_ctypes()
         _yuv420_decode_multi_crop_compiled = _create_yuv420_decode_multi_crop_function()
     return _yuv420_decode_multi_crop_compiled
+
+
+def _get_yuv420_decode_multi_crop_varied() -> Any:
+    global _yuv420_decode_multi_crop_varied_compiled
+    if _yuv420_decode_multi_crop_varied_compiled is None:
+        _setup_yuv420_ctypes()
+        _yuv420_decode_multi_crop_varied_compiled = _create_yuv420_decode_multi_crop_varied_function()
+    return _yuv420_decode_multi_crop_varied_compiled
 
 
 def _get_yuv420_yuv_fullres() -> Any:
@@ -354,6 +412,7 @@ class YUV420NumbaBatchDecoder:
         self._decode_fn = _get_yuv420_decode()
         self._decode_crop_fn = _get_yuv420_decode_crop()
         self._decode_multi_crop_fn = _get_yuv420_decode_multi_crop()
+        self._decode_multi_crop_varied_fn = _get_yuv420_decode_multi_crop_varied()
         self._yuv_fullres_fn = _get_yuv420_yuv_fullres()
         self._extract_planes_fn = _get_yuv420_extract_planes()
         self._seed_counter = 0
@@ -363,6 +422,8 @@ class YUV420NumbaBatchDecoder:
         self._chw_buffer: np.ndarray | None = None
         self._multi_crop_buffer: np.ndarray | None = None
         self._multi_chw_buffer: np.ndarray | None = None
+        self._multi_crop_varied_buffer: np.ndarray | None = None
+        self._varied_chw_buffers: dict[tuple[int, int], np.ndarray] = {}
         self._yuv_fullres_buffer: np.ndarray | None = None
         self._y_plane_buffer: np.ndarray | None = None
         self._u_plane_buffer: np.ndarray | None = None
@@ -673,6 +734,69 @@ class YUV420NumbaBatchDecoder:
 
         return [self._multi_crop_buffer[c, :batch_size] for c in range(num_crops)]
 
+    def decode_batch_multi_crop_varied(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray,
+        heights: NDArray,
+        widths: NDArray,
+        crop_params_list: list[NDArray[np.int32]],
+        target_sizes: list[int],
+    ) -> list[NDArray[np.uint8]]:
+        """Decode once, apply N crops with potentially different target sizes."""
+        num_crops = len(crop_params_list)
+        batch_size = len(sizes)
+        max_h = int(np.max(heights))
+        max_w = int(np.max(widths))
+        max_target = max(target_sizes)
+
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+
+        all_crop_params = np.stack(crop_params_list, axis=0)
+        target_sizes_arr = np.array(target_sizes, dtype=np.int32)
+
+        temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
+
+        if (self._multi_crop_varied_buffer is None or
+            self._multi_crop_varied_buffer.shape[0] < num_crops or
+            self._multi_crop_varied_buffer.shape[1] < batch_size or
+            self._multi_crop_varied_buffer.shape[2] < max_target or
+            self._multi_crop_varied_buffer.shape[3] < max_target):
+            self._multi_crop_varied_buffer = np.zeros(
+                (num_crops, batch_size, max_target, max_target, 3), dtype=np.uint8)
+
+        self._decode_multi_crop_varied_fn(
+            data, sizes_u64, heights_u32, widths_u32,
+            all_crop_params, temp_buffer, self._multi_crop_varied_buffer,
+            target_sizes_arr, num_crops,
+        )
+
+        results = []
+        for c in range(num_crops):
+            ts = target_sizes[c]
+            results.append(self._multi_crop_varied_buffer[c, :batch_size, :ts, :ts, :])
+        return results
+
+    def multi_hwc_to_chw_varied(
+        self,
+        crops: list[NDArray[np.uint8]],
+    ) -> list[NDArray[np.uint8]]:
+        """Transpose N crop arrays of potentially different sizes to CHW."""
+        from slipstream.decoders.numba_decoder import _transpose_hwc_to_chw
+        results = []
+        for i, crop in enumerate(crops):
+            B, H, W = crop.shape[0], crop.shape[1], crop.shape[2]
+            key = (i, H, W)
+            buf = self._varied_chw_buffers.get(key)
+            if buf is None or buf.shape[0] < B:
+                buf = np.zeros((B, 3, H, W), dtype=np.uint8)
+                self._varied_chw_buffers[key] = buf
+            _transpose_hwc_to_chw(crop, buf[:B], B)
+            results.append(buf[:B])
+        return results
+
     def _ensure_chw_buffer(self, batch_size: int, target_h: int, target_w: int) -> np.ndarray:
         if (self._chw_buffer is None or
             self._chw_buffer.shape[0] < batch_size or
@@ -808,6 +932,8 @@ class YUV420NumbaBatchDecoder:
         self._chw_buffer = None
         self._multi_crop_buffer = None
         self._multi_chw_buffer = None
+        self._multi_crop_varied_buffer = None
+        self._varied_chw_buffers = {}
         self._yuv_fullres_buffer = None
         self._y_plane_buffer = None
         self._u_plane_buffer = None
