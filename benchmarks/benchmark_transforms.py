@@ -113,8 +113,7 @@ def build_transform_configs(device: str) -> dict:
         "RandomColorJitterYIQ": (
             RandomColorJitterYIQ(p=0.5, hue=20, saturation=0.3,
                                  value=0.3, brightness=0.3, contrast=0.3, device=device),
-            v2.ColorJitter(brightness=0.3, contrast=0.3,
-                           saturation=0.3, hue=20/360),
+            None,
             torch.float32, (0, 1),
         ),
         # Slipstream-only

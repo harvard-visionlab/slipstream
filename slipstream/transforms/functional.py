@@ -157,12 +157,18 @@ def random_grayscale(b: torch.Tensor, idx, num_output_channels=3):
 M_PI = math.pi
 
 Rgb2Yiq = torch.tensor(
-    [[0.299, 0.587, 0.114], [0.596, -0.274, -0.321], [0.211, -0.523, 0.311]]
-)
+    [[0.299, 0.587, 0.114], [0.596, -0.274, -0.321], [0.211, -0.523, 0.311]],
+    dtype=torch.float64,
+).float()
 
-Yiq2Rgb = torch.tensor(
-    [[1.0, 0.956, 0.621], [1.0, -0.272, -0.647], [1.0, -1.107, 1.705]]
-)
+# Exact inverse (DALI computes inverse(Rgb2Yiq); the old hardcoded approximation
+# had ~0.3% error per roundtrip which corrupts colors on repeated application).
+Yiq2Rgb = torch.inverse(
+    torch.tensor(
+        [[0.299, 0.587, 0.114], [0.596, -0.274, -0.321], [0.211, -0.523, 0.311]],
+        dtype=torch.float64,
+    )
+).float()
 
 
 def mat3(value):
@@ -210,21 +216,39 @@ def _get_hsv_mat(h, s, v):
 
 
 def _get_hsv_mat2(h, s, v, b, c):
-    h = _ensure_1d_tensor(h)
-    s = _ensure_1d_tensor(s)
-    v = _ensure_1d_tensor(v)
-    b = _ensure_1d_tensor(b)
-    c = _ensure_1d_tensor(c)
+    """Build fused color twist matrix: b * c * Yiq2Rgb * hue * sat * val * Rgb2Yiq.
+
+    Fuses hue*sat*val into a single YIQ-space matrix to reduce the number of
+    matmuls from 6 to 3. The brightness*contrast scalar is applied after.
+    """
+    h = _ensure_1d_tensor(h).float()
+    s = _ensure_1d_tensor(s).float()
+    v = _ensure_1d_tensor(v).float()
+    b = _ensure_1d_tensor(b).float()
+    c = _ensure_1d_tensor(c).float()
     device = h.device
-    return (
-        mat3(b.float())
-        @ mat3(c.float())
-        @ Yiq2Rgb.to(device)
-        @ hue_mat(h.float())
-        @ sat_mat(s.float())
-        @ val_mat(v.float())
-        @ Rgb2Yiq.to(device)
-    )
+    n = len(h)
+
+    # Fuse hue_rot * sat * val into one matrix in YIQ space:
+    # [v, 0, 0]   [1,    0,    0 ]   [v,         0,          0         ]
+    # [0, s, 0] * [0, cos_h, sin_h] = [0, s*cos_h,  s*sin_h            ]
+    # [0, 0, s]   [0,-sin_h, cos_h]   [0, -s*sin_h, s*cos_h            ]
+    h_rad = h * (M_PI / 180.0)
+    cos_h = h_rad.cos()
+    sin_h = h_rad.sin()
+
+    yiq_mat = torch.zeros(n, 3, 3, device=device)
+    yiq_mat[:, 0, 0] = v
+    yiq_mat[:, 1, 1] = s * cos_h
+    yiq_mat[:, 1, 2] = s * sin_h
+    yiq_mat[:, 2, 1] = -s * sin_h
+    yiq_mat[:, 2, 2] = s * cos_h
+
+    # Full transform: (b*c) * Yiq2Rgb @ yiq_mat @ Rgb2Yiq
+    bc = (b * c).view(n, 1, 1)
+    rgb2yiq = Rgb2Yiq.to(device)
+    yiq2rgb = Yiq2Rgb.to(device)
+    return bc * (yiq2rgb @ yiq_mat @ rgb2yiq)
 
 
 def _ensure_1d_tensor(x):
@@ -257,26 +281,37 @@ def hsv_jitter(x, h, s, v):
 
 
 def hsv_jitter2(x: torch.Tensor, h, s, v, b, c):
-    """HSV jitter with brightness and contrast via YIQ transform."""
+    """Color jitter via YIQ transform (matches DALI color_twist).
+
+    Applies hue rotation, saturation scaling, value scaling, contrast, and
+    brightness as a single 3x3 matrix multiply + offset per pixel.
+
+    output = M @ pixel + offset
+    M = brightness * contrast * Yiq2Rgb * hue_rot * sat * val * Rgb2Yiq
+    offset = (0.5 - 0.5 * contrast) * brightness  (for float [0,1] images)
+    """
     was_3d = x.ndim == 3
     if was_3d:
         x = x.unsqueeze(0)
 
     mat = _get_hsv_mat2(h, s, v, b, c)
-    mat = mat.to(x.device)
+    mat = mat.to(x.device, dtype=torch.float32)
 
-    assert x.dtype == torch.float32 or x.dtype == torch.float16, f"Expected float, got {x.dtype}"
-    mean = to_grayscale(x, num_output_channels=1).flatten(1).mean(-1)
-    offset = mean * (1 - c.to(x.device, dtype=x.dtype))
-    offset = offset.view(x.shape[0], *[1] * (x.ndim - 1))
+    # DALI contrast offset: adjust around midpoint (0.5), scaled by brightness.
+    c_dev = c.to(x.device, dtype=torch.float32)
+    b_dev = b.to(x.device, dtype=torch.float32)
+    offset = (0.5 - 0.5 * c_dev) * b_dev
+    offset = offset.view(-1, 1, 1, 1)
 
-    out = hsv_jitter_tensor(x.to(torch.float32), mat.to(torch.float32)) + offset.to(torch.float32)
+    out = hsv_jitter_tensor(x.to(torch.float32), mat) + offset
     out = torch.clamp(out, 0, 1.0).to(dtype=x.dtype)
     return out.squeeze(0) if was_3d else out
 
 
 def random_hsv_jitter2(x: torch.Tensor, idx, h, s, v, b, c):
     """Randomly apply HSV jitter to each image in a batch."""
+    if len(idx) == 0:
+        return x
     if len(x.shape) == 3:
         do = len(idx) == 1 and idx[0] == 0
         return hsv_jitter2(x, h, s, v, b, c) if do else x
