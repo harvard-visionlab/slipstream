@@ -539,11 +539,11 @@ def _generate_random_crop_params_batch(
     Returns:
         Array of shape [B, 4] with (x, y, crop_w, crop_h) for each image
     """
-    np.random.seed(seed)
     batch_size = len(widths)
     params = np.zeros((batch_size, 4), dtype=np.int32)
 
     for i in range(batch_size):
+        np.random.seed((seed + i) % 2147483647)
         w = widths[i]
         h = heights[i]
         area = w * h
@@ -558,8 +558,8 @@ def _generate_random_crop_params_batch(
             crop_h = int(np.sqrt(target_area / aspect_ratio) + 0.5)
 
             if 0 < crop_w <= w and 0 < crop_h <= h:
-                crop_x = np.random.randint(0, w - crop_w + 1)
-                crop_y = np.random.randint(0, h - crop_h + 1)
+                crop_x = int(np.random.random() * (w - crop_w + 1))
+                crop_y = int(np.random.random() * (h - crop_h + 1))
 
                 params[i, 0] = crop_x
                 params[i, 1] = crop_y
@@ -601,7 +601,6 @@ def _generate_direct_random_crop_params_batch(
     Returns:
         Array of shape [B, 4] with (x, y, crop_w, crop_h) for each image
     """
-    np.random.seed(seed)
     batch_size = len(widths)
     params = np.zeros((batch_size, 4), dtype=np.int32)
 
@@ -610,6 +609,7 @@ def _generate_direct_random_crop_params_batch(
     ratio_max = np.exp(log_ratio_max)
 
     for i in range(batch_size):
+        np.random.seed((seed + i) % 2147483647)
         w = widths[i]
         h = heights[i]
         area = float(w * h)
@@ -674,9 +674,9 @@ def _generate_direct_random_crop_params_batch(
         if crop_h < 1:
             crop_h = 1
 
-        # Sample position
-        crop_x = np.random.randint(0, w - crop_w + 1)
-        crop_y = np.random.randint(0, h - crop_h + 1)
+        # Sample position (use random() for fractional position — enables yoking)
+        crop_x = int(np.random.random() * (w - crop_w + 1))
+        crop_y = int(np.random.random() * (h - crop_h + 1))
 
         params[i, 0] = crop_x
         params[i, 1] = crop_y
@@ -1067,13 +1067,13 @@ class NumbaBatchDecoder:
         log_ratio_max = math.log(ratio[1])
 
         if seed is not None:
-            # Reproducible: use provided seed + auto-incrementing counter
+            # Reproducible: per-sample seed = (seed + batch_size * counter + i) % 2^31-1
             self._seed_counter += 1
-            batch_seed = seed + self._seed_counter
+            batch_seed = (seed + batch_size * self._seed_counter) % 2147483647
         else:
-            # Non-reproducible: use auto-incrementing counter (original behavior)
+            # Non-reproducible: use auto-incrementing counter
             self._seed_counter += 1
-            batch_seed = self._seed_counter
+            batch_seed = (batch_size * self._seed_counter) % 2147483647
 
         crop_params = _generate_random_crop_params_batch(
             widths_i32, heights_i32,
@@ -1145,10 +1145,10 @@ class NumbaBatchDecoder:
 
         if seed is not None:
             self._seed_counter += 1
-            batch_seed = seed + self._seed_counter
+            batch_seed = (seed + batch_size * self._seed_counter) % 2147483647
         else:
             self._seed_counter += 1
-            batch_seed = self._seed_counter
+            batch_seed = (batch_size * self._seed_counter) % 2147483647
 
         crop_params = _generate_direct_random_crop_params_batch(
             widths_i32, heights_i32,
@@ -1220,10 +1220,10 @@ class NumbaBatchDecoder:
         for c in range(num_crops):
             if seeds is not None and seeds[c] is not None:
                 self._seed_counter += 1
-                batch_seed = seeds[c] + self._seed_counter
+                batch_seed = (seeds[c] + batch_size * self._seed_counter) % 2147483647
             else:
                 self._seed_counter += 1
-                batch_seed = self._seed_counter
+                batch_seed = (batch_size * self._seed_counter) % 2147483647
 
             all_crop_params[c] = _generate_random_crop_params_batch(
                 widths_i32, heights_i32,

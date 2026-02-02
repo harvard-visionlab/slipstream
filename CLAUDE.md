@@ -320,7 +320,8 @@ slipstream/
     - Per-crop seeds for reproducibility
     - Single JPEG decode per image with `dest_stride_w` support in libslipstream for varied-size output buffers
 3. ✅ Notebook demonstrating multi-crop configurations (`notebooks/08_multi_crop_named.ipynb`)
-4. ⬜ Yoked crops (same seed → same center point, different scale → zoomed-in / zoomed-out pair)
+4. ✅ Per-sample seeding for crop param generation (FFCV-SSL compatible seed formula, per-sample RNG independence, `set_epoch()` resets decoder seed counters for checkpoint resume)
+5. ⬜ Yoked crops (same seed → same center point, different scale → zoomed-in / zoomed-out pair)
 
 ### Phase 6: Additional Dataset Sources
 

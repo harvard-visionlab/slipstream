@@ -324,8 +324,30 @@ class SlipstreamLoader:
         In distributed training, call this before each epoch to ensure
         different shuffle orderings across epochs while keeping all
         ranks synchronized.
+
+        Also resets seed counters on all decoders used by pipelines so that
+        augmentations are reproducible from any epoch (e.g., checkpoint resume).
         """
         self._epoch = epoch
+
+        # Reset seed counters on decoders to epoch * batches_per_epoch
+        # so augmentations resume deterministically from this epoch.
+        batches_per_epoch = len(self)
+        target_counter = epoch * batches_per_epoch
+
+        seen_decoders: set[int] = set()
+        for field_name, pipeline in self.pipelines.items():
+            transforms = []
+            if field_name in self._multi_pipeline_fields:
+                for sub_pipeline in pipeline:
+                    transforms.extend(sub_pipeline)
+            else:
+                transforms.extend(pipeline)
+            for transform in transforms:
+                decoder = getattr(transform, '_decoder', None)
+                if decoder is not None and id(decoder) not in seen_decoders:
+                    seen_decoders.add(id(decoder))
+                    decoder._seed_counter = target_counter
 
     def _setup_prefetch_banks(self) -> None:
         """Set up pre-allocated memory banks for async prefetching."""

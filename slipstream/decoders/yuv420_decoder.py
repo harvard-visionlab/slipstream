@@ -514,7 +514,10 @@ class YUV420NumbaBatchDecoder:
         log_ratio_max = math.log(ratio[1])
 
         self._seed_counter += 1
-        batch_seed = (seed + self._seed_counter) if seed is not None else self._seed_counter
+        if seed is not None:
+            batch_seed = (seed + batch_size * self._seed_counter) % 2147483647
+        else:
+            batch_seed = (batch_size * self._seed_counter) % 2147483647
 
         crop_params = _generate_random_crop_params_batch(
             widths_i32, heights_i32,
@@ -561,7 +564,10 @@ class YUV420NumbaBatchDecoder:
         log_ratio_max = math.log(ratio[1])
 
         self._seed_counter += 1
-        batch_seed = (seed + self._seed_counter) if seed is not None else self._seed_counter
+        if seed is not None:
+            batch_seed = (seed + batch_size * self._seed_counter) % 2147483647
+        else:
+            batch_seed = (batch_size * self._seed_counter) % 2147483647
 
         crop_params = _generate_direct_random_crop_params_batch(
             widths_i32, heights_i32,
@@ -704,10 +710,10 @@ class YUV420NumbaBatchDecoder:
         for c in range(num_crops):
             if seeds is not None and seeds[c] is not None:
                 self._seed_counter += 1
-                batch_seed = seeds[c] + self._seed_counter
+                batch_seed = (seeds[c] + batch_size * self._seed_counter) % 2147483647
             else:
                 self._seed_counter += 1
-                batch_seed = self._seed_counter
+                batch_seed = (batch_size * self._seed_counter) % 2147483647
 
             all_crop_params[c] = _generate_random_crop_params_batch(
                 widths_i32, heights_i32,

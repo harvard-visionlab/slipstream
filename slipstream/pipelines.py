@@ -329,10 +329,22 @@ class MultiRandomResizedCrop(BatchTransform):
             Required key: ``size`` (int).
             Optional keys: ``scale`` (tuple), ``ratio`` (tuple), ``seed`` (int).
         ratio: Default aspect ratio range (used if not specified per crop).
+        crop_mode: ``"standard"`` (torchvision-compatible, 10-attempt rejection
+            sampling) or ``"direct"`` (analytic, no rejection loop).
         num_threads: Parallel decode threads. 0 = auto.
 
     Returns:
         Dict[str, torch.Tensor] — named crops, each [B, 3, size, size] uint8.
+
+    Yoked crops:
+        Crops with the **same seed** share the same random number sequence,
+        producing crops centered on the same point. Combined with different
+        scale ranges, this gives a zoomed-in / zoomed-out pair::
+
+            MultiRandomResizedCrop({
+                "zoom_out": dict(size=224, scale=(0.4, 1.0), seed=42),
+                "zoom_in":  dict(size=224, scale=(0.05, 0.4), seed=42),
+            })
 
     Example:
         multi = MultiRandomResizedCrop({
@@ -348,9 +360,13 @@ class MultiRandomResizedCrop(BatchTransform):
         self,
         crops: dict[str, dict],
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
+        crop_mode: str = "standard",
         num_threads: int = 0,
     ) -> None:
+        if crop_mode not in ("standard", "direct"):
+            raise ValueError(f"crop_mode must be 'standard' or 'direct', got '{crop_mode}'")
         self.ratio = ratio
+        self.crop_mode = crop_mode
         self.num_threads = num_threads
         self._decoder = NumbaBatchDecoder(num_threads=num_threads)
 
@@ -378,7 +394,16 @@ class MultiRandomResizedCrop(BatchTransform):
 
     def __call__(self, batch_data: dict[str, Any]) -> dict[str, torch.Tensor]:
         import math
-        from slipstream.decoders.numba_decoder import _generate_random_crop_params_batch
+        from slipstream.decoders.numba_decoder import (
+            _generate_random_crop_params_batch,
+            _generate_direct_random_crop_params_batch,
+        )
+
+        _generate_fn = (
+            _generate_direct_random_crop_params_batch
+            if self.crop_mode == "direct"
+            else _generate_random_crop_params_batch
+        )
 
         data = batch_data['data']
         sizes = batch_data['sizes']
@@ -390,6 +415,13 @@ class MultiRandomResizedCrop(BatchTransform):
 
         num_crops = len(self._crop_names)
 
+        # Increment seed counter once per batch call (not per crop).
+        # Crops with the same user seed get the same batch_seed, enabling
+        # "yoked" crops: same center point, different scale → zoom pair.
+        self._decoder._seed_counter += 1
+        batch_offset = self._decoder._seed_counter
+        batch_size = len(batch_data['sizes'])
+
         # Generate crop params for each crop
         crop_params_list = []
         for c in range(num_crops):
@@ -400,10 +432,13 @@ class MultiRandomResizedCrop(BatchTransform):
             log_ratio_min = math.log(ratio[0])
             log_ratio_max = math.log(ratio[1])
 
-            self._decoder._seed_counter += 1
-            batch_seed = (seed + self._decoder._seed_counter) if seed is not None else self._decoder._seed_counter
+            if seed is not None:
+                batch_seed = (seed + batch_size * batch_offset) % 2147483647
+            else:
+                # No seed — use offset + crop index for independence
+                batch_seed = (batch_size * (batch_offset * num_crops + c)) % 2147483647
 
-            params = _generate_random_crop_params_batch(
+            params = _generate_fn(
                 widths_i32, heights_i32,
                 scale[0], scale[1],
                 log_ratio_min, log_ratio_max,
@@ -442,7 +477,8 @@ class MultiRandomResizedCrop(BatchTransform):
                 f"'{name}': size={self._crop_sizes[c]}, "
                 f"scale={self._crop_scales[c]}"
             )
-        return f"MultiRandomResizedCrop({{{', '.join(crop_strs)}}})"
+        mode = f", crop_mode='{self.crop_mode}'" if self.crop_mode != "standard" else ""
+        return f"MultiRandomResizedCrop({{{', '.join(crop_strs)}}}{mode})"
 
 
 class MultiCropPipeline(BatchTransform):
