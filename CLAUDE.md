@@ -323,6 +323,63 @@ H100 node: AMD EPYC 9454 48-Core @ 2.75GHz, 24 allocated cores (1 GPU), 250 GB R
 
 **Note:** GPU decode is slower than optimized CPU decode for this dataset size. CPU path is preferred.
 
+### Batch Augmentation Transforms (measured 2026-02-01)
+
+Ported from lrm-ssl fastaugs, optimized for slipstream v1. 17 GPU-accelerated batch transforms with per-image randomization and parameter replay for SSL.
+
+#### CPU — M4 Pro laptop (batch_size=256, num_samples=10000)
+
+| Transform              | Per-Sample (SS) | Per-Sample (TV) | SS vs TV | Per-Batch (SS) | Batch Speedup |
+| ---------------------- | --------------- | --------------- | -------- | -------------- | ------------- |
+| Normalize              | 11,981          | 11,838          | 1.01x    | 94,002         | 7.85x         |
+| ToGrayscale            | 7,911           | 7,858           | 1.01x    | 80,787         | 10.21x        |
+| RandomGrayscale        | 14,582          | 13,975          | 1.04x    | 34,474         | 2.36x         |
+| RandomHorizontalFlip   | 36,964          | 38,109          | 0.97x    | 35,618         | 0.96x         |
+| RandomRotate           | 1,951           | 1,344           | **1.45x** | 3,961         | 2.03x         |
+| RandomZoom             | 2,010           | 1,382           | **1.45x** | 4,002         | 1.99x         |
+| RandomBrightness       | 10,428          | 10,094          | 1.03x    | 40,177         | 3.85x         |
+| RandomContrast         | 3,211           | 3,216           | 1.00x    | 16,113         | 5.02x         |
+| RandomGaussianBlur     | 2,638           | 1,608           | **1.64x** | 3,698         | 1.40x         |
+| RandomSolarization     | 10,878          | 10,832          | 1.00x    | 15,201         | 1.40x         |
+| RandomColorJitter(HSV) | 297             | 252             | 1.18x    | 1,339          | 4.50x         |
+| RandomColorJitterYIQ   | 5,623           | N/A             | N/A      | 10,092         | 1.79x         |
+| RandomPatchShuffle     | 3,750           | N/A             | N/A      | 9,597          | 2.56x         |
+| CircularMask           | 20,218          | N/A             | N/A      | 47,432         | 2.35x         |
+| FixedOpticalDistortion | 3,436           | N/A             | N/A      | 16,388         | 4.77x         |
+| RandomRotateObject     | 1,658           | N/A             | N/A      | 3,919          | 2.36x         |
+| SRGBToLMS              | 1,768           | N/A             | N/A      | 2,400          | 1.36x         |
+
+#### GPU — Machina (RTX A6000, batch_size=256, num_samples=10000)
+
+| Transform              | Per-Sample (SS) | Per-Sample (TV) | SS vs TV | Per-Batch (SS) | Batch Speedup |
+| ---------------------- | --------------- | --------------- | -------- | -------------- | ------------- |
+| Normalize              | 39,375          | 13,404          | **2.94x** | 298,047       | 7.57x         |
+| ToGrayscale            | 27,178          | 20,911          | **1.30x** | 442,677       | 16.29x        |
+| RandomGrayscale        | 10,830          | 22,047          | 0.49x    | 253,319        | **23.39x**    |
+| RandomHorizontalFlip   | 15,044          | 38,536          | 0.39x    | 339,994        | **22.60x**    |
+| RandomRotate           | 1,942           | 3,230           | 0.60x    | 55,689         | **28.68x**    |
+| RandomZoom             | 2,367           | 3,103           | 0.76x    | 58,529         | **24.73x**    |
+| RandomBrightness       | 7,527           | 10,365          | 0.73x    | 275,207        | **36.56x**    |
+| RandomContrast         | 4,771           | 6,398           | 0.75x    | 126,615        | **26.54x**    |
+| RandomGaussianBlur     | 7,297           | 5,524           | **1.32x** | 126,081       | **17.28x**    |
+| RandomSolarization     | 10,589          | 25,182          | 0.42x    | 159,949        | **15.11x**    |
+| RandomColorJitter(HSV) | 1,233           | 1,303           | 0.95x    | 17,516         | **14.21x**    |
+| RandomColorJitterYIQ   | 3,168           | N/A             | N/A      | 132,340        | **41.77x**    |
+| RandomPatchShuffle     | 4,297           | N/A             | N/A      | 102,271        | **23.80x**    |
+| CircularMask           | 43,850          | N/A             | N/A      | 594,394        | 13.56x        |
+| FixedOpticalDistortion | 34,057          | N/A             | N/A      | 666,311        | 19.56x        |
+| RandomRotateObject     | 969             | N/A             | N/A      | 52,067         | **53.72x**    |
+| SRGBToLMS              | 5,650           | N/A             | N/A      | 53,773         | 9.52x         |
+
+**Analysis:**
+
+- ✅ **GPU batch speedups range from 7.6x to 53.7x** — validates the batch augmentation design
+- ✅ **CPU per-sample matches or exceeds torchvision** for all transforms (0.97x–1.64x)
+- ✅ **GPU per-sample trails torchvision** for some transforms (0.39x–0.76x) due to per-image randomization overhead that doesn't amortize for single images — this is expected and irrelevant since batch mode is the production path
+- ✅ **RandomColorJitterYIQ at 132k batch on GPU** — single 3x3 matmul approach is 7.5x faster than HSV's 4-step sequential path (17.5k)
+- ✅ **YIQ bugs fixed**: exact Yiq2Rgb inverse (was 0.3% roundtrip error), DALI-compatible contrast offset
+- ✅ Key optimizations: cached affine grids + bmm (no F.affine_grid), eliminated index_select/index_copy for point-wise transforms, fused SRGBToLMS matrix, direct tensor indexing for PatchShuffle (no grid_sample)
+
 ---
 
 ## Performance Optimization History
@@ -390,7 +447,7 @@ slipstream/
 │   │   ├── gpu.py              # ✅ GPUDecoder (nvImageCodec)
 │   │   ├── numba_decoder.py    # ✅ NumbaBatchDecoder (prange + libslipstream)
 │   │   └── yuv420_decoder.py   # ✅ YUV420NumbaBatchDecoder (2x JPEG throughput)
-│   └── transforms/             # ⬜ fastaugs port (TODO: cleanup)
+│   └── transforms/             # ✅ fastaugs port (optimized v1)
 │       ├── __init__.py
 │       ├── functional.py
 │       └── transforms.py
@@ -489,11 +546,12 @@ slipstream/
 4. ✅ FFCV reader loader benchmark (benchmark_ffcv_loader.py)
 5. ✅ FFCV baseline comparison (all targets met or exceeded — see Benchmark Results above)
 
-#### Phase 5a: Port fastaugs
+#### Phase 5a: Port fastaugs ✅ COMPLETE
 
-1. ⬜ Port fastaugs GPU batch augmentations (direct port from lrm-ssl)
-2. ⬜ TODO markers for cleanup/standardization
-3. ⬜ Implement DirectRandomResizedCrop (analytic, no rejection sampling)
+1. ✅ Port fastaugs GPU batch augmentations (direct port from lrm-ssl)
+2. ✅ Optimized for speed: cached affine grids, fused matrix ops, eliminated index_select/copy overhead
+3. ✅ Bug fixes: YIQ Yiq2Rgb matrix (exact inverse), contrast offset (DALI-compatible), device handling
+4. ⬜ Implement DirectRandomResizedCrop (analytic, no rejection sampling)
 
 #### Phase 5b: Standard Pipelines & Demos
 
