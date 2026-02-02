@@ -108,8 +108,31 @@ class RandomSolarization(BatchAugment):
         return F.random_solarization(b, self.last_params()["idx"], self.threshold)
 
     def __call__(self, b, **kwargs):
-        self.before_call(b, **kwargs)
-        return F.random_solarization(b, self.idx, self.threshold)
+        self._init_rng(b.device)
+        n = b.shape[0] if b.ndim == 4 else 1
+
+        if self.p < 1.0:
+            do = torch.empty(n, device=b.device, dtype=b.dtype).bernoulli_(self.p, generator=self.rng)
+        else:
+            do = torch.ones(n, device=b.device, dtype=b.dtype)
+
+        # Store params for replay
+        self.do = do
+        self.idx = torch.where(do)[0]
+
+        # Fast path: single image — branch to skip all compute when not selected
+        if n == 1:
+            if do[0] > 0.5:
+                above = b >= self.threshold
+                inv = (255 - b) if b.dtype == torch.uint8 else (1.0 - b)
+                return torch.where(above, inv, b)
+            return b
+
+        # Batch: fused solarization + mask in a single torch.where
+        do_mask = do.bool().view(n, 1, 1, 1)
+        above = b >= self.threshold
+        inv = (255 - b) if b.dtype == torch.uint8 else (1.0 - b)
+        return torch.where(do_mask & above, inv, b)
 
     def __repr__(self):
         return f"{self.__class__.__name__}(p={self.p}, threshold={self.threshold}, seed={self.seed})"
@@ -188,22 +211,69 @@ class RandomPatchShuffle(BatchAugment):
 
         return grid
 
+    def _shuffle_patches_direct(self, images, n_images, rand_patch_sizes):
+        """Shuffle patches via direct indexing — no grid_sample needed."""
+        H, W = images.shape[-2:]
+        assert H == W, f"RandomPatchShuffle requires square inputs, got H={H}, W={W}"
+        img_size = H
+
+        out = images.clone() if images.ndim == 4 else images.unsqueeze(0).clone()
+
+        for patch_size_pct in rand_patch_sizes.unique().tolist():
+            patch_size = int(patch_size_pct * img_size)
+            loc = torch.where(rand_patch_sizes == patch_size_pct)[0]
+            if len(loc) == 0:
+                continue
+
+            n_grid = img_size // patch_size
+            n_patches = n_grid * n_grid
+            perm = F.generate_batch_permutations(len(loc), n_patches, rng=self.rng)
+
+            # Unfold into patches: [B, C, n_grid, patch, n_grid, patch]
+            sub = out[loc]
+            sub = sub.reshape(len(loc), -1, n_grid, patch_size, n_grid, patch_size)
+            # -> [B, C, n_grid, n_grid, patch, patch] -> [B, C, n_patches, patch, patch]
+            sub = sub.permute(0, 1, 2, 4, 3, 5).reshape(len(loc), -1, n_patches, patch_size, patch_size)
+
+            # Shuffle patches per image using permutation indices
+            idx_exp = perm.unsqueeze(1).unsqueeze(-1).unsqueeze(-1).expand_as(sub)
+            sub = torch.gather(sub, 2, idx_exp)
+
+            # Fold back: [B, C, n_patches, patch, patch] -> [B, C, n_grid, n_grid, patch, patch]
+            sub = sub.reshape(len(loc), -1, n_grid, n_grid, patch_size, patch_size)
+            # -> [B, C, n_grid, patch, n_grid, patch] -> [B, C, H, W]
+            sub = sub.permute(0, 1, 2, 4, 3, 5).reshape(len(loc), -1, H, W)
+            out[loc] = sub
+
+        return out.squeeze(0) if images.ndim == 3 else out
+
     def before_call(self, b, **kwargs):
         self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng)
         n = len(self.idx)
         rand_patch_idxs = torch.randint(0, len(self.sizes), (n,), generator=self.rng)
         self.rand_patch_sizes = torch.tensor([self.sizes[idx] for idx in rand_patch_idxs])
-        self.rand_grids = self._get_shuffled_grids(b, self.rand_patch_sizes)
 
     def last_params(self):
         return {
             "do": self.do, "idx": self.idx,
-            "rand_patch_sizes": self.rand_patch_sizes, "rand_grids": self.rand_grids,
+            "rand_patch_sizes": self.rand_patch_sizes,
         }
 
     def apply_last(self, b):
         params = self.last_params()
-        return F.random_grid_sample(b, idx=params["idx"], grid=params["rand_grids"], align_corners=True)
+        if len(params["idx"]) == 0:
+            return b
+        if b.ndim == 4:
+            sub = self._shuffle_patches_direct(
+                b[params["idx"]], len(params["idx"]), params["rand_patch_sizes"])
+            b = b.clone()
+            b[params["idx"]] = sub
+            return b
+        elif b.ndim == 3:
+            if len(params["idx"]) == 1 and params["idx"][0] == 0:
+                return self._shuffle_patches_direct(b, 1, params["rand_patch_sizes"])
+            return b
+        return b
 
     def __call__(self, b, **kwargs):
         self.before_call(b, **kwargs)

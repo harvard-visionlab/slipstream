@@ -8,7 +8,6 @@ import warnings
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-from torchvision import transforms as tv_transforms
 
 from ._compat import mask_batch, mask_tensor  # noqa: F401
 
@@ -692,23 +691,28 @@ def random_gaussian_blur2d(x, blur_indices, selected_kernels, kernels, padding_m
     selected_kernels = selected_kernels.to(x.device)
     kernels = kernels.to(x.device).to(x.dtype)
 
-    kernel_stack = torch.index_select(kernels, 0, selected_kernels).unsqueeze(1)
-    kernel_stack = kernel_stack.repeat(1, c, 1, 1)
+    kh, kw = kernels.shape[-2:]
+    pad_top, pad_bottom = kh // 2, (kh - 1) // 2
+    pad_left, pad_right = kw // 2, (kw - 1) // 2
 
-    kh, kw = kernel_stack.shape[-2:]
-    padH, padW = kh // 2, kw // 2
-    x_blur = x[blur_indices].contiguous().view(1, -1, h, w)
-    x_blur = tv_transforms.functional.pad(x_blur, padding=(padH, padW), padding_mode=padding_mode)
-    x_blur = F.conv2d(
-        x_blur,
-        kernel_stack.view(-1, 1, kh, kw),
-        groups=blur_indices.shape[0] * c,
-        padding=0,
-    )
-    x_blur = tv_transforms.functional.center_crop(x_blur, (h, w))
-    x_blur = x_blur.view(-1, c, h, w)
+    n_blur = blur_indices.shape[0]
 
-    x[blur_indices] = x_blur
+    if n_blur == 1:
+        # Single image: efficient depthwise conv, no reshape gymnastics
+        kernel = kernels[selected_kernels[0]].unsqueeze(0).unsqueeze(0).expand(c, 1, kh, kw)
+        sub = F.pad(x[blur_indices], (pad_left, pad_right, pad_top, pad_bottom), mode=padding_mode)
+        x[blur_indices] = F.conv2d(sub, kernel, groups=c, padding=0)
+    else:
+        # Batch: build per-image depthwise kernels, single grouped conv.
+        # Each image's kernel is repeated C times for depthwise conv with groups=n_blur*C.
+        # kernel_stack: [n_blur, kH, kW] -> [n_blur*C, 1, kH, kW]
+        kernel_stack = kernels[selected_kernels]  # [n_blur, kH, kW]
+        kernel_stack = kernel_stack.unsqueeze(1).expand(n_blur, c, kh, kw).reshape(n_blur * c, 1, kh, kw)
+        x_blur = F.pad(x[blur_indices], (pad_left, pad_right, pad_top, pad_bottom), mode=padding_mode)
+        x_blur = x_blur.reshape(1, n_blur * c, h + pad_top + pad_bottom, w + pad_left + pad_right)
+        x_blur = F.conv2d(x_blur, kernel_stack, groups=n_blur * c, padding=0)
+        x[blur_indices] = x_blur.view(n_blur, c, h, w)
+
     return x.squeeze(0) if was_3d else x
 
 
@@ -735,11 +739,10 @@ def srgb_to_lrgb(image: torch.Tensor, inplace=True) -> torch.Tensor:
     if len(image.shape) < 3 or image.shape[-3] != 3:
         raise ValueError(f"Input must have shape (*, 3, H, W). Got {image.shape}")
 
-    out = image if inplace else image.clone()
-    mask = image > 0.04045
-    out[~mask] = image[~mask] / 12.92
-    out[mask] = ((image[mask] + 0.055) / 1.055).pow(2.4)
-    return out
+    # torch.where avoids boolean indexing overhead (no masked assignment)
+    low = image / 12.92
+    high = ((image + 0.055) / 1.055).pow(2.4)
+    return torch.where(image > 0.04045, high, low)
 
 
 def lrgb_to_xyz(image: torch.Tensor) -> torch.Tensor:
@@ -764,11 +767,31 @@ def xyz_to_lms(image: torch.Tensor) -> torch.Tensor:
     return torch.stack([l, m, s], -3)
 
 
+# Pre-computed sRGB→LMS matrix: CAT02_LMS @ sRGB_to_XYZ
+# Fuses lrgb_to_xyz and xyz_to_lms into a single 3x3 matmul.
+_SRGB_TO_LMS_MAT = torch.tensor([
+    [0.412453, 0.357580, 0.180423],
+    [0.212671, 0.715160, 0.072169],
+    [0.019334, 0.119193, 0.950227],
+], dtype=torch.float32)
+_CAT02_MAT = torch.tensor([
+    [ 0.7328,  0.4296, -0.1624],
+    [-0.7036,  1.6975,  0.0061],
+    [ 0.0030,  0.0136,  0.9834],
+], dtype=torch.float32)
+_SRGB_TO_LMS_FUSED = (_CAT02_MAT @ _SRGB_TO_LMS_MAT)
+
+
 def srgb_to_lms(image: torch.Tensor) -> torch.Tensor:
-    """Convert sRGB to CAT02 LMS via linear RGB and XYZ."""
+    """Convert sRGB to CAT02 LMS via linear RGB.
+
+    Uses a pre-computed fused 3x3 matrix (sRGB→XYZ→LMS) and einsum
+    to avoid intermediate tensors and unbind/stack overhead.
+    """
     linrgb = srgb_to_lrgb(image)
-    xyz = lrgb_to_xyz(linrgb)
-    return xyz_to_lms(xyz)
+    # einsum: ...cHW, oc -> ...oHW (3x3 color matrix applied per-pixel)
+    mat = _SRGB_TO_LMS_FUSED.to(device=linrgb.device, dtype=linrgb.dtype)
+    return torch.einsum('...chw, oc -> ...ohw', linrgb, mat)
 
 
 # =================================================

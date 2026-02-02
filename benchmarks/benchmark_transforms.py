@@ -73,48 +73,53 @@ def build_transform_configs(device: str) -> dict:
             torch.float32, (0, 1),
         ),
         "RandomRotate": (
-            RandomRotate(p=1.0, max_deg=45, device=device),
+            RandomRotate(p=0.5, max_deg=45, device=device),
             v2.RandomRotation(degrees=45),
             torch.float32, (0, 1),
         ),
         "RandomZoom": (
-            RandomZoom(p=1.0, zoom=(0.5, 1.0), device=device),
+            RandomZoom(p=0.5, zoom=(0.5, 1.0), device=device),
             v2.RandomAffine(degrees=0, scale=(0.5, 1.0)),
             torch.float32, (0, 1),
         ),
         "RandomBrightness": (
-            RandomBrightness(p=1.0, scale_range=(0.6, 1.4), device=device),
+            RandomBrightness(p=0.5, scale_range=(0.6, 1.4), device=device),
             v2.ColorJitter(brightness=(0.6, 1.4)),
             torch.float32, (0, 1),
         ),
         "RandomContrast": (
-            RandomContrast(p=1.0, scale_range=(0.6, 1.4), device=device),
+            RandomContrast(p=0.5, scale_range=(0.6, 1.4), device=device),
             v2.ColorJitter(contrast=(0.6, 1.4)),
             torch.float32, (0, 1),
         ),
         "RandomGaussianBlur": (
-            RandomGaussianBlur(p=1.0, kernel_size=7, sigma_range=(0.1, 2.0), device=device),
+            RandomGaussianBlur(p=0.5, kernel_size=7,
+                               sigma_range=(0.1, 2.0), device=device),
             v2.GaussianBlur(kernel_size=7, sigma=(0.1, 2.0)),
             torch.float32, (0, 1),
         ),
         "RandomSolarization": (
-            RandomSolarization(p=1.0, threshold=0.5, device=device),
-            v2.RandomSolarize(threshold=0.5, p=1.0),
+            RandomSolarization(p=0.5, threshold=0.5, device=device),
+            v2.RandomSolarize(threshold=0.5, p=0.5),
             torch.float32, (0, 1),
         ),
         "RandomColorJitter(HSV)": (
-            RandomColorJitter(p=1.0, hue=0.1, saturation=0.3, value=0.3, contrast=0.3, device=device),
-            v2.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+            RandomColorJitter(p=0.5, hue=0.1, saturation=0.3,
+                              value=0.3, contrast=0.3, device=device),
+            v2.ColorJitter(brightness=0.3, contrast=0.3,
+                           saturation=0.3, hue=0.1),
             torch.float32, (0, 1),
         ),
         "RandomColorJitterYIQ": (
-            RandomColorJitterYIQ(p=1.0, hue=20, saturation=0.3, value=0.3, brightness=0.3, contrast=0.3, device=device),
-            v2.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=20/360),
+            RandomColorJitterYIQ(p=0.5, hue=20, saturation=0.3,
+                                 value=0.3, brightness=0.3, contrast=0.3, device=device),
+            v2.ColorJitter(brightness=0.3, contrast=0.3,
+                           saturation=0.3, hue=20/360),
             torch.float32, (0, 1),
         ),
         # Slipstream-only
         "RandomPatchShuffle": (
-            RandomPatchShuffle(sizes=0.25, p=1.0, img_size=224, device=device),
+            RandomPatchShuffle(sizes=0.25, p=0.5, img_size=224, device=device),
             None,
             torch.float32, (0, 1),
         ),
@@ -124,12 +129,14 @@ def build_transform_configs(device: str) -> dict:
             torch.float32, (0, 1),
         ),
         "FixedOpticalDistortion": (
-            FixedOpticalDistortion(output_size=(224, 224), distortion=-0.5, device=device),
+            FixedOpticalDistortion(output_size=(
+                224, 224), distortion=-0.5, device=device),
             None,
             torch.float32, (0, 1),
         ),
         "RandomRotateObject": (
-            RandomRotateObject(p=1.0, max_deg=30, scale=(1.0, 1.5), device=device),
+            RandomRotateObject(p=0.5, max_deg=30,
+                               scale=(1.0, 1.5), device=device),
             None,
             torch.float32, (0, 1),
         ),
@@ -223,13 +230,20 @@ def benchmark_per_batch_ss(transform, data: torch.Tensor, num_samples: int, devi
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark slipstream transforms vs torchvision v2")
-    parser.add_argument("--transform", type=str, default=None, help="Run only this transform")
-    parser.add_argument("--batch-size", type=int, default=64, help="Batch size (default: 64)")
-    parser.add_argument("--num-samples", type=int, default=5000, help="Number of samples per benchmark")
-    parser.add_argument("--device", type=str, default="cpu", help="Device (cpu or cuda)")
-    parser.add_argument("--list", action="store_true", help="List available transforms")
-    parser.add_argument("--skip-torchvision", action="store_true", help="Skip torchvision benchmarks")
+    parser = argparse.ArgumentParser(
+        description="Benchmark slipstream transforms vs torchvision v2")
+    parser.add_argument("--transform", type=str, default=None,
+                        help="Run only this transform")
+    parser.add_argument("--batch-size", type=int, default=256,
+                        help="Batch size (default: 64)")
+    parser.add_argument("--num-samples", type=int, default=10000,
+                        help="Number of samples per benchmark")
+    parser.add_argument("--device", type=str, default="cpu",
+                        help="Device (cpu or cuda)")
+    parser.add_argument("--list", action="store_true",
+                        help="List available transforms")
+    parser.add_argument("--skip-torchvision", action="store_true",
+                        help="Skip torchvision benchmarks")
     args = parser.parse_args()
 
     configs = build_transform_configs(args.device)
@@ -252,7 +266,8 @@ def main():
     # Machine info
     info = get_machine_info()
     print(info)
-    print(f"\nBenchmark config: batch_size={args.batch_size}, num_samples={args.num_samples}, device={args.device}")
+    print(
+        f"\nBenchmark config: batch_size={args.batch_size}, num_samples={args.num_samples}, device={args.device}")
     print()
 
     # Results
@@ -264,7 +279,8 @@ def main():
 
         # Per-batch slipstream
         try:
-            batch_ss = benchmark_per_batch_ss(ss_transform, data, args.num_samples, args.device)
+            batch_ss = benchmark_per_batch_ss(
+                ss_transform, data, args.num_samples, args.device)
         except Exception as e:
             print(f"  Per-batch SS error: {e}")
             batch_ss = 0.0
@@ -272,7 +288,8 @@ def main():
 
         # Per-sample slipstream
         try:
-            sample_ss = benchmark_per_sample_ss(ss_transform, data, args.num_samples, args.device)
+            sample_ss = benchmark_per_sample_ss(
+                ss_transform, data, args.num_samples, args.device)
         except Exception as e:
             print(f"  Per-sample SS error: {e}")
             sample_ss = 0.0
@@ -282,7 +299,8 @@ def main():
         sample_tv = 0.0
         if tv_transform is not None and not args.skip_torchvision:
             try:
-                sample_tv = benchmark_per_sample_tv(tv_transform, data, args.num_samples, args.device)
+                sample_tv = benchmark_per_sample_tv(
+                    tv_transform, data, args.num_samples, args.device)
             except Exception as e:
                 print(f"  Per-sample TV error: {e}")
                 sample_tv = 0.0

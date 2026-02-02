@@ -132,6 +132,11 @@ class RandomColorJitter(BatchAugment):
 
     def __call__(self, b, **kwargs):
         self.before_call(b, **kwargs)
+
+        # Single image fast path: skip if not selected
+        if (b.ndim == 3 or b.shape[0] == 1) and len(self.idx) == 0:
+            return b
+
         return FT.random_color_jitter(b, self.idx, self.h, self.s, self.v, self.c)
 
     def __repr__(self):
