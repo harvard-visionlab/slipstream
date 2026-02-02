@@ -548,6 +548,12 @@ def _generate_random_crop_params_batch(
         h = heights[i]
         area = w * h
 
+        # Sample fractional center position FIRST (fixed RNG position for yoking).
+        # These are in [0, 1] and will be mapped to valid pixel ranges after
+        # crop dimensions are determined.
+        cx_frac = np.random.random()
+        cy_frac = np.random.random()
+
         # Try up to 10 times to find valid crop
         found = False
         for _ in range(10):
@@ -558,8 +564,35 @@ def _generate_random_crop_params_batch(
             crop_h = int(np.sqrt(target_area / aspect_ratio) + 0.5)
 
             if 0 < crop_w <= w and 0 < crop_h <= h:
-                crop_x = int(np.random.random() * (w - crop_w + 1))
-                crop_y = int(np.random.random() * (h - crop_h + 1))
+                # Map fraction to absolute image position, then clamp to valid range.
+                # cx_frac in [0,1] maps to pixel position cx_frac * w in the image.
+                # Clamp so the crop fits: center in [crop_w/2, w - crop_w/2].
+                # This ensures yoked crops (same seed, different scale) target the
+                # same image location — centers only diverge at edges where the
+                # larger crop physically can't reach.
+                half_w = crop_w * 0.5
+                half_h = crop_h * 0.5
+                cx = cx_frac * w
+                cy = cy_frac * h
+                if cx < half_w:
+                    cx = half_w
+                if cx > w - half_w:
+                    cx = w - half_w
+                if cy < half_h:
+                    cy = half_h
+                if cy > h - half_h:
+                    cy = h - half_h
+                crop_x = int(cx - half_w + 0.5)
+                crop_y = int(cy - half_h + 0.5)
+                # Safety clamp for rounding edge cases
+                if crop_x < 0:
+                    crop_x = 0
+                if crop_y < 0:
+                    crop_y = 0
+                if crop_x + crop_w > w:
+                    crop_x = w - crop_w
+                if crop_y + crop_h > h:
+                    crop_y = h - crop_h
 
                 params[i, 0] = crop_x
                 params[i, 1] = crop_y
@@ -613,6 +646,10 @@ def _generate_direct_random_crop_params_batch(
         w = widths[i]
         h = heights[i]
         area = float(w * h)
+
+        # Sample fractional center position FIRST (fixed RNG position for yoking).
+        cx_frac = np.random.random()
+        cy_frac = np.random.random()
 
         # For ratio r and scale s: crop_w = sqrt(s*area*r), crop_h = sqrt(s*area/r)
         # crop_w <= w  =>  s <= w/(h*r)
@@ -674,9 +711,32 @@ def _generate_direct_random_crop_params_batch(
         if crop_h < 1:
             crop_h = 1
 
-        # Sample position (use random() for fractional position — enables yoking)
-        crop_x = int(np.random.random() * (w - crop_w + 1))
-        crop_y = int(np.random.random() * (h - crop_h + 1))
+        # Map fraction to absolute image position, then clamp to valid range.
+        # cx_frac/cy_frac were sampled at a fixed RNG position (before scale/ratio),
+        # so yoked crops (same seed, different scale) target the same image location.
+        half_w = crop_w * 0.5
+        half_h = crop_h * 0.5
+        cx = cx_frac * w
+        cy = cy_frac * h
+        if cx < half_w:
+            cx = half_w
+        if cx > w - half_w:
+            cx = w - half_w
+        if cy < half_h:
+            cy = half_h
+        if cy > h - half_h:
+            cy = h - half_h
+        crop_x = int(cx - half_w + 0.5)
+        crop_y = int(cy - half_h + 0.5)
+        # Safety clamp for rounding edge cases
+        if crop_x < 0:
+            crop_x = 0
+        if crop_y < 0:
+            crop_y = 0
+        if crop_x + crop_w > w:
+            crop_x = w - crop_w
+        if crop_y + crop_h > h:
+            crop_y = h - crop_h
 
         params[i, 0] = crop_x
         params[i, 1] = crop_y
