@@ -216,18 +216,19 @@ class RandomPatchShuffle(BatchAugment):
         H, W = images.shape[-2:]
         assert H == W, f"RandomPatchShuffle requires square inputs, got H={H}, W={W}"
         img_size = H
+        device = images.device
 
         out = images.clone() if images.ndim == 4 else images.unsqueeze(0).clone()
 
         for patch_size_pct in rand_patch_sizes.unique().tolist():
             patch_size = int(patch_size_pct * img_size)
-            loc = torch.where(rand_patch_sizes == patch_size_pct)[0]
+            loc = torch.where(rand_patch_sizes == patch_size_pct)[0].to(device)
             if len(loc) == 0:
                 continue
 
             n_grid = img_size // patch_size
             n_patches = n_grid * n_grid
-            perm = F.generate_batch_permutations(len(loc), n_patches, rng=self.rng)
+            perm = F.generate_batch_permutations(len(loc), n_patches, rng=self.rng).to(device)
 
             # Unfold into patches: [B, C, n_grid, patch, n_grid, patch]
             sub = out[loc]
