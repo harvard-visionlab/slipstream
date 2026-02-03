@@ -110,7 +110,8 @@ def benchmark_decode_only(
         total = run_epoch()
         elapsed = time.perf_counter() - start
         rate = total / elapsed
-        warmup_results.append({"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        warmup_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
         print(f"    Warmup {i + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
 
     # Timed epochs
@@ -120,7 +121,8 @@ def benchmark_decode_only(
         total = run_epoch()
         elapsed = time.perf_counter() - start
         rate = total / elapsed
-        epoch_results.append({"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        epoch_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
         print(f"  Epoch {epoch + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
 
     avg_rate = np.mean([r["samples_per_sec"] for r in epoch_results])
@@ -223,7 +225,8 @@ def benchmark_full_pipeline(
         total = run_epoch()
         elapsed = time.perf_counter() - start
         rate = total / elapsed
-        warmup_results.append({"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        warmup_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
         print(f"    Warmup {i + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
 
     # Timed epochs
@@ -233,7 +236,8 @@ def benchmark_full_pipeline(
         total = run_epoch()
         elapsed = time.perf_counter() - start
         rate = total / elapsed
-        epoch_results.append({"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        epoch_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
         print(f"  Epoch {epoch + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
 
     avg_rate = np.mean([r["samples_per_sec"] for r in epoch_results])
@@ -263,15 +267,24 @@ def benchmark_full_pipeline(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark decoder output format performance")
-    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help="Dataset path (S3 or local)")
-    parser.add_argument("--cache-dir", type=str, default=None, help="Override cache directory")
-    parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
-    parser.add_argument("--epochs", type=int, default=3, help="Number of timed epochs")
-    parser.add_argument("--warmup", type=int, default=1, help="Number of warmup epochs")
-    parser.add_argument("--num-threads", type=int, default=0, help="NumbaBatchDecoder threads (0=auto)")
-    parser.add_argument("--target-size", type=int, default=224, help="Target crop size")
-    parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results")
+    parser = argparse.ArgumentParser(
+        description="Benchmark decoder output format performance")
+    parser.add_argument("--dataset", type=str,
+                        default=DEFAULT_DATASET, help="Dataset path (S3 or local)")
+    parser.add_argument("--cache-dir", type=str, default=None,
+                        help="Override cache directory")
+    parser.add_argument("--batch-size", type=int,
+                        default=256, help="Batch size")
+    parser.add_argument("--epochs", type=int, default=3,
+                        help="Number of timed epochs")
+    parser.add_argument("--warmup", type=int, default=1,
+                        help="Number of warmup epochs")
+    parser.add_argument("--num-threads", type=int, default=12,
+                        help="NumbaBatchDecoder threads (0=auto)")
+    parser.add_argument("--target-size", type=int,
+                        default=224, help="Target crop size")
+    parser.add_argument("--machine-name", type=str,
+                        default=None, help="Machine name for results")
     parser.add_argument("--device", type=str, default="auto",
                         choices=["auto", "cpu", "cuda"],
                         help="Target device: auto (cuda if available), cpu, or cuda")
@@ -280,8 +293,10 @@ def main():
                         help="Image format: jpeg, yuv420, or all (run both)")
     parser.add_argument("--skip-decode-only", action="store_true",
                         help="Skip decode-only benchmarks")
-    parser.add_argument("--save", action="store_true", help="Save results to JSON file")
-    parser.add_argument("--output", type=str, default=None, help="Output JSON path (implies --save)")
+    parser.add_argument("--save", action="store_true",
+                        help="Save results to JSON file")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Output JSON path (implies --save)")
     args = parser.parse_args()
 
     # Determine device
@@ -309,7 +324,8 @@ def main():
     cache_path = dataset.cache_path
     print(f"Cache path: {cache_path}")
     cache_drive = get_drive_info(cache_path)
-    print(f"Cache drive: {cache_drive['type']} (device: {cache_drive['device']})")
+    print(
+        f"Cache drive: {cache_drive['type']} (device: {cache_drive['device']})")
     print(f"Target device: {device}")
 
     results = []
@@ -383,7 +399,8 @@ def main():
         save_results(results, machine_info, args.output, "output_format")
     elif args.save:
         name = machine_info.machine_name.replace(".", "_").replace(" ", "_")
-        output_path = Path(__file__).parent / "results" / f"output_format_{name}.json"
+        output_path = Path(__file__).parent / "results" / \
+            f"output_format_{name}.json"
         save_results(results, machine_info, output_path, "output_format")
 
 
