@@ -335,14 +335,22 @@ slipstream/
     - These are fused JPEG-decode + crop/resize operations (backed by NumbaBatchDecoder), not standalone transforms
     - Old names kept as deprecated aliases for backward compatibility
 4. ✅ Eliminated duplicate `Normalize`/`ToDevice`/`Compose` from decoders — pipeline presets now use `transforms.ToTorchImage` + `transforms.Normalize` exclusively. `BatchTransform` ABC kept in `decoders/base.py` as loader stage protocol.
-5. ✅ **Decoder output format flexibility**: Added `to_tensor` and `permute` flags to all decode stages for benchmarking different output formats:
+5. ✅ **Decoder output format flexibility**: Added `to_tensor` and `permute` flags to all decode stages:
     - `to_tensor=True` (default): Returns `torch.Tensor` (backward compatible)
-    - `to_tensor=False`: Returns `np.ndarray` (for non-PyTorch workflows or GPU permute benchmarking)
+    - `to_tensor=False`: Returns `np.ndarray` (for GPU-optimal path)
     - `permute=True` (default): Output is CHW/BCHW layout
-    - `permute=False`: Output is HWC/BHWC layout (allows GPU to do the permute via ToTorchImage)
-    - `ToTorchImage` updated to auto-detect HWC vs CHW input and handle both numpy and tensor inputs
-    - Benchmark script: `benchmarks/benchmark_output_format.py` tests all configurations
-    - Run benchmarks to determine optimal defaults for CPU vs GPU pipelines
+    - `permute=False`: Output is HWC/BHWC layout (GPU does the permute)
+    - `ToTorchImage` updated to auto-detect HWC vs CHW and handle numpy/tensor inputs
+    - **GPU optimization**: For HWC input, transfers contiguous data to GPU first, then permutes on GPU (2.6x faster than transferring non-contiguous CHW)
+    - Benchmark script: `benchmarks/benchmark_output_format.py`
+    - **Benchmark results (H100)**:
+      - `numpy HWC → cuda`: **11,680 samples/sec** (optimal)
+      - `tensor CHW → cuda`: 4,472 samples/sec (2.6x slower)
+    - **Recommended GPU pipeline**:
+      ```python
+      DecodeRandomResizedCrop(size=224, to_tensor=False, permute=False),
+      ToTorchImage(device='cuda', dtype=torch.float32),
+      ```
 6. ⬜ Notebook demonstrating pipeline presets and common training workflows
 
 #### Phase 5c: Multi-Crop API Enhancements ✅ CORE COMPLETE

@@ -150,6 +150,111 @@ def benchmark_decode_only(
     )
 
 
+def benchmark_fused_strategy(
+    dataset,
+    batch_size: int,
+    num_epochs: int,
+    num_warmup: int,
+    strategy: str,
+    device: str,
+    num_threads: int = 0,
+    target_size: int = 224,
+    image_format: str = "jpeg",
+) -> BenchmarkResult:
+    """Benchmark DecodeRRCFused with different strategies."""
+    from slipstream import SlipstreamLoader
+    from slipstream.decoders.crop import DecodeRRCFused
+
+    name = f"Fused {strategy} -> {device}"
+    if image_format != "jpeg":
+        name += f" {image_format}"
+
+    pipelines = {
+        "image": [
+            DecodeRRCFused(
+                size=target_size,
+                num_threads=num_threads,
+                device=device,
+                dtype=torch.float16,
+                strategy=strategy,
+            ),
+            # No ToTorchImage needed!
+        ],
+    }
+
+    loader = SlipstreamLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        drop_last=False,
+        pipelines=pipelines,
+        exclude_fields=["path"],
+        use_threading=True,
+        image_format=image_format,
+    )
+
+    use_cuda_sync = device.startswith("cuda")
+
+    def run_epoch():
+        total_samples = 0
+        for batch in tqdm(loader, leave=False):
+            img = batch["image"]
+            total_samples += img.shape[0]
+        # Sync at end of epoch for accurate GPU timing
+        if use_cuda_sync:
+            torch.cuda.synchronize()
+        return total_samples
+
+    # Warmup
+    print(f"\n{name}:")
+    print(f"  Warmup ({num_warmup} epoch(s)):")
+    warmup_results = []
+    for i in range(num_warmup):
+        start = time.perf_counter()
+        total = run_epoch()
+        elapsed = time.perf_counter() - start
+        rate = total / elapsed
+        warmup_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        print(f"    Warmup {i + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
+
+    # Timed epochs
+    epoch_results = []
+    for epoch in range(num_epochs):
+        start = time.perf_counter()
+        total = run_epoch()
+        elapsed = time.perf_counter() - start
+        rate = total / elapsed
+        epoch_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        print(f"  Epoch {epoch + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
+
+    avg_rate = np.mean([r["samples_per_sec"] for r in epoch_results])
+    print(f"  Average: {avg_rate:,.0f} samples/sec")
+
+    loader.shutdown()
+
+    return BenchmarkResult(
+        name=name,
+        samples_per_sec=avg_rate,
+        total_samples=epoch_results[0]["total_samples"],
+        elapsed_sec=sum(r["elapsed_sec"] for r in epoch_results),
+        num_epochs=num_epochs,
+        warmup_epochs=num_warmup,
+        per_epoch_results=warmup_results + epoch_results,
+        metadata={
+            "pipeline_type": "fused_strategy",
+            "strategy": strategy,
+            "device": device,
+            "target_size": target_size,
+            "batch_size": batch_size,
+            "num_threads": num_threads,
+            "image_format": image_format,
+            "dtype": "float16",
+        },
+    )
+
+
 def benchmark_full_pipeline(
     dataset,
     batch_size: int,
@@ -293,6 +398,10 @@ def main():
                         help="Image format: jpeg, yuv420, or all (run both)")
     parser.add_argument("--skip-decode-only", action="store_true",
                         help="Skip decode-only benchmarks")
+    parser.add_argument("--fused", action="store_true",
+                        help="Run fused DecodeRRCFused strategy benchmarks (GPU only)")
+    parser.add_argument("--fused-only", action="store_true",
+                        help="Run ONLY fused strategy benchmarks (skip other tests)")
     parser.add_argument("--save", action="store_true",
                         help="Save results to JSON file")
     parser.add_argument("--output", type=str, default=None,
@@ -343,45 +452,69 @@ def main():
         (False, False),  # Numpy HWC
     ]
 
+    # Fused strategies to test (GPU only)
+    fused_strategies = ['cpu_permute', 'gpu_permute', 'channels_last']
+
     for image_format in formats:
         if len(formats) > 1:
             print(f"\n{'=' * 60}")
             print(f"FORMAT: {image_format.upper()}")
             print(f"{'=' * 60}")
 
-        # Decode-only benchmarks (CPU, no ToTorchImage)
-        if not args.skip_decode_only:
-            print(f"\n--- Decode Only (no device transfer) ---")
+        # Skip non-fused benchmarks if --fused-only
+        if not args.fused_only:
+            # Decode-only benchmarks (CPU, no ToTorchImage)
+            if not args.skip_decode_only:
+                print(f"\n--- Decode Only (no device transfer) ---")
+                for to_tensor, permute in configs:
+                    result = benchmark_decode_only(
+                        dataset,
+                        args.batch_size,
+                        args.epochs,
+                        args.warmup,
+                        to_tensor=to_tensor,
+                        permute=permute,
+                        num_threads=args.num_threads,
+                        target_size=args.target_size,
+                        image_format=image_format,
+                    )
+                    results.append(result)
+
+            # Full pipeline benchmarks (with ToTorchImage)
+            print(f"\n--- Full Pipeline (decode -> ToTorchImage({device})) ---")
             for to_tensor, permute in configs:
-                result = benchmark_decode_only(
+                result = benchmark_full_pipeline(
                     dataset,
                     args.batch_size,
                     args.epochs,
                     args.warmup,
                     to_tensor=to_tensor,
                     permute=permute,
+                    device=device,
                     num_threads=args.num_threads,
                     target_size=args.target_size,
                     image_format=image_format,
                 )
                 results.append(result)
 
-        # Full pipeline benchmarks (with ToTorchImage)
-        print(f"\n--- Full Pipeline (decode -> ToTorchImage({device})) ---")
-        for to_tensor, permute in configs:
-            result = benchmark_full_pipeline(
-                dataset,
-                args.batch_size,
-                args.epochs,
-                args.warmup,
-                to_tensor=to_tensor,
-                permute=permute,
-                device=device,
-                num_threads=args.num_threads,
-                target_size=args.target_size,
-                image_format=image_format,
-            )
-            results.append(result)
+        # Fused strategy benchmarks (GPU only)
+        if (args.fused or args.fused_only) and device.startswith("cuda"):
+            print(f"\n--- Fused Strategies (DecodeRRCFused -> {device}) ---")
+            for strategy in fused_strategies:
+                result = benchmark_fused_strategy(
+                    dataset,
+                    args.batch_size,
+                    args.epochs,
+                    args.warmup,
+                    strategy=strategy,
+                    device=device,
+                    num_threads=args.num_threads,
+                    target_size=args.target_size,
+                    image_format=image_format,
+                )
+                results.append(result)
+        elif (args.fused or args.fused_only) and not device.startswith("cuda"):
+            print(f"\n--- Skipping fused benchmarks (requires GPU, got device={device}) ---")
 
     # Summary
     print("\n" + "=" * 60)
@@ -393,6 +526,11 @@ def main():
     print("  tensor CHW: to_tensor=True, permute=True (current default)")
     print("  numpy CHW:  to_tensor=False, permute=True (Numba permute, torch.from_numpy)")
     print("  numpy HWC:  to_tensor=False, permute=False (no Numba permute, GPU permute)")
+    if args.fused or args.fused_only:
+        print("\nFused strategies (DecodeRRCFused, no ToTorchImage):")
+        print("  cpu_permute:   NumPy transpose on CPU, transfer NCHW -> GPU")
+        print("  gpu_permute:   Transfer HWC -> GPU, permute+contiguous on GPU")
+        print("  channels_last: Transfer HWC -> GPU, use channels_last memory format")
 
     # Save results
     if args.output:
