@@ -43,7 +43,7 @@ def benchmark_ffcv_loader(
 ) -> BenchmarkResult:
     """Benchmark SlipstreamLoader with FFCV reader + RRC pipeline."""
     from slipstream import SlipstreamLoader
-    from slipstream.pipelines import RandomResizedCrop
+    from slipstream.decoders import RandomResizedCrop
 
     mode = "threaded" if use_threading else "simple"
     name = f"FFCV → SlipstreamLoader (RRC, {mode})"

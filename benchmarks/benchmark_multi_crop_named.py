@@ -135,7 +135,7 @@ def main():
     results = []
 
     # --- Benchmark 1: Original MultiCropRandomResizedCrop (2 crops @ 224) ---
-    from slipstream import MultiCropRandomResizedCrop
+    from slipstream.decoders import MultiCropRandomResizedCrop
     pipelines_orig = {
         "image": [
             MultiCropRandomResizedCrop(num_crops=2, size=224, num_threads=args.num_threads),
@@ -150,7 +150,7 @@ def main():
     ))
 
     # --- Benchmark 2: New MultiRandomResizedCrop (2 crops @ 224, matching params) ---
-    from slipstream import MultiRandomResizedCrop
+    from slipstream.decoders import MultiRandomResizedCrop
     pipelines_new_2 = {
         "image": [
             MultiRandomResizedCrop({

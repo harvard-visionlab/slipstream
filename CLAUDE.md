@@ -195,15 +195,30 @@ slipstream/
 │   │   ├── ffcv_file.py        # ✅ FFCVFileDataset (Numba JIT batch loading)
 │   │   └── ffcv_style.py       # ✅ FFCVStyleDataset (mmap batch loading)
 │   ├── decoders/
-│   │   ├── __init__.py         # ✅ Decoder exports
+│   │   ├── __init__.py         # ✅ Decoder + stage exports
+│   │   ├── base.py             # ✅ BatchTransform ABC (loader stage protocol)
 │   │   ├── cpu.py              # ✅ CPUDecoder (TurboJPEG + ThreadPool)
 │   │   ├── gpu.py              # ✅ GPUDecoder (nvImageCodec)
 │   │   ├── numba_decoder.py    # ✅ NumbaBatchDecoder (prange + libslipstream)
-│   │   └── yuv420_decoder.py   # ✅ YUV420NumbaBatchDecoder (2x JPEG throughput)
-│   └── transforms/             # ✅ fastaugs port (optimized v1)
-│       ├── __init__.py
-│       ├── functional.py
-│       └── transforms.py
+│   │   ├── yuv420_decoder.py   # ✅ YUV420NumbaBatchDecoder (2x JPEG throughput)
+│   │   ├── decode.py           # ✅ Pure decode: DecodeOnly, DecodeYUVFullRes, DecodeYUVPlanes
+│   │   ├── crop.py             # ✅ Fused decode+crop: CenterCrop, RandomResizedCrop, DirectRRC, ResizeCrop
+│   │   ├── multicrop.py        # ✅ Multi-crop: MultiCropRRC, MultiRRC, MultiCropPipeline
+│   │   └── utils.py            # ✅ estimate_rejection_fallback_rate
+│   ├── pipelines/              # ✅ Pipeline presets (sequences of transforms)
+│   │   ├── __init__.py         # ✅ Re-exports decoders+transforms (backward compat) + all presets
+│   │   ├── _common.py          # ✅ Shared seed helpers + offset constants
+│   │   ├── supervised.py       # ✅ supervised_train, supervised_val, make_train/val_pipeline
+│   │   ├── simclr.py           # ✅ SimCLR two-view SSL
+│   │   ├── byol.py             # ✅ BYOL two-view SSL (asymmetric augmentation)
+│   │   └── multicrop_preset.py # ✅ Multi-crop SSL (DINO, iBOT)
+│   └── transforms/             # ✅ GPU batch augmentations (fastaugs port) + pipeline transforms
+│       ├── __init__.py         # ✅ All transform exports + IMAGENET_MEAN/STD
+│       ├── base.py             # ✅ BatchAugment, Compose, RandomApply, MultiSample
+│       ├── normalization.py    # ✅ Normalize, NormalizeLGN, IMAGENET_MEAN/STD
+│       ├── conversion.py       # ✅ ToTorchImage, ToDevice, ToFloat, ToFloatDiv, etc.
+│       ├── functional.py       # ✅ Functional implementations
+│       └── ...                 # ✅ geometric, effects, color_jitter, grayscale, etc.
 ├── tests/
 │   ├── __init__.py             # ✅ Created
 │   ├── test_loader.py          # ⬜ 3-epoch tests (cold + warm)
@@ -308,8 +323,25 @@ slipstream/
 
 #### Phase 5b: Standard Pipelines & Demos
 
-1. ⬜ Create standard pipeline presets (training, validation, SSL multi-crop) for demos and API validation
-2. ⬜ Notebook demonstrating pipeline presets and common training workflows
+1. ✅ Create standard pipeline presets (training, validation, SSL multi-crop) for demos and API validation
+2. ✅ Refactor: `pipelines.py` → `decoders/stages.py` (fused decode+crop stages) + `pipelines/` package (preset configurations)
+3. ⬜ **TODO**: Rename fused decode+crop stages to clarify they are decoders, not pure transforms:
+    - `CenterCrop` → `DecodeCenterCrop`
+    - `RandomResizedCrop` → `DecodeRandomResizedCrop`
+    - `DirectRandomResizedCrop` → `DecodeDirectRandomResizedCrop`
+    - `ResizeCrop` → `DecodeResizeCrop`
+    - `MultiRandomResizedCrop` → `DecodeMultiRandomResizedCrop` (preferred API: per-crop params, named outputs)
+    - `MultiCropRandomResizedCrop` → `DecodeUniformMultiRandomResizedCrop` (legacy: uniform params, list output)
+    - These are fused JPEG-decode + crop/resize operations (backed by NumbaBatchDecoder), not standalone transforms
+    - Keep old names as deprecated aliases during transition
+4. ✅ Eliminated duplicate `Normalize`/`ToDevice`/`Compose` from decoders — pipeline presets now use `transforms.ToTorchImage` + `transforms.Normalize` exclusively. `BatchTransform` ABC kept in `decoders/base.py` as loader stage protocol.
+5. ⬜ **TODO**: Resolve decoder output format for optimal GPU pipeline:
+    - Currently decode stages return CHW **uint8 torch tensors** (`torch.from_numpy(chw)` after internal `hwc_to_chw`)
+    - Fastest path would be: decode → **HWC uint8 numpy** → `ToTorchImage(device, dtype=float16)` (fused device+permute+cast+divide on GPU) → augmentations → `Normalize(mean, std)` last
+    - Current path: decode → CHW uint8 torch → `ToTorchImage` (permutes BCHW→BCHW no-op since already CHW, but still does device+cast+divide)
+    - Consider: will users ever want raw numpy arrays from decoders? (e.g., for non-PyTorch workflows, visualization)
+    - `ToTorchImage` currently assumes HWC input — would need adjustment if decoders already return CHW
+5. ⬜ Notebook demonstrating pipeline presets and common training workflows
 
 #### Phase 5c: Multi-Crop API Enhancements ✅ CORE COMPLETE
 
@@ -321,7 +353,11 @@ slipstream/
     - Single JPEG decode per image with `dest_stride_w` support in libslipstream for varied-size output buffers
 3. ✅ Notebook demonstrating multi-crop configurations (`notebooks/08_multi_crop_named.ipynb`)
 4. ✅ Per-sample seeding for crop param generation (FFCV-SSL compatible seed formula, per-sample RNG independence, `set_epoch()` resets decoder seed counters for checkpoint resume)
-5. ⬜ Yoked crops (same seed → same center point, different scale → zoomed-in / zoomed-out pair)
+5. ✅ Yoked crops (same seed → same center point, different scale → zoomed-in / zoomed-out pair)
+
+#### Phase 5d: Multi-Crop Yoked Crop Visualizations
+
+1. Add a visualization notebook (notebooks/09\_...) to visualize the crop parameters by plotting the crop params (subplot x,y axis limitis reflect the full image resolution, blue_crop reflects the large crop, red crop reflects the yoked smaller crop, show for a few different parameter settings, including non-yoked)
 
 ### Phase 6: Additional Dataset Sources
 

@@ -7,7 +7,8 @@ This module provides the main training interface that combines:
 
 Usage:
     from slipstream import SlipstreamDataset, SlipstreamLoader
-    from slipstream.pipelines import RandomResizedCrop, Normalize
+    from slipstream.decoders import RandomResizedCrop
+    from slipstream.transforms import Normalize
 
     # Create dataset
     dataset = SlipstreamDataset(
@@ -58,7 +59,7 @@ from slipstream.cache import OptimizedCache
 
 if TYPE_CHECKING:
     from slipstream.dataset import SlipstreamDataset
-    from slipstream.pipelines import BatchTransform
+    from slipstream.decoders import BatchTransform
 
 
 class SlipstreamLoader:
@@ -83,7 +84,8 @@ class SlipstreamLoader:
         pipelines: Dict mapping field names to transform pipelines
 
     Example:
-        from slipstream.pipelines import RandomResizedCrop, Normalize
+        from slipstream.decoders import RandomResizedCrop
+        from slipstream.transforms import Normalize
 
         # Training with pipelines
         loader = SlipstreamLoader(

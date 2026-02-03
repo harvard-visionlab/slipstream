@@ -1,0 +1,297 @@
+"""Multi-crop decode stages for SSL.
+
+- MultiCropRandomResizedCrop: decode-once + N uniform random crops
+- MultiRandomResizedCrop: decode-once + N named crops with per-crop params
+- MultiCropPipeline: apply per-crop transform chains to named crop dict
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+import torch
+
+from slipstream.decoders.base import BatchTransform
+from slipstream.decoders.numba_decoder import NumbaBatchDecoder
+
+
+def _get_yuv420_decoder_class() -> type:
+    from slipstream.decoders.yuv420_decoder import YUV420NumbaBatchDecoder
+    return YUV420NumbaBatchDecoder
+
+
+def _swap_yuv420_if_needed(decoder, image_format: str):
+    if image_format == "yuv420" and not isinstance(decoder, _get_yuv420_decoder_class()):
+        nt = decoder.num_threads
+        decoder.shutdown()
+        return _get_yuv420_decoder_class()(num_threads=nt)
+    return decoder
+
+
+class MultiCropRandomResizedCrop(BatchTransform):
+    """Decode-once + N random crops for SSL multi-crop.
+
+    Decodes each JPEG once, then applies N different random crops from the
+    same decoded image. Much faster than N separate RandomResizedCrop stages
+    since JPEG decode (~80-92% of per-image time) happens only once.
+
+    Args:
+        num_crops: Number of random crop views per image.
+        size: Output size (square).
+        scale: Crop area range relative to original.
+        ratio: Aspect ratio range.
+        num_threads: Parallel decode threads. 0 = auto.
+        seeds: Per-crop seeds for reproducibility. None = auto.
+
+    Returns:
+        List of num_crops tensors, each [B, 3, size, size] uint8.
+
+    Example:
+        multi_crop = MultiCropRandomResizedCrop(num_crops=2, size=224)
+        views = multi_crop(batch_data)  # [tensor1, tensor2]
+    """
+
+    def __init__(
+        self,
+        num_crops: int = 2,
+        size: int = 224,
+        scale: tuple[float, float] = (0.08, 1.0),
+        ratio: tuple[float, float] = (3 / 4, 4 / 3),
+        num_threads: int = 0,
+        seeds: list[int | None] | None = None,
+    ) -> None:
+        self.num_crops = num_crops
+        self.size = size
+        self.scale = scale
+        self.ratio = ratio
+        self.seeds = seeds
+        self._decoder = NumbaBatchDecoder(num_threads=num_threads)
+
+    def set_image_format(self, image_format: str) -> None:
+        self._decoder = _swap_yuv420_if_needed(self._decoder, image_format)
+
+    def __call__(self, batch_data: dict[str, Any]) -> list[torch.Tensor]:
+        crops = self._decoder.decode_batch_multi_crop(
+            batch_data['data'], batch_data['sizes'],
+            batch_data['heights'], batch_data['widths'],
+            num_crops=self.num_crops, target_size=self.size,
+            scale=self.scale, ratio=self.ratio, seeds=self.seeds,
+        )
+        chw_crops = self._decoder.multi_hwc_to_chw(crops)
+        return [torch.from_numpy(chw) for chw in chw_crops]
+
+    def shutdown(self) -> None:
+        self._decoder.shutdown()
+
+    def __repr__(self) -> str:
+        return (
+            f"MultiCropRandomResizedCrop(num_crops={self.num_crops}, size={self.size}, "
+            f"scale={self.scale}, ratio=({self.ratio[0]:.4f}, {self.ratio[1]:.4f}))"
+        )
+
+
+class MultiRandomResizedCrop(BatchTransform):
+    """Decode-once + N named crops with per-crop parameters.
+
+    Each crop can have a different target size, scale range, ratio range,
+    and seed. Decodes each JPEG once, then applies all crops from the same
+    decoded image data. Returns a dict of named tensors.
+
+    Args:
+        crops: Dict mapping crop names to parameter dicts.
+            Required key: ``size`` (int).
+            Optional keys: ``scale`` (tuple), ``ratio`` (tuple), ``seed`` (int).
+        ratio: Default aspect ratio range (used if not specified per crop).
+        crop_mode: ``"standard"`` (torchvision-compatible, 10-attempt rejection
+            sampling) or ``"direct"`` (analytic, no rejection loop).
+        num_threads: Parallel decode threads. 0 = auto.
+
+    Returns:
+        Dict[str, torch.Tensor] — named crops, each [B, 3, size, size] uint8.
+
+    Yoked crops:
+        Crops with the **same seed** share the same random number sequence,
+        producing crops centered on the same point. Combined with different
+        scale ranges, this gives a zoomed-in / zoomed-out pair::
+
+            MultiRandomResizedCrop({
+                "zoom_out": dict(size=224, scale=(0.4, 1.0), seed=42),
+                "zoom_in":  dict(size=224, scale=(0.05, 0.4), seed=42),
+            })
+
+    Example:
+        multi = MultiRandomResizedCrop({
+            "global_0": dict(size=224, scale=(0.4, 1.0), seed=42),
+            "global_1": dict(size=224, scale=(0.4, 1.0), seed=43),
+            "local_0":  dict(size=96,  scale=(0.05, 0.4), seed=44),
+            "local_1":  dict(size=96,  scale=(0.05, 0.4), seed=45),
+        })
+        named_crops = multi(batch_data)  # {"global_0": tensor, ...}
+    """
+
+    def __init__(
+        self,
+        crops: dict[str, dict],
+        ratio: tuple[float, float] = (3 / 4, 4 / 3),
+        crop_mode: str = "standard",
+        num_threads: int = 0,
+    ) -> None:
+        if crop_mode not in ("standard", "direct"):
+            raise ValueError(f"crop_mode must be 'standard' or 'direct', got '{crop_mode}'")
+        self.ratio = ratio
+        self.crop_mode = crop_mode
+        self.num_threads = num_threads
+        self._decoder = NumbaBatchDecoder(num_threads=num_threads)
+
+        self._crop_names: list[str] = []
+        self._crop_sizes: list[int] = []
+        self._crop_scales: list[tuple[float, float]] = []
+        self._crop_ratios: list[tuple[float, float]] = []
+        self._crop_seeds: list[int | None] = []
+
+        for name, params in crops.items():
+            if 'size' not in params:
+                raise ValueError(f"Crop '{name}' must specify 'size'")
+            self._crop_names.append(name)
+            self._crop_sizes.append(params['size'])
+            self._crop_scales.append(params.get('scale', (0.08, 1.0)))
+            self._crop_ratios.append(params.get('ratio', ratio))
+            self._crop_seeds.append(params.get('seed', None))
+
+    def set_image_format(self, image_format: str) -> None:
+        self._decoder = _swap_yuv420_if_needed(self._decoder, image_format)
+
+    def __call__(self, batch_data: dict[str, Any]) -> dict[str, torch.Tensor]:
+        import math
+        from slipstream.decoders.numba_decoder import (
+            _generate_random_crop_params_batch,
+            _generate_direct_random_crop_params_batch,
+        )
+
+        _generate_fn = (
+            _generate_direct_random_crop_params_batch
+            if self.crop_mode == "direct"
+            else _generate_random_crop_params_batch
+        )
+
+        data = batch_data['data']
+        sizes = batch_data['sizes']
+        heights = batch_data['heights']
+        widths = batch_data['widths']
+
+        heights_i32 = heights if heights.dtype == np.int32 else np.ascontiguousarray(heights, dtype=np.int32)
+        widths_i32 = widths if widths.dtype == np.int32 else np.ascontiguousarray(widths, dtype=np.int32)
+
+        num_crops = len(self._crop_names)
+
+        self._decoder._seed_counter += 1
+        batch_offset = self._decoder._seed_counter
+        batch_size = len(batch_data['sizes'])
+
+        crop_params_list = []
+        for c in range(num_crops):
+            scale = self._crop_scales[c]
+            ratio = self._crop_ratios[c]
+            seed = self._crop_seeds[c]
+
+            log_ratio_min = math.log(ratio[0])
+            log_ratio_max = math.log(ratio[1])
+
+            if seed is not None:
+                batch_seed = (seed + batch_size * batch_offset) % 2147483647
+            else:
+                batch_seed = (batch_size * (batch_offset * num_crops + c)) % 2147483647
+
+            params = _generate_fn(
+                widths_i32, heights_i32,
+                scale[0], scale[1],
+                log_ratio_min, log_ratio_max,
+                batch_seed,
+            )
+            crop_params_list.append(params)
+
+        all_same_size = len(set(self._crop_sizes)) == 1
+
+        crops_hwc = self._decoder.decode_batch_multi_crop_varied(
+            data, sizes, heights, widths,
+            crop_params_list=crop_params_list,
+            target_sizes=self._crop_sizes,
+        )
+
+        if all_same_size:
+            chw_crops = self._decoder.multi_hwc_to_chw(crops_hwc)
+        else:
+            chw_crops = self._decoder.multi_hwc_to_chw_varied(crops_hwc)
+
+        result = {}
+        for c, name in enumerate(self._crop_names):
+            result[name] = torch.from_numpy(chw_crops[c])
+        return result
+
+    def shutdown(self) -> None:
+        self._decoder.shutdown()
+
+    def __repr__(self) -> str:
+        crop_strs = []
+        for c, name in enumerate(self._crop_names):
+            crop_strs.append(
+                f"'{name}': size={self._crop_sizes[c]}, "
+                f"scale={self._crop_scales[c]}"
+            )
+        mode = f", crop_mode='{self.crop_mode}'" if self.crop_mode != "standard" else ""
+        return f"MultiRandomResizedCrop({{{', '.join(crop_strs)}}}{mode})"
+
+
+class MultiCropPipeline(BatchTransform):
+    """Apply per-crop transform pipelines to a dict of named values.
+
+    Takes a dict of named values (e.g., from MultiRandomResizedCrop) and
+    applies a separate pipeline to each. Generic — works with any transforms.
+
+    Args:
+        pipelines: Dict mapping names to lists of transforms (any callable).
+
+    Example:
+        from slipstream.transforms import ToTorchImage, Normalize
+
+        pipe = MultiCropPipeline({
+            "global_0": [ToTorchImage('cuda'), Normalize(mean, std)],
+            "local_0":  [ToTorchImage('cuda'), Normalize(mean, std)],
+        })
+        result = pipe(named_crops)  # {"global_0": tensor, "local_0": tensor}
+    """
+
+    def __init__(self, pipelines: dict[str, list]) -> None:
+        self.pipelines = pipelines
+
+    def __call__(self, data: dict[str, Any]) -> dict[str, Any]:
+        result = {}
+        for name, pipeline in self.pipelines.items():
+            val = data[name]
+            for transform in pipeline:
+                val = transform(val)
+            result[name] = val
+        for name in data:
+            if name not in self.pipelines:
+                result[name] = data[name]
+        return result
+
+    def set_image_format(self, image_format: str) -> None:
+        for pipeline in self.pipelines.values():
+            for transform in pipeline:
+                if hasattr(transform, 'set_image_format'):
+                    transform.set_image_format(image_format)
+
+    def shutdown(self) -> None:
+        for pipeline in self.pipelines.values():
+            for transform in pipeline:
+                if hasattr(transform, 'shutdown'):
+                    transform.shutdown()
+
+    def __repr__(self) -> str:
+        pipe_strs = []
+        for name, pipeline in self.pipelines.items():
+            transforms = [type(t).__name__ for t in pipeline]
+            pipe_strs.append(f"'{name}': [{', '.join(transforms)}]")
+        return f"MultiCropPipeline({{{', '.join(pipe_strs)}}})"

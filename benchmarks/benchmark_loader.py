@@ -50,7 +50,7 @@ def benchmark_loader(
 ) -> BenchmarkResult:
     """Benchmark SlipstreamLoader with specified pipeline."""
     from slipstream import SlipstreamLoader
-    from slipstream.pipelines import (
+    from slipstream.decoders import (
         CenterCrop, RandomResizedCrop, MultiCropRandomResizedCrop,
     )
 

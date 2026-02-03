@@ -5,58 +5,31 @@ using modern dependencies and a more versatile architecture.
 
 Example:
     from slipstream import SlipstreamDataset, SlipstreamLoader
+    from slipstream.pipelines import supervised_train
 
-    # Simple usage with remote dataset
-    dataset = SlipstreamDataset(
-        remote_dir="s3://bucket/dataset/",
-        decode_images=True,
-    )
-
-    for sample in dataset:
-        image = sample['image']  # PIL Image or tensor
-        label = sample['label']  # int
-
-High-Performance Training:
-    from slipstream import SlipstreamDataset, SlipstreamLoader
-    from slipstream import RandomResizedCrop, Normalize
-
-    # Create dataset
     dataset = SlipstreamDataset(
         remote_dir="s3://bucket/dataset/train/",
-        decode_images=False,  # Let loader handle decoding
+        decode_images=False,
     )
 
-    # Create high-performance loader with pipelines
     loader = SlipstreamLoader(
         dataset,
         batch_size=256,
-        pipelines={
-            'image': [
-                RandomResizedCrop(224, device='cuda'),
-                Normalize(),
-            ],
-        },
+        pipelines=supervised_train(224, device='cuda'),
     )
 
     for batch in loader:
-        images = batch['image']  # [B, 3, 224, 224] normalized tensor
+        images = batch['image']  # [B, 3, 224, 224] normalized float tensor
         labels = batch['label']  # [B] tensor
-        # Training...
-
-    # Raw I/O (no pipelines, for benchmarking)
-    raw_loader = SlipstreamLoader(dataset, batch_size=256)
 """
 
 __version__ = "0.1.0"
 
 # Core dataset
-# Native FFCV file support (this IS the FFCV .beton format)
 from slipstream.backends.ffcv_file import (
     FFCVFileDataset,
     FFCVFilePrefetchingDataLoader,
 )
-
-# Optimized cache (internal, but exposed for advanced users)
 from slipstream.cache import (
     OptimizedCache,
     write_index,
@@ -70,40 +43,51 @@ from slipstream.dataset import (
     list_collate_fn,
 )
 
-# Decoders
+# Decoders (low-level + fused decode+crop stages)
 from slipstream.decoders import (
+    BatchTransform,
     CPUDecoder,
     GPUDecoder,
     GPUDecoderFallback,
     check_gpu_decoder_available,
     check_turbojpeg_available,
     get_decoder,
+    # Fused decode+crop stages
+    DecodeOnly,
+    DecodeYUVFullRes,
+    DecodeYUVPlanes,
+    CenterCrop,
+    RandomResizedCrop,
+    DirectRandomResizedCrop,
+    ResizeCrop,
+    MultiCropRandomResizedCrop,
+    MultiRandomResizedCrop,
+    MultiCropPipeline,
+    estimate_rejection_fallback_rate,
+)
+
+# Transforms (GPU batch augmentations + pipeline-level transforms)
+from slipstream.transforms import (
+    Compose,
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    Normalize,
+    ToDevice,
+    ToTorchImage,
 )
 
 # High-level loader
 from slipstream.loader import SlipstreamLoader
 
-# Pipelines
+# Pipeline presets
 from slipstream.pipelines import (
-    BatchTransform,
-    CenterCrop,
-    Compose,
-    DecodeOnly,
-    DecodeYUVFullRes,
-    DecodeYUVPlanes,
-    DirectRandomResizedCrop,
-    MultiCropRandomResizedCrop,
-    MultiRandomResizedCrop,
-    MultiCropPipeline,
-    IMAGENET_MEAN,
-    IMAGENET_STD,
-    Normalize,
-    RandomResizedCrop,
-    ResizeCrop,
-    ToDevice,
     make_train_pipeline,
     make_val_pipeline,
-    estimate_rejection_fallback_rate,
+    supervised_train,
+    supervised_val,
+    simclr,
+    byol,
+    multicrop,
 )
 
 # Readers (dataset format adapters)
@@ -132,24 +116,34 @@ __all__ = [
     "list_collate_fn",
     # High-level loader
     "SlipstreamLoader",
-    # Pipelines
+    # Decode stages
     "BatchTransform",
-    "Compose",
     "DecodeOnly",
     "DecodeYUVFullRes",
     "DecodeYUVPlanes",
+    "CenterCrop",
     "RandomResizedCrop",
+    "DirectRandomResizedCrop",
+    "ResizeCrop",
     "MultiCropRandomResizedCrop",
     "MultiRandomResizedCrop",
     "MultiCropPipeline",
-    "CenterCrop",
-    "ResizeCrop",
+    "estimate_rejection_fallback_rate",
+    # Transforms
+    "Compose",
     "Normalize",
     "ToDevice",
-    "make_train_pipeline",
-    "make_val_pipeline",
+    "ToTorchImage",
     "IMAGENET_MEAN",
     "IMAGENET_STD",
+    # Pipeline presets
+    "make_train_pipeline",
+    "make_val_pipeline",
+    "supervised_train",
+    "supervised_val",
+    "simclr",
+    "byol",
+    "multicrop",
     # Optimized cache (advanced)
     "OptimizedCache",
     "write_index",

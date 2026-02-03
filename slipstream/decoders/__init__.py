@@ -1,30 +1,22 @@
 """Decoders for slipstream.
 
-GPU decoder: nvImageCodec for fused decode + RandomResizedCrop
-CPU decoder: TurboJPEG for parallel JPEG decoding
-Numba decoder: Numba JIT-compiled batch decoder (FFCV-style, fastest)
+Low-level decoders:
+- CPUDecoder: TurboJPEG for parallel JPEG decoding
+- GPUDecoder: nvImageCodec for GPU JPEG decoding
+- NumbaBatchDecoder: Numba JIT-compiled batch decoder (FFCV-style, fastest)
+- YUV420NumbaBatchDecoder: YUV420P raw format decoder (~2x JPEG throughput)
+
+Fused decode+crop stages (for SlipstreamLoader pipelines):
+- DecodeOnly, DecodeYUVFullRes, DecodeYUVPlanes: pure decode
+- CenterCrop, RandomResizedCrop, DirectRandomResizedCrop, ResizeCrop: decode+crop
+- MultiCropRandomResizedCrop, MultiRandomResizedCrop, MultiCropPipeline: multi-crop
 
 Usage:
     from slipstream.decoders import CPUDecoder, GPUDecoder, get_decoder
-
-    # CPU decoding (always available)
-    cpu_decoder = CPUDecoder(num_workers=8)
-    images = cpu_decoder.decode_batch(data, sizes)
-
-    # GPU decoding (requires nvImageCodec)
-    if check_gpu_decoder_available():
-        gpu_decoder = GPUDecoder(device=0)
-        images = gpu_decoder.decode_batch(data, sizes, heights, widths)
-
-    # Numba JIT decoder (fastest, FFCV-style)
-    if check_numba_decoder_available():
-        numba_decoder = NumbaBatchDecoder(num_threads=8)
-        destination = np.zeros((batch_size, max_h, max_w, 3), dtype=np.uint8)
-        numba_decoder.decode_batch(data, sizes, heights, widths, destination)
-
-    # Auto-select best decoder
-    decoder = get_decoder(device=0, prefer_gpu=True)
+    from slipstream.decoders import RandomResizedCrop, CenterCrop
 """
+
+from slipstream.decoders.base import BatchTransform
 
 from slipstream.decoders.cpu import (
     CPUDecoder,
@@ -53,7 +45,28 @@ except ImportError:
     def check_numba_decoder_available() -> bool:
         return False
 
+# Fused decode+crop stages
+from slipstream.decoders.decode import (
+    DecodeOnly,
+    DecodeYUVFullRes,
+    DecodeYUVPlanes,
+)
+from slipstream.decoders.crop import (
+    CenterCrop,
+    DirectRandomResizedCrop,
+    RandomResizedCrop,
+    ResizeCrop,
+)
+from slipstream.decoders.multicrop import (
+    MultiCropPipeline,
+    MultiCropRandomResizedCrop,
+    MultiRandomResizedCrop,
+)
+from slipstream.decoders.utils import estimate_rejection_fallback_rate
+
 __all__ = [
+    # Base
+    "BatchTransform",
     # CPU decoder
     "CPUDecoder",
     "TurboJPEGBatchDecoder",
@@ -70,4 +83,19 @@ __all__ = [
     # Numba decoder (FFCV-style)
     "NumbaBatchDecoder",
     "check_numba_decoder_available",
+    # Pure decode stages
+    "DecodeOnly",
+    "DecodeYUVFullRes",
+    "DecodeYUVPlanes",
+    # Fused decode+crop stages
+    "CenterCrop",
+    "RandomResizedCrop",
+    "DirectRandomResizedCrop",
+    "ResizeCrop",
+    # Multi-crop stages
+    "MultiCropRandomResizedCrop",
+    "MultiRandomResizedCrop",
+    "MultiCropPipeline",
+    # Utilities
+    "estimate_rejection_fallback_rate",
 ]

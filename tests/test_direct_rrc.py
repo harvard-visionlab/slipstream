@@ -9,7 +9,7 @@ from slipstream.decoders.numba_decoder import (
     _generate_direct_random_crop_params_batch,
     _generate_random_crop_params_batch,
 )
-from slipstream.pipelines import estimate_rejection_fallback_rate
+from slipstream.decoders import estimate_rejection_fallback_rate
 
 
 # ---------------------------------------------------------------------------

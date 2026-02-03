@@ -10,7 +10,7 @@ from .base import BatchAugment, Compose, RandomApply, MultiSample
 from .conversion import ToTorchImage, ToNumpy, ToChannelsFirst, ToChannelsLast, ToDevice, ToFloat, ToFloatDiv
 
 # Normalization
-from .normalization import Normalize, NormalizeLGN
+from .normalization import Normalize, NormalizeLGN, IMAGENET_MEAN, IMAGENET_STD
 
 # Grayscale
 from .grayscale import ToGrayscale, ToGrayscaleTorch, RandomGrayscale
@@ -53,6 +53,8 @@ __all__ = [
     # Normalization
     "Normalize",
     "NormalizeLGN",
+    "IMAGENET_MEAN",
+    "IMAGENET_STD",
     # Grayscale
     "ToGrayscale",
     "ToGrayscaleTorch",
