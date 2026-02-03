@@ -1,16 +1,9 @@
-"""Multi-crop SSL pipeline preset (global + local crops).
+"""L-JEPA multi-crop SSL pipeline preset (2 global + 4 local crops).
 
-Flexible preset supporting various global/local crop configurations:
-- ssl_global2_local0: multicrop(global_crops=2, local_crops=0)
-- ssl_global2_local4: multicrop(global_crops=2, local_crops=4)  [default, L-JEPA]
-- ssl_global2_local6: multicrop(global_crops=2, local_crops=6)
-- ssl_global3_local4: multicrop(global_crops=3, local_crops=4)
-- ssl_global6_local0: multicrop(global_crops=6, local_crops=0)
+Matches lrm-ssl's ssl_global2_local4_ratio1.yaml exactly.
 """
 
 from __future__ import annotations
-
-from typing import Any
 
 import torch
 
@@ -28,44 +21,44 @@ from slipstream.transforms import (
     ToTorchImage,
 )
 
-# Seed offsets matching lrm-ssl yaml configs
+# Seed offsets matching ssl_global2_local4_ratio1.yaml
 HFLIP_OFFSET = 1111
 JITTER_OFFSET = 2222
 GRAY_OFFSET = 3333
 SOLAR_OFFSET = 4444
 BLUR_OFFSET = 5555
 
-# Local crop size ratio (0.4375 * global_size = 98 for global_size=224)
-LOCAL_SIZE_RATIO = 0.4375
+# Crop parameters matching yaml
+GLOBAL_SCALE = (0.30, 1.0)
+LOCAL_SCALE = (0.05, 0.30)
+RATIO = (1.0, 1.0)
+LOCAL_SIZE_RATIO = 0.4375  # 98 for global_size=224
 
 
-def multicrop(
+def lejepa(
     global_crops: int = 2,
     local_crops: int = 4,
     global_size: int = 224,
     local_size: int | None = None,
-    global_scale: tuple[float, float] = (0.30, 1.0),
-    local_scale: tuple[float, float] = (0.05, 0.30),
-    ratio: tuple[float, float] = (1.0, 1.0),
+    global_scale: tuple[float, float] = GLOBAL_SCALE,
+    local_scale: tuple[float, float] = LOCAL_SCALE,
+    ratio: tuple[float, float] = RATIO,
     seed: int | None = None,
     device: str | None = None,
     dtype: torch.dtype = torch.float16,
     normalize: bool = True,
 ) -> dict[str, list]:
-    """Multi-crop SSL pipeline (global + local crops).
+    """L-JEPA multi-crop SSL pipeline.
 
-    Supports various configurations matching lrm-ssl yaml files.
-    All crops receive identical augmentations (symmetric).
+    Default configuration matches ssl_global2_local4_ratio1.yaml:
+        - 2 global crops: size=224, scale=(0.30, 1.0), ratio=(1.0, 1.0)
+        - 4 local crops: size=98, scale=(0.05, 0.30), ratio=(1.0, 1.0)
+        - All crops get identical augmentations (symmetric)
 
     Pipeline per crop:
         DecodeMultiRandomResizedCrop → ToTorchImage → RandomHorizontalFlip →
         RandomColorJitterHSV → RandomGrayscale → RandomSolarization →
         [Normalize] → RandomGaussianBlur
-
-    Default params match ssl_global2_local4_ratio1.yaml:
-        - global: scale=(0.30, 1.0), size=224
-        - local: scale=(0.05, 0.30), size=98 (0.4375 × global_size)
-        - ratio=(1.0, 1.0) for square crops
 
     Args:
         global_crops: Number of large (global) crops.
@@ -74,7 +67,7 @@ def multicrop(
         local_size: Size of local crops. Default: int(0.4375 * global_size).
         global_scale: Scale range for global crops.
         local_scale: Scale range for local crops.
-        ratio: Aspect ratio range (same for global and local).
+        ratio: Aspect ratio range.
         seed: Base seed for reproducibility. None = non-reproducible.
         device: Device for GPU augmentations (None = CPU).
         dtype: Output tensor dtype.
@@ -82,18 +75,19 @@ def multicrop(
 
     Returns:
         Pipelines dict with DecodeMultiRandomResizedCrop + MultiCropPipeline.
-        Output keys: 'global_0', 'global_1', ..., 'local_0', 'local_1', ...
+        Output keys: 'global_0', 'global_1', 'local_0', 'local_1', 'local_2', 'local_3'.
     """
     dev = device or "cpu"
 
-    # Compute local size if not specified (0.4375 * global_size)
+    # Compute local size if not specified (0.4375 * global_size = 98 for 224)
     if local_size is None:
         local_size = int(LOCAL_SIZE_RATIO * global_size)
 
-    # Build crop specs
-    crop_specs: dict[str, dict[str, Any]] = {}
+    # Build crop specs matching yaml
+    crop_specs = {}
     crop_id = 0
 
+    # Global crops (image, image_1 in yaml)
     for i in range(global_crops):
         name = f"global_{i}"
         crop_specs[name] = dict(
@@ -104,6 +98,7 @@ def multicrop(
         )
         crop_id += 1
 
+    # Local crops (image_2, image_3, image_4, image_5 in yaml)
     for i in range(local_crops):
         name = f"local_{i}"
         crop_specs[name] = dict(
@@ -114,9 +109,9 @@ def multicrop(
         )
         crop_id += 1
 
-    # Build per-crop augmentation pipelines (identical transforms for all crops)
+    # Build per-crop augmentation pipelines (identical for all crops)
     def _make_crop_pipeline(cid: int) -> list:
-        """Build augmentation pipeline for a single crop."""
+        """Build augmentation pipeline matching yaml."""
         return [
             ToTorchImage(device=dev, dtype=dtype),
             RandomHorizontalFlip(p=0.5, seed=_seed(seed, HFLIP_OFFSET, cid), device=dev),
@@ -133,7 +128,7 @@ def multicrop(
             ),
         ]
 
-    per_crop_pipes: dict[str, list] = {}
+    per_crop_pipes = {}
     crop_id = 0
 
     for i in range(global_crops):

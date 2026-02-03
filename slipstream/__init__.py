@@ -93,7 +93,8 @@ from slipstream.pipelines import (
     supervised_train,
     supervised_val,
     simclr,
-    byol,
+    ipcl,
+    lejepa,
     multicrop,
 )
 
@@ -156,7 +157,8 @@ __all__ = [
     "supervised_train",
     "supervised_val",
     "simclr",
-    "byol",
+    "ipcl",
+    "lejepa",
     "multicrop",
     # Optimized cache (advanced)
     "OptimizedCache",

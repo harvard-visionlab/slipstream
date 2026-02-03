@@ -20,6 +20,7 @@ def supervised_train(
     size: int = 224,
     seed: int | None = None,
     device: str | None = None,
+    dtype: torch.dtype = torch.float16,
     normalize: bool = True,
 ) -> dict[str, list]:
     """Standard supervised training pipeline.
@@ -33,23 +34,26 @@ def supervised_train(
         size: Output crop size.
         seed: Seed for reproducible crops. None = non-reproducible.
         device: Target device (None = CPU).
+        dtype: Output tensor dtype.
         normalize: Whether to append ImageNet normalization.
 
     Returns:
         Pipelines dict for ``SlipstreamLoader(pipelines=...)``.
     """
+    dev = device or "cpu"
     stages: list = [
         DecodeRandomResizedCrop(size, seed=_seed(seed, CROP_OFFSET)),
-        ToTorchImage(device=device or "cpu", dtype=torch.float16),
+        ToTorchImage(device=dev, dtype=dtype),
     ]
     if normalize:
-        stages.append(Normalize(IMAGENET_MEAN, IMAGENET_STD, device=device or "cpu"))
+        stages.append(Normalize(IMAGENET_MEAN, IMAGENET_STD, device=dev, dtype=dtype))
     return {'image': stages}
 
 
 def supervised_val(
     size: int = 224,
     device: str | None = None,
+    dtype: torch.dtype = torch.float16,
     normalize: bool = True,
 ) -> dict[str, list]:
     """Standard supervised validation pipeline.
@@ -59,17 +63,19 @@ def supervised_val(
     Args:
         size: Output crop size.
         device: Target device (None = CPU).
+        dtype: Output tensor dtype.
         normalize: Whether to append ImageNet normalization.
 
     Returns:
         Pipelines dict for ``SlipstreamLoader(pipelines=...)``.
     """
+    dev = device or "cpu"
     stages: list = [
         DecodeResizeCrop(resize_size=256, crop_size=size),
-        ToTorchImage(device=device or "cpu", dtype=torch.float16),
+        ToTorchImage(device=dev, dtype=dtype),
     ]
     if normalize:
-        stages.append(Normalize(IMAGENET_MEAN, IMAGENET_STD, device=device or "cpu"))
+        stages.append(Normalize(IMAGENET_MEAN, IMAGENET_STD, device=dev, dtype=dtype))
     return {'image': stages}
 
 
@@ -82,6 +88,7 @@ def make_train_pipeline(
     std: tuple[float, float, float] = IMAGENET_STD,
     num_threads: int = 0,
     seed: int | None = None,
+    dtype: torch.dtype = torch.float16,
 ) -> Compose:
     """Create a standard ImageNet training pipeline.
 
@@ -89,10 +96,10 @@ def make_train_pipeline(
     """
     transforms: list = [
         DecodeRandomResizedCrop(size, scale, ratio, num_threads=num_threads, seed=seed),
-        ToTorchImage(device="cpu", dtype=torch.float16),
+        ToTorchImage(device="cpu", dtype=dtype),
     ]
     if normalize:
-        transforms.append(Normalize(mean, std, device="cpu"))
+        transforms.append(Normalize(mean, std, device="cpu", dtype=dtype))
     return Compose(transforms)
 
 
@@ -102,6 +109,7 @@ def make_val_pipeline(
     mean: tuple[float, float, float] = IMAGENET_MEAN,
     std: tuple[float, float, float] = IMAGENET_STD,
     num_threads: int = 0,
+    dtype: torch.dtype = torch.float16,
 ) -> Compose:
     """Create a standard ImageNet validation pipeline.
 
@@ -109,8 +117,8 @@ def make_val_pipeline(
     """
     transforms: list = [
         DecodeCenterCrop(size, num_threads=num_threads),
-        ToTorchImage(device="cpu", dtype=torch.float16),
+        ToTorchImage(device="cpu", dtype=dtype),
     ]
     if normalize:
-        transforms.append(Normalize(mean, std, device="cpu"))
+        transforms.append(Normalize(mean, std, device="cpu", dtype=dtype))
     return Compose(transforms)
