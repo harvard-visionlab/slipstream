@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import torch
+
 from slipstream.decoders.multicrop import DecodeMultiRandomResizedCrop, MultiCropPipeline
 from slipstream.pipelines._common import CROP_OFFSET, _gpu_augmentations, _seed
 from slipstream.transforms import IMAGENET_MEAN, IMAGENET_STD, Normalize, ToTorchImage
@@ -69,7 +71,7 @@ def multicrop(
 
     for i in range(global_crops):
         name = f"global_{i}"
-        stages: list = [ToTorchImage(device=dev)]
+        stages: list = [ToTorchImage(device=dev, dtype=torch.float16)]
         stages.extend(_gpu_augmentations(
             seed=seed, crop_id=crop_id, device=device,
             solarization=(i >= 1),
@@ -81,7 +83,7 @@ def multicrop(
 
     for i in range(local_crops):
         name = f"local_{i}"
-        stages = [ToTorchImage(device=dev)]
+        stages = [ToTorchImage(device=dev, dtype=torch.float16)]
         stages.extend(_gpu_augmentations(
             seed=seed, crop_id=crop_id, device=device,
             solarization=False,

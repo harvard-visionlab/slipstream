@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import torch
+
 from slipstream.decoders.crop import DecodeRandomResizedCrop
 from slipstream.pipelines._common import CROP_OFFSET, _gpu_augmentations, _seed
 from slipstream.transforms import IMAGENET_MEAN, IMAGENET_STD, Normalize, ToTorchImage
@@ -36,7 +38,7 @@ def simclr(
     for view_id in range(2):
         stages: list = [
             DecodeRandomResizedCrop(size, seed=_seed(seed, CROP_OFFSET, view_id)),
-            ToTorchImage(device=dev),
+            ToTorchImage(device=dev, dtype=torch.float16),
         ]
         stages.extend(_gpu_augmentations(
             seed=seed, crop_id=view_id, device=device,

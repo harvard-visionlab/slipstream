@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import torch
+
 from slipstream.decoders.base import BatchTransform
 from slipstream.decoders.crop import DecodeCenterCrop, DecodeRandomResizedCrop, DecodeResizeCrop
 from slipstream.pipelines._common import CROP_OFFSET, _seed
@@ -38,7 +40,7 @@ def supervised_train(
     """
     stages: list = [
         DecodeRandomResizedCrop(size, seed=_seed(seed, CROP_OFFSET)),
-        ToTorchImage(device=device or "cpu"),
+        ToTorchImage(device=device or "cpu", dtype=torch.float16),
     ]
     if normalize:
         stages.append(Normalize(IMAGENET_MEAN, IMAGENET_STD, device=device or "cpu"))
@@ -64,7 +66,7 @@ def supervised_val(
     """
     stages: list = [
         DecodeResizeCrop(resize_size=256, crop_size=size),
-        ToTorchImage(device=device or "cpu"),
+        ToTorchImage(device=device or "cpu", dtype=torch.float16),
     ]
     if normalize:
         stages.append(Normalize(IMAGENET_MEAN, IMAGENET_STD, device=device or "cpu"))
@@ -87,7 +89,7 @@ def make_train_pipeline(
     """
     transforms: list = [
         DecodeRandomResizedCrop(size, scale, ratio, num_threads=num_threads, seed=seed),
-        ToTorchImage(device="cpu"),
+        ToTorchImage(device="cpu", dtype=torch.float16),
     ]
     if normalize:
         transforms.append(Normalize(mean, std, device="cpu"))
@@ -107,7 +109,7 @@ def make_val_pipeline(
     """
     transforms: list = [
         DecodeCenterCrop(size, num_threads=num_threads),
-        ToTorchImage(device="cpu"),
+        ToTorchImage(device="cpu", dtype=torch.float16),
     ]
     if normalize:
         transforms.append(Normalize(mean, std, device="cpu"))
