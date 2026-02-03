@@ -123,6 +123,13 @@ def to_torch_image(b, device="cpu", dtype=torch.float32, **kwargs):
 
     Returns:
         torch.Tensor [C, H, W] or [B, C, H, W] float in [0, 1]
+
+    Note:
+        For GPU targets with HWC input, the order of operations is optimized:
+        1. Transfer contiguous HWC data to GPU (fast DMA)
+        2. Permute on GPU (essentially free)
+        3. Cast to float and divide
+        This avoids the slow path of transferring non-contiguous data.
     """
     import numpy as np
 
@@ -131,14 +138,26 @@ def to_torch_image(b, device="cpu", dtype=torch.float32, **kwargs):
         b = torch.from_numpy(b)
 
     max_val = _max_value(b.dtype)
+    needs_permute = _is_hwc(b)
 
-    # Detect HWC format and permute if needed
-    if _is_hwc(b):
+    # Optimization: for GPU targets with HWC input, transfer contiguous data first,
+    # then permute on GPU. Permuting on CPU creates a non-contiguous view, and
+    # transferring non-contiguous data to GPU is very slow (can't use DMA).
+    is_gpu = device != "cpu" and device is not None and str(device) != "cpu"
+
+    if is_gpu and needs_permute:
+        # GPU + HWC: transfer contiguous HWC first, permute on GPU
+        b = b.to(device=device)
         b = to_channels_first(b)
-
-    b = b.to(device=device, dtype=dtype)
-    b = div_(b, val=max_val, dtype=dtype)
-    return b
+        # Cast and normalize in one step
+        return (b / max_val).to(dtype=dtype)
+    else:
+        # CPU path or already CHW
+        if needs_permute:
+            b = to_channels_first(b)
+        # Transfer (if needed) and cast, then normalize
+        b = b.to(device=device, dtype=dtype)
+        return b / max_val
 
 
 # =================================================
