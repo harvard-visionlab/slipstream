@@ -45,17 +45,21 @@ class DecodeCenterCrop(BatchTransform):
         permute: If True, permute HWC→CHW. If False, keep HWC layout.
 
     Returns:
-        If to_tensor=True (default): Tensor [B, 3, size, size] uint8.
-        If to_tensor=False, permute=True: numpy [B, 3, size, size] uint8.
-        If to_tensor=False, permute=False: numpy [B, size, size, 3] uint8.
+        If to_tensor=False, permute=False (default): numpy [B, size, size, 3] uint8 (HWC).
+        If to_tensor=False, permute=True: numpy [B, 3, size, size] uint8 (CHW).
+        If to_tensor=True: Tensor with same layout as numpy output.
+
+    Note:
+        Default output (numpy HWC) is optimal for GPU pipelines when followed
+        by ToTorchImage, which transfers contiguous HWC to GPU then permutes.
     """
 
     def __init__(
         self,
         size: int = 224,
         num_threads: int = 0,
-        to_tensor: bool = True,
-        permute: bool = True,
+        to_tensor: bool = False,
+        permute: bool = False,
     ) -> None:
         self.size = size
         self.to_tensor = to_tensor
@@ -102,9 +106,13 @@ class DecodeRandomResizedCrop(BatchTransform):
         permute: If True, permute HWC→CHW. If False, keep HWC layout.
 
     Returns:
-        If to_tensor=True (default): Tensor [B, 3, size, size] uint8.
-        If to_tensor=False, permute=True: numpy [B, 3, size, size] uint8.
-        If to_tensor=False, permute=False: numpy [B, size, size, 3] uint8.
+        If to_tensor=False, permute=False (default): numpy [B, size, size, 3] uint8 (HWC).
+        If to_tensor=False, permute=True: numpy [B, 3, size, size] uint8 (CHW).
+        If to_tensor=True: Tensor with same layout as numpy output.
+
+    Note:
+        Default output (numpy HWC) is optimal for GPU pipelines when followed
+        by ToTorchImage, which transfers contiguous HWC to GPU then permutes.
     """
 
     def __init__(
@@ -114,8 +122,8 @@ class DecodeRandomResizedCrop(BatchTransform):
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
         num_threads: int = 0,
         seed: int | None = None,
-        to_tensor: bool = True,
-        permute: bool = True,
+        to_tensor: bool = False,
+        permute: bool = False,
     ) -> None:
         self.size = size
         self.scale = scale
@@ -177,9 +185,13 @@ class DecodeDirectRandomResizedCrop(BatchTransform):
         permute: If True, permute HWC→CHW. If False, keep HWC layout.
 
     Returns:
-        If to_tensor=True (default): Tensor [B, 3, size, size] uint8.
-        If to_tensor=False, permute=True: numpy [B, 3, size, size] uint8.
-        If to_tensor=False, permute=False: numpy [B, size, size, 3] uint8.
+        If to_tensor=False, permute=False (default): numpy [B, size, size, 3] uint8 (HWC).
+        If to_tensor=False, permute=True: numpy [B, 3, size, size] uint8 (CHW).
+        If to_tensor=True: Tensor with same layout as numpy output.
+
+    Note:
+        Default output (numpy HWC) is optimal for GPU pipelines when followed
+        by ToTorchImage, which transfers contiguous HWC to GPU then permutes.
     """
 
     def __init__(
@@ -189,8 +201,8 @@ class DecodeDirectRandomResizedCrop(BatchTransform):
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
         num_threads: int = 0,
         seed: int | None = None,
-        to_tensor: bool = True,
-        permute: bool = True,
+        to_tensor: bool = False,
+        permute: bool = False,
     ) -> None:
         self.size = size
         self.scale = scale
@@ -246,9 +258,13 @@ class DecodeResizeCrop(BatchTransform):
         permute: If True, permute HWC→CHW. If False, keep HWC layout.
 
     Returns:
-        If to_tensor=True (default): Tensor [B, 3, crop_size, crop_size] uint8.
-        If to_tensor=False, permute=True: numpy [B, 3, crop_size, crop_size] uint8.
-        If to_tensor=False, permute=False: numpy [B, crop_size, crop_size, 3] uint8.
+        If to_tensor=False, permute=False (default): numpy [B, crop_size, crop_size, 3] uint8 (HWC).
+        If to_tensor=False, permute=True: numpy [B, 3, crop_size, crop_size] uint8 (CHW).
+        If to_tensor=True: Tensor with same layout as numpy output.
+
+    Note:
+        Default output (numpy HWC) is optimal for GPU pipelines when followed
+        by ToTorchImage, which transfers contiguous HWC to GPU then permutes.
     """
 
     def __init__(
@@ -256,8 +272,8 @@ class DecodeResizeCrop(BatchTransform):
         resize_size: int = 256,
         crop_size: int = 224,
         num_threads: int = 0,
-        to_tensor: bool = True,
-        permute: bool = True,
+        to_tensor: bool = False,
+        permute: bool = False,
     ) -> None:
         self.resize_size = resize_size
         self.crop_size = crop_size
@@ -290,121 +306,6 @@ class DecodeResizeCrop(BatchTransform):
         if not self.permute:
             extra += ", permute=False"
         return f"DecodeResizeCrop(resize={self.resize_size}, crop={self.crop_size}{extra})"
-
-
-class DecodeRRCFused(BatchTransform):
-    """Experimental: Fused decode + device transfer + dtype conversion.
-
-    Tests different strategies for optimal GPU pipeline performance.
-    Bypasses ToTorchImage by handling device transfer and dtype conversion
-    internally.
-
-    Args:
-        size: Output size (square).
-        scale: Crop area range relative to original.
-        ratio: Aspect ratio range.
-        num_threads: Parallel decode threads. 0 = auto.
-        seed: Seed for reproducible crops. None = non-reproducible.
-        device: Target device ('cpu', 'cuda', or torch.device).
-        dtype: Output dtype (default torch.float16).
-        strategy: Transfer/permute strategy:
-            - 'cpu_permute': NumPy transpose on CPU, transfer NCHW to GPU
-            - 'gpu_permute': Transfer HWC to GPU, permute + contiguous on GPU
-            - 'channels_last': Transfer HWC, use channels_last memory format (no permute)
-
-    Returns:
-        torch.Tensor [B, 3, size, size] float in [0, 1] (or BHWC for channels_last).
-    """
-
-    def __init__(
-        self,
-        size: int = 224,
-        scale: tuple[float, float] = (0.08, 1.0),
-        ratio: tuple[float, float] = (3 / 4, 4 / 3),
-        num_threads: int = 0,
-        seed: int | None = None,
-        device: str = 'cuda',
-        dtype: torch.dtype = torch.float16,
-        strategy: str = 'cpu_permute',
-    ) -> None:
-        self.size = size
-        self.scale = scale
-        self.ratio = ratio
-        self.seed = seed
-        self.device = device
-        self.dtype = dtype
-        self.strategy = strategy
-        self._decoder = NumbaBatchDecoder(num_threads=num_threads)
-        self._pinned: torch.Tensor | None = None
-
-    def set_image_format(self, image_format: str) -> None:
-        self._decoder = _swap_yuv420_if_needed(self._decoder, image_format)
-
-    def __call__(self, batch_data: dict[str, Any]) -> torch.Tensor:
-        # Decode to numpy HWC uint8
-        result = self._decoder.decode_batch_random_crop(
-            batch_data['data'], batch_data['sizes'],
-            batch_data['heights'], batch_data['widths'],
-            target_size=self.size, scale=self.scale, ratio=self.ratio,
-            seed=self.seed,
-        )  # [B, H, W, 3] uint8 numpy
-
-        B = result.shape[0]
-        is_gpu = self.device != 'cpu' and self.device is not None and str(self.device) != 'cpu'
-
-        if is_gpu:
-            # Strategy A: CPU permute (NumPy transpose), then transfer NCHW
-            if self.strategy == 'cpu_permute':
-                result = result.transpose(0, 3, 1, 2)  # NumPy HWC→CHW (fast, returns view)
-                # Make contiguous copy for pinned memory
-                result = np.ascontiguousarray(result)
-                shape = result.shape
-                if self._pinned is None or self._pinned.shape != shape:
-                    self._pinned = torch.empty(shape, dtype=torch.uint8, pin_memory=True)
-                self._pinned.copy_(torch.from_numpy(result))
-                t = self._pinned.to(self.device, non_blocking=True)
-                return t.to(self.dtype).div_(255.0)
-
-            # Strategy B: Transfer HWC, GPU permute + contiguous
-            elif self.strategy == 'gpu_permute':
-                shape = (B, self.size, self.size, 3)
-                if self._pinned is None or self._pinned.shape[0] < B:
-                    self._pinned = torch.empty(shape, dtype=torch.uint8, pin_memory=True)
-                self._pinned[:B].copy_(torch.from_numpy(result))
-                t = self._pinned[:B].to(self.device, non_blocking=True)
-                t = t.permute(0, 3, 1, 2).contiguous()
-                return t.to(self.dtype).div_(255.0)
-
-            # Strategy C: Channels last (no permute, NHWC memory format)
-            elif self.strategy == 'channels_last':
-                shape = (B, self.size, self.size, 3)
-                if self._pinned is None or self._pinned.shape[0] < B:
-                    self._pinned = torch.empty(shape, dtype=torch.uint8, pin_memory=True)
-                self._pinned[:B].copy_(torch.from_numpy(result))
-                t = self._pinned[:B].to(self.device, non_blocking=True)
-                # Reinterpret as NCHW but keep underlying NHWC memory layout
-                t = t.permute(0, 3, 1, 2)
-                return t.to(self.dtype, memory_format=torch.channels_last).div_(255.0)
-
-            else:
-                raise ValueError(f"Unknown strategy: {self.strategy}")
-
-        # CPU path (for completeness)
-        else:
-            t = torch.from_numpy(result)
-            if self.strategy != 'channels_last':
-                t = t.permute(0, 3, 1, 2)
-            return t.to(self.dtype).div_(255.0)
-
-    def shutdown(self) -> None:
-        self._decoder.shutdown()
-
-    def __repr__(self) -> str:
-        return (
-            f"DecodeRRCFused(size={self.size}, scale={self.scale}, "
-            f"ratio=({self.ratio[0]:.4f}, {self.ratio[1]:.4f}), seed={self.seed}, "
-            f"device={self.device}, dtype={self.dtype}, strategy={self.strategy})"
-        )
 
 
 # Backward-compatible aliases (deprecated)

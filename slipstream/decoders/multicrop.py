@@ -51,12 +51,16 @@ class DecodeUniformMultiRandomResizedCrop(BatchTransform):
         permute: If True, permute HWC→CHW. If False, keep HWC layout.
 
     Returns:
-        List of num_crops tensors/arrays, each [B, 3, size, size] uint8 (CHW)
-        or [B, size, size, 3] uint8 (HWC if permute=False).
+        List of num_crops arrays, each [B, size, size, 3] uint8 (HWC, default)
+        or [B, 3, size, size] uint8 (CHW if permute=True).
+
+    Note:
+        Default output (numpy HWC) is optimal for GPU pipelines when followed
+        by ToTorchImage, which transfers contiguous HWC to GPU then permutes.
 
     Example:
         multi_crop = DecodeUniformMultiRandomResizedCrop(num_crops=2, size=224)
-        views = multi_crop(batch_data)  # [tensor1, tensor2]
+        views = multi_crop(batch_data)  # [array1, array2]
     """
 
     def __init__(
@@ -67,8 +71,8 @@ class DecodeUniformMultiRandomResizedCrop(BatchTransform):
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
         num_threads: int = 0,
         seeds: list[int | None] | None = None,
-        to_tensor: bool = True,
-        permute: bool = True,
+        to_tensor: bool = False,
+        permute: bool = False,
     ) -> None:
         self.num_crops = num_crops
         self.size = size
@@ -115,7 +119,7 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
 
     Each crop can have a different target size, scale range, ratio range,
     and seed. Decodes each JPEG once, then applies all crops from the same
-    decoded image data. Returns a dict of named tensors.
+    decoded image data. Returns a dict of named arrays.
 
     Args:
         crops: Dict mapping crop names to parameter dicts.
@@ -129,8 +133,12 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
         permute: If True, permute HWC→CHW. If False, keep HWC layout.
 
     Returns:
-        Dict[str, torch.Tensor] or Dict[str, np.ndarray] — named crops,
-        each [B, 3, size, size] uint8 (CHW) or [B, size, size, 3] (HWC).
+        Dict[str, np.ndarray] or Dict[str, torch.Tensor] — named crops,
+        each [B, size, size, 3] uint8 (HWC, default) or [B, 3, size, size] (CHW).
+
+    Note:
+        Default output (numpy HWC) is optimal for GPU pipelines when followed
+        by ToTorchImage, which transfers contiguous HWC to GPU then permutes.
 
     Yoked crops:
         Crops with the **same seed** share the same random number sequence,
@@ -149,7 +157,7 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
             "local_0":  dict(size=96,  scale=(0.05, 0.4), seed=44),
             "local_1":  dict(size=96,  scale=(0.05, 0.4), seed=45),
         })
-        named_crops = multi(batch_data)  # {"global_0": tensor, ...}
+        named_crops = multi(batch_data)  # {"global_0": array, ...}
     """
 
     def __init__(
@@ -158,8 +166,8 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
         crop_mode: str = "standard",
         num_threads: int = 0,
-        to_tensor: bool = True,
-        permute: bool = True,
+        to_tensor: bool = False,
+        permute: bool = False,
     ) -> None:
         if crop_mode not in ("standard", "direct"):
             raise ValueError(f"crop_mode must be 'standard' or 'direct', got '{crop_mode}'")
