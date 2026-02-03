@@ -153,7 +153,7 @@ def main():
     from slipstream.decoders import DecodeMultiRandomResizedCrop
     pipelines_new_2 = {
         "image": [
-            DecodeDecodeMultiRandomResizedCrop({
+            DecodeMultiRandomResizedCrop({
                 "view_0": dict(size=224),
                 "view_1": dict(size=224),
             }, num_threads=args.num_threads),
