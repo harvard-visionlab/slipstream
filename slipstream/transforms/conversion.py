@@ -6,7 +6,25 @@ from . import functional as F
 
 
 class ToTorchImage(BatchAugment):
-    """Convert HWC/BHWC tensor to CHW/BCHW float tensor in [0,1]."""
+    """Convert numpy array or tensor to CHW/BCHW float tensor in [0,1].
+
+    Accepts:
+        - numpy array [H, W, 3] or [B, H, W, 3] (HWC)
+        - numpy array [3, H, W] or [B, 3, H, W] (CHW)
+        - torch tensor in any of the above formats
+
+    The input format (HWC vs CHW) is auto-detected. Both numpy arrays and
+    torch tensors are supported, making this compatible with decoders that
+    return either format via the `to_tensor` parameter.
+
+    Args:
+        device: Target device ('cpu', 'cuda', torch.device).
+        dtype: Target dtype (default torch.float32).
+        from_numpy: Deprecated, kept for backward compatibility.
+
+    Returns:
+        torch.Tensor [C, H, W] or [B, C, H, W] float in [0, 1] on target device.
+    """
 
     def __init__(self, device, dtype=torch.float32, from_numpy=True):
         self.device = device
@@ -20,7 +38,7 @@ class ToTorchImage(BatchAugment):
         return self.apply_last(x)
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(device={self.device}, dtype={self.dtype}, from_numpy={self.from_numpy})"
+        return f"{self.__class__.__name__}(device={self.device}, dtype={self.dtype})"
 
 
 class ToNumpy(BatchAugment):

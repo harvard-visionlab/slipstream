@@ -335,13 +335,15 @@ slipstream/
     - These are fused JPEG-decode + crop/resize operations (backed by NumbaBatchDecoder), not standalone transforms
     - Old names kept as deprecated aliases for backward compatibility
 4. ✅ Eliminated duplicate `Normalize`/`ToDevice`/`Compose` from decoders — pipeline presets now use `transforms.ToTorchImage` + `transforms.Normalize` exclusively. `BatchTransform` ABC kept in `decoders/base.py` as loader stage protocol.
-5. ⬜ **TODO**: Resolve decoder output format for optimal GPU pipeline:
-    - Currently decode stages return CHW **uint8 torch tensors** (`torch.from_numpy(chw)` after internal `hwc_to_chw`)
-    - Fastest path would be: decode → **HWC uint8 numpy** → `ToTorchImage(device, dtype=float16)` (fused device+permute+cast+divide on GPU) → augmentations → `Normalize(mean, std)` last
-    - Current path: decode → CHW uint8 torch → `ToTorchImage` (permutes BCHW→BCHW no-op since already CHW, but still does device+cast+divide)
-    - Consider: will users ever want raw numpy arrays from decoders? (e.g., for non-PyTorch workflows, visualization)
-    - `ToTorchImage` currently assumes HWC input — would need adjustment if decoders already return CHW
-5. ⬜ Notebook demonstrating pipeline presets and common training workflows
+5. ✅ **Decoder output format flexibility**: Added `to_tensor` and `permute` flags to all decode stages for benchmarking different output formats:
+    - `to_tensor=True` (default): Returns `torch.Tensor` (backward compatible)
+    - `to_tensor=False`: Returns `np.ndarray` (for non-PyTorch workflows or GPU permute benchmarking)
+    - `permute=True` (default): Output is CHW/BCHW layout
+    - `permute=False`: Output is HWC/BHWC layout (allows GPU to do the permute via ToTorchImage)
+    - `ToTorchImage` updated to auto-detect HWC vs CHW input and handle both numpy and tensor inputs
+    - Benchmark script: `benchmarks/benchmark_output_format.py` tests all configurations
+    - Run benchmarks to determine optimal defaults for CPU vs GPU pipelines
+6. ⬜ Notebook demonstrating pipeline presets and common training workflows
 
 #### Phase 5c: Multi-Crop API Enhancements ✅ CORE COMPLETE
 

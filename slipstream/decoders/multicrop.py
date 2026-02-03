@@ -47,9 +47,12 @@ class DecodeUniformMultiRandomResizedCrop(BatchTransform):
         ratio: Aspect ratio range.
         num_threads: Parallel decode threads. 0 = auto.
         seeds: Per-crop seeds for reproducibility. None = auto.
+        to_tensor: If True, return torch.Tensor; if False, return numpy array.
+        permute: If True, permute HWC→CHW. If False, keep HWC layout.
 
     Returns:
-        List of num_crops tensors, each [B, 3, size, size] uint8.
+        List of num_crops tensors/arrays, each [B, 3, size, size] uint8 (CHW)
+        or [B, size, size, 3] uint8 (HWC if permute=False).
 
     Example:
         multi_crop = DecodeUniformMultiRandomResizedCrop(num_crops=2, size=224)
@@ -64,34 +67,46 @@ class DecodeUniformMultiRandomResizedCrop(BatchTransform):
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
         num_threads: int = 0,
         seeds: list[int | None] | None = None,
+        to_tensor: bool = True,
+        permute: bool = True,
     ) -> None:
         self.num_crops = num_crops
         self.size = size
         self.scale = scale
         self.ratio = ratio
         self.seeds = seeds
+        self.to_tensor = to_tensor
+        self.permute = permute
         self._decoder = NumbaBatchDecoder(num_threads=num_threads)
 
     def set_image_format(self, image_format: str) -> None:
         self._decoder = _swap_yuv420_if_needed(self._decoder, image_format)
 
-    def __call__(self, batch_data: dict[str, Any]) -> list[torch.Tensor]:
+    def __call__(self, batch_data: dict[str, Any]) -> list[torch.Tensor] | list[np.ndarray]:
         crops = self._decoder.decode_batch_multi_crop(
             batch_data['data'], batch_data['sizes'],
             batch_data['heights'], batch_data['widths'],
             num_crops=self.num_crops, target_size=self.size,
             scale=self.scale, ratio=self.ratio, seeds=self.seeds,
         )
-        chw_crops = self._decoder.multi_hwc_to_chw(crops)
-        return [torch.from_numpy(chw) for chw in chw_crops]
+        if self.permute:
+            crops = self._decoder.multi_hwc_to_chw(crops)
+        if self.to_tensor:
+            return [torch.from_numpy(c) for c in crops]
+        return crops
 
     def shutdown(self) -> None:
         self._decoder.shutdown()
 
     def __repr__(self) -> str:
+        extra = ""
+        if not self.to_tensor:
+            extra += ", to_tensor=False"
+        if not self.permute:
+            extra += ", permute=False"
         return (
             f"DecodeUniformMultiRandomResizedCrop(num_crops={self.num_crops}, size={self.size}, "
-            f"scale={self.scale}, ratio=({self.ratio[0]:.4f}, {self.ratio[1]:.4f}))"
+            f"scale={self.scale}, ratio=({self.ratio[0]:.4f}, {self.ratio[1]:.4f}){extra})"
         )
 
 
@@ -110,9 +125,12 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
         crop_mode: ``"standard"`` (torchvision-compatible, 10-attempt rejection
             sampling) or ``"direct"`` (analytic, no rejection loop).
         num_threads: Parallel decode threads. 0 = auto.
+        to_tensor: If True, return torch.Tensor; if False, return numpy array.
+        permute: If True, permute HWC→CHW. If False, keep HWC layout.
 
     Returns:
-        Dict[str, torch.Tensor] — named crops, each [B, 3, size, size] uint8.
+        Dict[str, torch.Tensor] or Dict[str, np.ndarray] — named crops,
+        each [B, 3, size, size] uint8 (CHW) or [B, size, size, 3] (HWC).
 
     Yoked crops:
         Crops with the **same seed** share the same random number sequence,
@@ -140,12 +158,16 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
         crop_mode: str = "standard",
         num_threads: int = 0,
+        to_tensor: bool = True,
+        permute: bool = True,
     ) -> None:
         if crop_mode not in ("standard", "direct"):
             raise ValueError(f"crop_mode must be 'standard' or 'direct', got '{crop_mode}'")
         self.ratio = ratio
         self.crop_mode = crop_mode
         self.num_threads = num_threads
+        self.to_tensor = to_tensor
+        self.permute = permute
         self._decoder = NumbaBatchDecoder(num_threads=num_threads)
 
         self._crop_names: list[str] = []
@@ -223,14 +245,20 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
             target_sizes=self._crop_sizes,
         )
 
-        if all_same_size:
-            chw_crops = self._decoder.multi_hwc_to_chw(crops_hwc)
+        if self.permute:
+            if all_same_size:
+                crops_out = self._decoder.multi_hwc_to_chw(crops_hwc)
+            else:
+                crops_out = self._decoder.multi_hwc_to_chw_varied(crops_hwc)
         else:
-            chw_crops = self._decoder.multi_hwc_to_chw_varied(crops_hwc)
+            crops_out = crops_hwc
 
         result = {}
         for c, name in enumerate(self._crop_names):
-            result[name] = torch.from_numpy(chw_crops[c])
+            if self.to_tensor:
+                result[name] = torch.from_numpy(crops_out[c])
+            else:
+                result[name] = crops_out[c]
         return result
 
     def shutdown(self) -> None:
@@ -244,7 +272,12 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
                 f"scale={self._crop_scales[c]}"
             )
         mode = f", crop_mode='{self.crop_mode}'" if self.crop_mode != "standard" else ""
-        return f"DecodeMultiRandomResizedCrop({{{', '.join(crop_strs)}}}{mode})"
+        extra = ""
+        if not self.to_tensor:
+            extra += ", to_tensor=False"
+        if not self.permute:
+            extra += ", permute=False"
+        return f"DecodeMultiRandomResizedCrop({{{', '.join(crop_strs)}}}{mode}{extra})"
 
 
 class MultiCropPipeline(BatchTransform):
