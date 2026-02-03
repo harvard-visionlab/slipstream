@@ -325,7 +325,7 @@ slipstream/
 
 1. ✅ Create standard pipeline presets (training, validation, SSL multi-crop) for demos and API validation
 2. ✅ Refactor: `pipelines.py` → `decoders/stages.py` (fused decode+crop stages) + `pipelines/` package (preset configurations)
-3. ⬜ **TODO**: Rename fused decode+crop stages to clarify they are decoders, not pure transforms:
+3. ✅ **Renamed** fused decode+crop stages to clarify they are decoders, not pure transforms:
     - `CenterCrop` → `DecodeCenterCrop`
     - `RandomResizedCrop` → `DecodeRandomResizedCrop`
     - `DirectRandomResizedCrop` → `DecodeDirectRandomResizedCrop`
@@ -333,7 +333,7 @@ slipstream/
     - `MultiRandomResizedCrop` → `DecodeMultiRandomResizedCrop` (preferred API: per-crop params, named outputs)
     - `MultiCropRandomResizedCrop` → `DecodeUniformMultiRandomResizedCrop` (legacy: uniform params, list output)
     - These are fused JPEG-decode + crop/resize operations (backed by NumbaBatchDecoder), not standalone transforms
-    - Keep old names as deprecated aliases during transition
+    - Old names kept as deprecated aliases for backward compatibility
 4. ✅ Eliminated duplicate `Normalize`/`ToDevice`/`Compose` from decoders — pipeline presets now use `transforms.ToTorchImage` + `transforms.Normalize` exclusively. `BatchTransform` ABC kept in `decoders/base.py` as loader stage protocol.
 5. ⬜ **TODO**: Resolve decoder output format for optimal GPU pipeline:
     - Currently decode stages return CHW **uint8 torch tensors** (`torch.from_numpy(chw)` after internal `hwc_to_chw`)

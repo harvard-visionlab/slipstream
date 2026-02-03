@@ -51,7 +51,7 @@ def benchmark_loader(
     """Benchmark SlipstreamLoader with specified pipeline."""
     from slipstream import SlipstreamLoader
     from slipstream.decoders import (
-        CenterCrop, RandomResizedCrop, MultiCropRandomResizedCrop,
+        DecodeCenterCrop, DecodeRandomResizedCrop, DecodeUniformMultiRandomResizedCrop,
     )
 
     mode = "threaded" if use_threading else "simple"
@@ -60,21 +60,21 @@ def benchmark_loader(
     if pipeline_type == "train":
         pipelines = {
             "image": [
-                RandomResizedCrop(target_size, num_threads=num_threads),
+                DecodeRandomResizedCrop(target_size, num_threads=num_threads),
             ],
         }
         name = f"SlipstreamLoader (RRC, {mode}{fmt_label})"
     elif pipeline_type == "val":
         pipelines = {
             "image": [
-                CenterCrop(target_size, num_threads=num_threads),
+                DecodeCenterCrop(target_size, num_threads=num_threads),
             ],
         }
         name = f"SlipstreamLoader (CenterCrop, {mode}{fmt_label})"
     elif pipeline_type == "multi-crop":
         pipelines = {
             "image": [
-                MultiCropRandomResizedCrop(
+                DecodeUniformMultiRandomResizedCrop(
                     num_crops=2, size=target_size, num_threads=num_threads,
                 ),
             ],

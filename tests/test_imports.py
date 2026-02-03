@@ -38,11 +38,16 @@ class TestTopLevelImports:
     def test_decode_stages(self):
         from slipstream import BatchTransform
         from slipstream import DecodeOnly, DecodeYUVFullRes, DecodeYUVPlanes
+        # New names
+        from slipstream import DecodeCenterCrop, DecodeRandomResizedCrop
+        from slipstream import DecodeDirectRandomResizedCrop, DecodeResizeCrop
+        from slipstream import DecodeMultiRandomResizedCrop, DecodeUniformMultiRandomResizedCrop
+        from slipstream import MultiCropPipeline
+        from slipstream import estimate_rejection_fallback_rate
+        # Backward-compatible aliases
         from slipstream import CenterCrop, RandomResizedCrop, DirectRandomResizedCrop
         from slipstream import ResizeCrop
         from slipstream import MultiCropRandomResizedCrop, MultiRandomResizedCrop
-        from slipstream import MultiCropPipeline
-        from slipstream import estimate_rejection_fallback_rate
 
     def test_pipeline_presets(self):
         from slipstream import make_train_pipeline, make_val_pipeline
@@ -65,12 +70,18 @@ class TestCanonicalImports:
 
     def test_decoders_crop(self):
         from slipstream.decoders.crop import (
+            DecodeCenterCrop, DecodeRandomResizedCrop,
+            DecodeDirectRandomResizedCrop, DecodeResizeCrop,
+            # Backward-compatible aliases
             CenterCrop, RandomResizedCrop, DirectRandomResizedCrop, ResizeCrop,
         )
 
     def test_decoders_multicrop(self):
         from slipstream.decoders.multicrop import (
-            MultiCropRandomResizedCrop, MultiRandomResizedCrop, MultiCropPipeline,
+            DecodeMultiRandomResizedCrop, DecodeUniformMultiRandomResizedCrop,
+            MultiCropPipeline,
+            # Backward-compatible aliases
+            MultiCropRandomResizedCrop, MultiRandomResizedCrop,
         )
 
     def test_decoders_decode(self):
@@ -125,4 +136,4 @@ class TestPresetStructure:
         from slipstream.pipelines import multicrop
         p = multicrop(global_crops=2, local_crops=4, seed=42)
         assert 'image' in p
-        assert len(p['image']) == 2  # MultiRandomResizedCrop + MultiCropPipeline
+        assert len(p['image']) == 2  # DecodeMultiRandomResizedCrop + MultiCropPipeline

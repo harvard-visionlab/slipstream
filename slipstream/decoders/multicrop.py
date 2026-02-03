@@ -1,7 +1,7 @@
 """Multi-crop decode stages for SSL.
 
-- MultiCropRandomResizedCrop: decode-once + N uniform random crops
-- MultiRandomResizedCrop: decode-once + N named crops with per-crop params
+- DecodeUniformMultiRandomResizedCrop: decode-once + N uniform random crops (legacy)
+- DecodeMultiRandomResizedCrop: decode-once + N named crops with per-crop params
 - MultiCropPipeline: apply per-crop transform chains to named crop dict
 """
 
@@ -29,12 +29,16 @@ def _swap_yuv420_if_needed(decoder, image_format: str):
     return decoder
 
 
-class MultiCropRandomResizedCrop(BatchTransform):
-    """Decode-once + N random crops for SSL multi-crop.
+class DecodeUniformMultiRandomResizedCrop(BatchTransform):
+    """Decode-once + N random crops with uniform parameters (legacy).
 
     Decodes each JPEG once, then applies N different random crops from the
-    same decoded image. Much faster than N separate RandomResizedCrop stages
-    since JPEG decode (~80-92% of per-image time) happens only once.
+    same decoded image. All crops share the same size, scale, and ratio.
+    Much faster than N separate decode stages since JPEG decode (~80-92%
+    of per-image time) happens only once.
+
+    For per-crop parameters (different sizes, scales), use
+    :class:`DecodeMultiRandomResizedCrop` instead.
 
     Args:
         num_crops: Number of random crop views per image.
@@ -48,7 +52,7 @@ class MultiCropRandomResizedCrop(BatchTransform):
         List of num_crops tensors, each [B, 3, size, size] uint8.
 
     Example:
-        multi_crop = MultiCropRandomResizedCrop(num_crops=2, size=224)
+        multi_crop = DecodeUniformMultiRandomResizedCrop(num_crops=2, size=224)
         views = multi_crop(batch_data)  # [tensor1, tensor2]
     """
 
@@ -86,12 +90,12 @@ class MultiCropRandomResizedCrop(BatchTransform):
 
     def __repr__(self) -> str:
         return (
-            f"MultiCropRandomResizedCrop(num_crops={self.num_crops}, size={self.size}, "
+            f"DecodeUniformMultiRandomResizedCrop(num_crops={self.num_crops}, size={self.size}, "
             f"scale={self.scale}, ratio=({self.ratio[0]:.4f}, {self.ratio[1]:.4f}))"
         )
 
 
-class MultiRandomResizedCrop(BatchTransform):
+class DecodeMultiRandomResizedCrop(BatchTransform):
     """Decode-once + N named crops with per-crop parameters.
 
     Each crop can have a different target size, scale range, ratio range,
@@ -115,13 +119,13 @@ class MultiRandomResizedCrop(BatchTransform):
         producing crops centered on the same point. Combined with different
         scale ranges, this gives a zoomed-in / zoomed-out pair::
 
-            MultiRandomResizedCrop({
+            DecodeMultiRandomResizedCrop({
                 "zoom_out": dict(size=224, scale=(0.4, 1.0), seed=42),
                 "zoom_in":  dict(size=224, scale=(0.05, 0.4), seed=42),
             })
 
     Example:
-        multi = MultiRandomResizedCrop({
+        multi = DecodeMultiRandomResizedCrop({
             "global_0": dict(size=224, scale=(0.4, 1.0), seed=42),
             "global_1": dict(size=224, scale=(0.4, 1.0), seed=43),
             "local_0":  dict(size=96,  scale=(0.05, 0.4), seed=44),
@@ -240,13 +244,13 @@ class MultiRandomResizedCrop(BatchTransform):
                 f"scale={self._crop_scales[c]}"
             )
         mode = f", crop_mode='{self.crop_mode}'" if self.crop_mode != "standard" else ""
-        return f"MultiRandomResizedCrop({{{', '.join(crop_strs)}}}{mode})"
+        return f"DecodeMultiRandomResizedCrop({{{', '.join(crop_strs)}}}{mode})"
 
 
 class MultiCropPipeline(BatchTransform):
     """Apply per-crop transform pipelines to a dict of named values.
 
-    Takes a dict of named values (e.g., from MultiRandomResizedCrop) and
+    Takes a dict of named values (e.g., from DecodeMultiRandomResizedCrop) and
     applies a separate pipeline to each. Generic — works with any transforms.
 
     Args:
@@ -295,3 +299,8 @@ class MultiCropPipeline(BatchTransform):
             transforms = [type(t).__name__ for t in pipeline]
             pipe_strs.append(f"'{name}': [{', '.join(transforms)}]")
         return f"MultiCropPipeline({{{', '.join(pipe_strs)}}})"
+
+
+# Backward-compatible aliases (deprecated)
+MultiCropRandomResizedCrop = DecodeUniformMultiRandomResizedCrop
+MultiRandomResizedCrop = DecodeMultiRandomResizedCrop

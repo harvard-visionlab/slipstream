@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from slipstream.decoders.base import BatchTransform
-from slipstream.decoders.crop import CenterCrop, RandomResizedCrop, ResizeCrop
+from slipstream.decoders.crop import DecodeCenterCrop, DecodeRandomResizedCrop, DecodeResizeCrop
 from slipstream.pipelines._common import CROP_OFFSET, _seed
 from slipstream.transforms import (
     Compose,
@@ -22,7 +22,7 @@ def supervised_train(
 ) -> dict[str, list]:
     """Standard supervised training pipeline.
 
-    Pipeline: RandomResizedCrop → ToTorchImage → [Normalize].
+    Pipeline: DecodeRandomResizedCrop → ToTorchImage → [Normalize].
 
     Decode stages return CHW uint8 torch tensors. ``ToTorchImage`` handles
     device transfer, dtype cast, and [0,255]→[0,1] conversion.
@@ -37,7 +37,7 @@ def supervised_train(
         Pipelines dict for ``SlipstreamLoader(pipelines=...)``.
     """
     stages: list = [
-        RandomResizedCrop(size, seed=_seed(seed, CROP_OFFSET)),
+        DecodeRandomResizedCrop(size, seed=_seed(seed, CROP_OFFSET)),
         ToTorchImage(device=device or "cpu"),
     ]
     if normalize:
@@ -52,7 +52,7 @@ def supervised_val(
 ) -> dict[str, list]:
     """Standard supervised validation pipeline.
 
-    Pipeline: ResizeCrop(256→size) → ToTorchImage → [Normalize].
+    Pipeline: DecodeResizeCrop(256→size) → ToTorchImage → [Normalize].
 
     Args:
         size: Output crop size.
@@ -63,7 +63,7 @@ def supervised_val(
         Pipelines dict for ``SlipstreamLoader(pipelines=...)``.
     """
     stages: list = [
-        ResizeCrop(resize_size=256, crop_size=size),
+        DecodeResizeCrop(resize_size=256, crop_size=size),
         ToTorchImage(device=device or "cpu"),
     ]
     if normalize:
@@ -86,7 +86,7 @@ def make_train_pipeline(
     .. deprecated:: Use :func:`supervised_train` instead for the dict-based API.
     """
     transforms: list = [
-        RandomResizedCrop(size, scale, ratio, num_threads=num_threads, seed=seed),
+        DecodeRandomResizedCrop(size, scale, ratio, num_threads=num_threads, seed=seed),
         ToTorchImage(device="cpu"),
     ]
     if normalize:
@@ -106,7 +106,7 @@ def make_val_pipeline(
     .. deprecated:: Use :func:`supervised_val` instead for the dict-based API.
     """
     transforms: list = [
-        CenterCrop(size, num_threads=num_threads),
+        DecodeCenterCrop(size, num_threads=num_threads),
         ToTorchImage(device="cpu"),
     ]
     if normalize:

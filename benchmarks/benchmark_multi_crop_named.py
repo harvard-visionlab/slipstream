@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Benchmark MultiRandomResizedCrop vs MultiCropRandomResizedCrop.
+"""Benchmark DecodeMultiRandomResizedCrop vs DecodeUniformMultiRandomResizedCrop.
 
 Compares:
-1. MultiCropRandomResizedCrop (original): 2 crops @ 224, same scale/ratio
-2. MultiRandomResizedCrop (new): 2 crops @ 224, same params (direct comparison)
-3. MultiRandomResizedCrop (new): 1 global @ 224 + 1 local @ 96
-4. MultiRandomResizedCrop (new): 2 local @ 96
-5. MultiRandomResizedCrop (new): 2 global @ 224 + 4 local @ 96 (DINO-style)
+1. DecodeUniformMultiRandomResizedCrop (legacy): 2 crops @ 224, same scale/ratio
+2. DecodeMultiRandomResizedCrop: 2 crops @ 224, same params (direct comparison)
+3. DecodeMultiRandomResizedCrop: 1 global @ 224 + 1 local @ 96
+4. DecodeMultiRandomResizedCrop: 2 local @ 96
+5. DecodeMultiRandomResizedCrop: 2 global @ 224 + 4 local @ 96 (DINO-style)
 
 All benchmarks are decode+crop only (no transforms/normalization).
 
@@ -134,26 +134,26 @@ def main():
     fmt = args.image_format
     results = []
 
-    # --- Benchmark 1: Original MultiCropRandomResizedCrop (2 crops @ 224) ---
-    from slipstream.decoders import MultiCropRandomResizedCrop
+    # --- Benchmark 1: Original DecodeUniformMultiRandomResizedCrop (2 crops @ 224) ---
+    from slipstream.decoders import DecodeUniformMultiRandomResizedCrop
     pipelines_orig = {
         "image": [
-            MultiCropRandomResizedCrop(num_crops=2, size=224, num_threads=args.num_threads),
+            DecodeUniformMultiRandomResizedCrop(num_crops=2, size=224, num_threads=args.num_threads),
         ],
     }
     results.append(benchmark_loader(
         dataset, args.batch_size, args.epochs, args.warmup,
-        name=f"MultiCropRandomResizedCrop (2x224, {fmt})",
+        name=f"DecodeUniformMultiRandomResizedCrop (2x224, {fmt})",
         pipelines=pipelines_orig,
         count_fn=lambda b: b["image"][0].shape[0],
         image_format=fmt,
     ))
 
-    # --- Benchmark 2: New MultiRandomResizedCrop (2 crops @ 224, matching params) ---
-    from slipstream.decoders import MultiRandomResizedCrop
+    # --- Benchmark 2: New DecodeMultiRandomResizedCrop (2 crops @ 224, matching params) ---
+    from slipstream.decoders import DecodeMultiRandomResizedCrop
     pipelines_new_2 = {
         "image": [
-            MultiRandomResizedCrop({
+            DecodeDecodeMultiRandomResizedCrop({
                 "view_0": dict(size=224),
                 "view_1": dict(size=224),
             }, num_threads=args.num_threads),
@@ -161,16 +161,16 @@ def main():
     }
     results.append(benchmark_loader(
         dataset, args.batch_size, args.epochs, args.warmup,
-        name=f"MultiRandomResizedCrop (2x224, {fmt})",
+        name=f"DecodeMultiRandomResizedCrop (2x224, {fmt})",
         pipelines=pipelines_new_2,
         count_fn=lambda b: b["view_0"].shape[0],
         image_format=fmt,
     ))
 
-    # --- Benchmark 3: New MultiRandomResizedCrop (1 global + 1 local) ---
+    # --- Benchmark 3: DecodeMultiRandomResizedCrop (1 global + 1 local) ---
     pipelines_1g1l = {
         "image": [
-            MultiRandomResizedCrop({
+            DecodeMultiRandomResizedCrop({
                 "global_0": dict(size=224, scale=(0.4, 1.0)),
                 "local_0":  dict(size=96,  scale=(0.05, 0.4)),
             }, num_threads=args.num_threads),
@@ -178,16 +178,16 @@ def main():
     }
     results.append(benchmark_loader(
         dataset, args.batch_size, args.epochs, args.warmup,
-        name=f"MultiRandomResizedCrop (1x224+1x96, {fmt})",
+        name=f"DecodeMultiRandomResizedCrop (1x224+1x96, {fmt})",
         pipelines=pipelines_1g1l,
         count_fn=lambda b: b["global_0"].shape[0],
         image_format=fmt,
     ))
 
-    # --- Benchmark 4: New MultiRandomResizedCrop (2 local) ---
+    # --- Benchmark 4: DecodeMultiRandomResizedCrop (2 local) ---
     pipelines_2l = {
         "image": [
-            MultiRandomResizedCrop({
+            DecodeMultiRandomResizedCrop({
                 "local_0": dict(size=96, scale=(0.05, 0.4)),
                 "local_1": dict(size=96, scale=(0.05, 0.4)),
             }, num_threads=args.num_threads),
@@ -195,16 +195,16 @@ def main():
     }
     results.append(benchmark_loader(
         dataset, args.batch_size, args.epochs, args.warmup,
-        name=f"MultiRandomResizedCrop (2x96, {fmt})",
+        name=f"DecodeMultiRandomResizedCrop (2x96, {fmt})",
         pipelines=pipelines_2l,
         count_fn=lambda b: b["local_0"].shape[0],
         image_format=fmt,
     ))
 
-    # --- Benchmark 5: New MultiRandomResizedCrop (2 global + 4 local, DINO-style) ---
+    # --- Benchmark 5: DecodeMultiRandomResizedCrop (2 global + 4 local, DINO-style) ---
     pipelines_dino = {
         "image": [
-            MultiRandomResizedCrop({
+            DecodeMultiRandomResizedCrop({
                 "global_0": dict(size=224, scale=(0.4, 1.0)),
                 "global_1": dict(size=224, scale=(0.4, 1.0)),
                 "local_0":  dict(size=96,  scale=(0.05, 0.4)),
@@ -216,7 +216,7 @@ def main():
     }
     results.append(benchmark_loader(
         dataset, args.batch_size, args.epochs, args.warmup,
-        name=f"MultiRandomResizedCrop (2x224+4x96 DINO, {fmt})",
+        name=f"DecodeMultiRandomResizedCrop (2x224+4x96 DINO, {fmt})",
         pipelines=pipelines_dino,
         count_fn=lambda b: b["global_0"].shape[0],
         image_format=fmt,

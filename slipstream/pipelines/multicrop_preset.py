@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from slipstream.decoders.multicrop import MultiCropPipeline, MultiRandomResizedCrop
+from slipstream.decoders.multicrop import DecodeMultiRandomResizedCrop, MultiCropPipeline
 from slipstream.pipelines._common import CROP_OFFSET, _gpu_augmentations, _seed
 from slipstream.transforms import IMAGENET_MEAN, IMAGENET_STD, Normalize, ToTorchImage
 
@@ -22,7 +22,7 @@ def multicrop(
 ) -> dict[str, list]:
     """Multi-crop SSL pipeline (e.g., DINO, iBOT).
 
-    Uses ``MultiRandomResizedCrop`` for single-decode multi-crop with per-crop
+    Uses ``DecodeMultiRandomResizedCrop`` for single-decode multi-crop with per-crop
     parameters, and ``MultiCropPipeline`` for per-crop GPU augmentations.
 
     Args:
@@ -37,7 +37,7 @@ def multicrop(
         normalize: Whether to append ImageNet normalization.
 
     Returns:
-        Pipelines dict using MultiRandomResizedCrop + MultiCropPipeline.
+        Pipelines dict using DecodeMultiRandomResizedCrop + MultiCropPipeline.
     """
     dev = device or "cpu"
 
@@ -93,7 +93,7 @@ def multicrop(
 
     return {
         'image': [
-            MultiRandomResizedCrop(crop_specs),
+            DecodeMultiRandomResizedCrop(crop_specs),
             MultiCropPipeline(per_crop_pipes),
         ],
     }

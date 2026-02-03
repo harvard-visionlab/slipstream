@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from slipstream.decoders.crop import RandomResizedCrop
+from slipstream.decoders.crop import DecodeRandomResizedCrop
 from slipstream.pipelines._common import CROP_OFFSET, _gpu_augmentations, _seed
 from slipstream.transforms import IMAGENET_MEAN, IMAGENET_STD, Normalize, ToTorchImage
 
@@ -18,7 +18,7 @@ def simclr(
     Two views with independent crops and augmentations. View 1 includes
     solarization; view 0 does not (standard SimCLR asymmetry).
 
-    Pipeline per view: RandomResizedCrop → ToTorchImage → HFlip → ColorJitter
+    Pipeline per view: DecodeRandomResizedCrop → ToTorchImage → HFlip → ColorJitter
     → Grayscale → GaussianBlur → [Solarization (view 1 only)] → Normalize.
 
     Args:
@@ -35,7 +35,7 @@ def simclr(
     views = []
     for view_id in range(2):
         stages: list = [
-            RandomResizedCrop(size, seed=_seed(seed, CROP_OFFSET, view_id)),
+            DecodeRandomResizedCrop(size, seed=_seed(seed, CROP_OFFSET, view_id)),
             ToTorchImage(device=dev),
         ]
         stages.extend(_gpu_augmentations(

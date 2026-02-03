@@ -4,10 +4,10 @@ Each class owns a NumbaBatchDecoder and accepts raw batch data
 (JPEG bytes + metadata). The JPEG decode and crop/resize are fused
 into a single operation for maximum throughput.
 
-- CenterCrop: JPEG → center-crop → target_size
-- RandomResizedCrop: JPEG → random crop → resize (torchvision-compatible)
-- DirectRandomResizedCrop: JPEG → analytic random crop (no rejection sampling)
-- ResizeCrop: JPEG → resize shortest edge → center crop
+- DecodeCenterCrop: JPEG → center-crop → target_size
+- DecodeRandomResizedCrop: JPEG → random crop → resize (torchvision-compatible)
+- DecodeDirectRandomResizedCrop: JPEG → analytic random crop (no rejection sampling)
+- DecodeResizeCrop: JPEG → resize shortest edge → center crop
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ def _swap_yuv420_if_needed(decoder, image_format: str):
     return decoder
 
 
-class CenterCrop(BatchTransform):
+class DecodeCenterCrop(BatchTransform):
     """Decode JPEG batch with center crop to fixed size.
 
     Args:
@@ -66,10 +66,10 @@ class CenterCrop(BatchTransform):
         self._decoder.shutdown()
 
     def __repr__(self) -> str:
-        return f"CenterCrop(size={self.size})"
+        return f"DecodeCenterCrop(size={self.size})"
 
 
-class RandomResizedCrop(BatchTransform):
+class DecodeRandomResizedCrop(BatchTransform):
     """Decode JPEG batch with random resized crop (torchvision-compatible).
 
     Args:
@@ -115,15 +115,15 @@ class RandomResizedCrop(BatchTransform):
 
     def __repr__(self) -> str:
         return (
-            f"RandomResizedCrop(size={self.size}, scale={self.scale}, "
+            f"DecodeRandomResizedCrop(size={self.size}, scale={self.scale}, "
             f"ratio=({self.ratio[0]:.4f}, {self.ratio[1]:.4f}), seed={self.seed})"
         )
 
 
-class DirectRandomResizedCrop(BatchTransform):
+class DecodeDirectRandomResizedCrop(BatchTransform):
     """Decode JPEG batch with analytic random resized crop (no rejection sampling).
 
-    Unlike RandomResizedCrop which uses torchvision's 10-attempt rejection loop,
+    Unlike DecodeRandomResizedCrop which uses torchvision's 10-attempt rejection loop,
     this computes valid crop parameters analytically in a single pass by clamping
     the ratio range to values that guarantee a valid crop.
 
@@ -174,12 +174,12 @@ class DirectRandomResizedCrop(BatchTransform):
 
     def __repr__(self) -> str:
         return (
-            f"DirectRandomResizedCrop(size={self.size}, scale={self.scale}, "
+            f"DecodeDirectRandomResizedCrop(size={self.size}, scale={self.scale}, "
             f"ratio=({self.ratio[0]:.4f}, {self.ratio[1]:.4f}), seed={self.seed})"
         )
 
 
-class ResizeCrop(BatchTransform):
+class DecodeResizeCrop(BatchTransform):
     """Decode JPEG batch with resize shortest edge + center crop.
 
     Standard ImageNet validation transform:
@@ -221,4 +221,11 @@ class ResizeCrop(BatchTransform):
         self._decoder.shutdown()
 
     def __repr__(self) -> str:
-        return f"ResizeCrop(resize={self.resize_size}, crop={self.crop_size})"
+        return f"DecodeResizeCrop(resize={self.resize_size}, crop={self.crop_size})"
+
+
+# Backward-compatible aliases (deprecated)
+CenterCrop = DecodeCenterCrop
+RandomResizedCrop = DecodeRandomResizedCrop
+DirectRandomResizedCrop = DecodeDirectRandomResizedCrop
+ResizeCrop = DecodeResizeCrop

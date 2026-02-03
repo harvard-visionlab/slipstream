@@ -52,13 +52,21 @@ from slipstream.decoders.decode import (
     DecodeYUVPlanes,
 )
 from slipstream.decoders.crop import (
+    DecodeCenterCrop,
+    DecodeDirectRandomResizedCrop,
+    DecodeRandomResizedCrop,
+    DecodeResizeCrop,
+    # Backward-compatible aliases
     CenterCrop,
     DirectRandomResizedCrop,
     RandomResizedCrop,
     ResizeCrop,
 )
 from slipstream.decoders.multicrop import (
+    DecodeMultiRandomResizedCrop,
+    DecodeUniformMultiRandomResizedCrop,
     MultiCropPipeline,
+    # Backward-compatible aliases
     MultiCropRandomResizedCrop,
     MultiRandomResizedCrop,
 )
@@ -87,15 +95,22 @@ __all__ = [
     "DecodeOnly",
     "DecodeYUVFullRes",
     "DecodeYUVPlanes",
-    # Fused decode+crop stages
+    # Fused decode+crop stages (new names)
+    "DecodeCenterCrop",
+    "DecodeRandomResizedCrop",
+    "DecodeDirectRandomResizedCrop",
+    "DecodeResizeCrop",
+    # Multi-crop stages (new names)
+    "DecodeMultiRandomResizedCrop",
+    "DecodeUniformMultiRandomResizedCrop",
+    "MultiCropPipeline",
+    # Backward-compatible aliases (deprecated)
     "CenterCrop",
     "RandomResizedCrop",
     "DirectRandomResizedCrop",
     "ResizeCrop",
-    # Multi-crop stages
     "MultiCropRandomResizedCrop",
     "MultiRandomResizedCrop",
-    "MultiCropPipeline",
     # Utilities
     "estimate_rejection_fallback_rate",
 ]

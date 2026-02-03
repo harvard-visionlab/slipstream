@@ -52,18 +52,25 @@ from slipstream.decoders import (
     check_gpu_decoder_available,
     check_turbojpeg_available,
     get_decoder,
-    # Fused decode+crop stages
+    # Fused decode+crop stages (new names)
     DecodeOnly,
     DecodeYUVFullRes,
     DecodeYUVPlanes,
+    DecodeCenterCrop,
+    DecodeRandomResizedCrop,
+    DecodeDirectRandomResizedCrop,
+    DecodeResizeCrop,
+    DecodeMultiRandomResizedCrop,
+    DecodeUniformMultiRandomResizedCrop,
+    MultiCropPipeline,
+    estimate_rejection_fallback_rate,
+    # Backward-compatible aliases (deprecated)
     CenterCrop,
     RandomResizedCrop,
     DirectRandomResizedCrop,
     ResizeCrop,
     MultiCropRandomResizedCrop,
     MultiRandomResizedCrop,
-    MultiCropPipeline,
-    estimate_rejection_fallback_rate,
 )
 
 # Transforms (GPU batch augmentations + pipeline-level transforms)
@@ -116,19 +123,26 @@ __all__ = [
     "list_collate_fn",
     # High-level loader
     "SlipstreamLoader",
-    # Decode stages
+    # Decode stages (new names)
     "BatchTransform",
     "DecodeOnly",
     "DecodeYUVFullRes",
     "DecodeYUVPlanes",
+    "DecodeCenterCrop",
+    "DecodeRandomResizedCrop",
+    "DecodeDirectRandomResizedCrop",
+    "DecodeResizeCrop",
+    "DecodeMultiRandomResizedCrop",
+    "DecodeUniformMultiRandomResizedCrop",
+    "MultiCropPipeline",
+    "estimate_rejection_fallback_rate",
+    # Backward-compatible aliases (deprecated)
     "CenterCrop",
     "RandomResizedCrop",
     "DirectRandomResizedCrop",
     "ResizeCrop",
     "MultiCropRandomResizedCrop",
     "MultiRandomResizedCrop",
-    "MultiCropPipeline",
-    "estimate_rejection_fallback_rate",
     # Transforms
     "Compose",
     "Normalize",
