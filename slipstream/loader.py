@@ -117,9 +117,8 @@ class SlipstreamLoader:
         batches_ahead: int = 3,
         pipelines: dict[str, Sequence[BatchTransform] | BatchTransform | Callable] | None = None,
         device: int | str = 'cpu',
-        image_field: str = "image",
+        image_field: str | None = None,
         exclude_fields: list[str] | None = None,
-        image_format: str = "jpeg",
         force_rebuild: bool = False,
         presync_s3: bool = False,
         presync_s3_workers: int = 32,
@@ -147,10 +146,6 @@ class SlipstreamLoader:
                 Each pipeline can be a list of transforms, a single transform,
                 or a callable. If None, raw data is returned.
             device: Device for non-pipelined fields (labels, indices)
-            image_field: Name of the image field in the dataset
-            image_format: Image storage format to use. "jpeg" (default) uses
-                the standard JPEG cache. "yuv420" uses raw YUV420P storage
-                for ~1.7-1.9x faster decode (built on demand from JPEG cache).
             exclude_fields: List of field names to exclude from loading
             force_rebuild: Force rebuilding the optimized cache
             presync_s3: If True, use s5cmd to sync the dataset's S3 remote
@@ -245,8 +240,37 @@ class SlipstreamLoader:
         else:
             self.cache = OptimizedCache.load(cache_dir, verbose=verbose)
 
+        # Auto-detect image fields from cache field types
+        # TODO: Future enhancement - generalize prefetch banks to handle multiple
+        # image fields if the need arises. Currently only the primary image field
+        # gets pre-allocated memory banks for zero-copy async loading.
+        self._image_fields: set[str] = set()
+        for field_name, field_type in self.cache.field_types.items():
+            if field_type in ("ImageBytes", "HFImageDict"):
+                self._image_fields.add(field_name)
+
+        # Auto-select primary image field for prefetch optimization
+        if self.image_field is None and self._image_fields:
+            self.image_field = next(iter(self._image_fields))
+        elif self.image_field not in self._image_fields and self._image_fields:
+            old_field = self.image_field
+            self.image_field = next(iter(self._image_fields))
+            if verbose:
+                print(f"  Auto-detected image field: '{self.image_field}' (specified '{old_field}' not found)")
+
+        # Check if cache stores non-JPEG images as YUV420 (auto-converted during build)
+        stored_format = self.cache.get_image_format(self.image_field) if self._image_fields else "jpeg"
+        if stored_format == "yuv420" and image_format == "jpeg":
+            # Non-JPEG images were converted to YUV420 during cache build
+            # Override user's image_format to use the stored format
+            if verbose:
+                print(f"Cache stores images as YUV420 (non-JPEG source), using YUV420 decoder")
+            image_format = "yuv420"
+            self.image_format = "yuv420"
+
         # Build/load alternative image format if requested
-        if image_format == "yuv420":
+        if image_format == "yuv420" and stored_format != "yuv420":
+            # User requested YUV420 but cache stores JPEG - need sibling cache
             from slipstream.cache import build_yuv420_cache, load_yuv420_cache
 
             yuv_storage = load_yuv420_cache(self.cache.cache_dir, self.image_field)
@@ -262,20 +286,24 @@ class SlipstreamLoader:
         else:
             self._image_storage = self.cache.fields.get(self.image_field)
 
-        # Configure pipelines for the selected image format
-        if image_format != "jpeg":
-            for field_name, pipeline in self.pipelines.items():
-                if field_name != self.image_field:
-                    continue
-                if field_name in self._multi_pipeline_fields:
-                    for sub_pipeline in pipeline:
-                        for transform in sub_pipeline:
-                            if hasattr(transform, 'set_image_format'):
-                                transform.set_image_format(image_format)
-                else:
-                    for transform in pipeline:
+        # Configure pipelines for image fields based on their stored format
+        for field_name, pipeline in self.pipelines.items():
+            if field_name not in self._image_fields:
+                continue
+            # Get the stored format for this specific image field
+            field_format = self.cache.get_image_format(field_name)
+            if field_format == "jpeg":
+                continue  # JPEG is the default, no configuration needed
+
+            if field_name in self._multi_pipeline_fields:
+                for sub_pipeline in pipeline:
+                    for transform in sub_pipeline:
                         if hasattr(transform, 'set_image_format'):
-                            transform.set_image_format(image_format)
+                            transform.set_image_format(field_format)
+            else:
+                for transform in pipeline:
+                    if hasattr(transform, 'set_image_format'):
+                        transform.set_image_format(field_format)
 
         # Determine which fields to load
         self._fields_to_load = [
@@ -468,7 +496,15 @@ class SlipstreamLoader:
             for field_name in self._fields_to_load:
                 if field_name == self.image_field:
                     continue
-                field_data = self.cache.fields[field_name].load_batch(batch_indices)['data']
+
+                field_result = self.cache.fields[field_name].load_batch(batch_indices)
+
+                # Image-type fields need full dict (data, sizes, heights, widths)
+                if field_name in self._image_fields:
+                    field_data = field_result  # Full dict
+                else:
+                    field_data = field_result['data']  # Just the data
+
                 if field_name in self.pipelines:
                     batch[field_name] = self._apply_pipeline(field_name, field_data)
                 elif isinstance(field_data, np.ndarray):
@@ -533,8 +569,12 @@ class SlipstreamLoader:
                 for field_name in self._fields_to_load:
                     if field_name == self.image_field:
                         continue
-                    field_data = self.cache.fields[field_name].load_batch(batch_indices)
-                    other_fields[field_name] = field_data['data']
+                    field_result = self.cache.fields[field_name].load_batch(batch_indices)
+                    # Image-type fields need full dict (data, sizes, heights, widths)
+                    if field_name in self._image_fields:
+                        other_fields[field_name] = field_result  # Full dict
+                    else:
+                        other_fields[field_name] = field_result['data']  # Just the data
 
                 # Only pass slot index and metadata - not the actual data!
                 output_queue.put((

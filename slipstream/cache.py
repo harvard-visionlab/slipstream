@@ -110,6 +110,38 @@ def _load_variable_batch_sequential(
 
 
 # =============================================================================
+# Image Format Detection
+# =============================================================================
+
+def detect_image_format(data: bytes | np.ndarray) -> str:
+    """Detect image format from header bytes.
+
+    Args:
+        data: Image bytes (at least first 8 bytes needed for reliable detection)
+
+    Returns:
+        Format string: "jpeg", "png", or "other"
+    """
+    if isinstance(data, np.ndarray):
+        data = bytes(data[:8])
+    elif len(data) > 8:
+        data = data[:8]
+
+    if len(data) < 2:
+        return "other"
+
+    # JPEG: starts with FF D8
+    if data[0] == 0xFF and data[1] == 0xD8:
+        return "jpeg"
+
+    # PNG: starts with 89 50 4E 47 0D 0A 1A 0A
+    if len(data) >= 8 and data[:8] == b'\x89PNG\r\n\x1a\n':
+        return "png"
+
+    return "other"
+
+
+# =============================================================================
 # JPEG Utilities
 # =============================================================================
 
@@ -123,6 +155,32 @@ def find_jpeg_end(data: bytes | np.ndarray, max_len: int) -> int:
     if eoi_index != -1:
         return eoi_index + 2
     return max_len
+
+
+def find_image_end(data: bytes | np.ndarray, max_len: int) -> int:
+    """Find actual image size, handling JPEG trailing garbage.
+
+    JPEG files may have trailing garbage bytes after the FFD9 end marker.
+    PNG and other formats use the full provided length.
+
+    Args:
+        data: Image bytes
+        max_len: Maximum length to consider
+
+    Returns:
+        Actual image size in bytes
+    """
+    if isinstance(data, np.ndarray):
+        data_bytes = bytes(data[:max_len])
+    else:
+        data_bytes = data[:max_len]
+
+    # JPEG: find FFD9 end marker
+    if len(data_bytes) >= 2 and data_bytes[0] == 0xFF and data_bytes[1] == 0xD8:
+        return find_jpeg_end(data_bytes, max_len)
+
+    # PNG, GIF, BMP, WebP, etc.: use full length
+    return len(data_bytes)
 
 
 def read_jpeg_dimensions(jpeg_data: bytes | np.ndarray) -> tuple[int, int]:
@@ -172,6 +230,68 @@ def read_jpeg_dimensions(jpeg_data: bytes | np.ndarray) -> tuple[int, int]:
     return (0, 0)
 
 
+def read_png_dimensions(png_data: bytes | np.ndarray) -> tuple[int, int]:
+    """Read PNG dimensions from IHDR chunk without full decode.
+
+    Returns:
+        (width, height) tuple, or (0, 0) if parsing fails
+    """
+    if isinstance(png_data, np.ndarray):
+        png_data = bytes(png_data)
+
+    # PNG signature: 89 50 4E 47 0D 0A 1A 0A
+    if len(png_data) < 24:
+        return (0, 0)
+
+    if png_data[:8] != b'\x89PNG\r\n\x1a\n':
+        return (0, 0)
+
+    # IHDR chunk starts at byte 8
+    # Format: length (4) + type (4) + width (4) + height (4) + ...
+    # Width is at bytes 16-19, height at 20-23
+    width = int.from_bytes(png_data[16:20], 'big')
+    height = int.from_bytes(png_data[20:24], 'big')
+
+    return (width, height)
+
+
+def read_image_dimensions(image_data: bytes | np.ndarray) -> tuple[int, int]:
+    """Read image dimensions from header without full decode.
+
+    Supports JPEG, PNG. Falls back to PIL for other formats.
+
+    Returns:
+        (width, height) tuple, or (0, 0) if parsing fails
+    """
+    import io
+    from PIL import Image
+
+    if isinstance(image_data, np.ndarray):
+        image_data = bytes(image_data)
+
+    if len(image_data) < 8:
+        return (0, 0)
+
+    # Try JPEG (starts with FF D8)
+    if image_data[0] == 0xFF and image_data[1] == 0xD8:
+        dims = read_jpeg_dimensions(image_data)
+        if dims != (0, 0):
+            return dims
+
+    # Try PNG (starts with 89 50 4E 47)
+    if image_data[:4] == b'\x89PNG':
+        dims = read_png_dimensions(image_data)
+        if dims != (0, 0):
+            return dims
+
+    # Fall back to PIL for other formats (GIF, BMP, WebP, etc.)
+    try:
+        with Image.open(io.BytesIO(image_data)) as img:
+            return img.size  # (width, height)
+    except Exception:
+        return (0, 0)
+
+
 # =============================================================================
 # LitData Chunk Reading Utilities
 # =============================================================================
@@ -198,6 +318,31 @@ LITDATA_DESERIALIZERS = {
     'float': _deserialize_float,
     # 'jpeg' and 'bytes' are handled specially (raw bytes)
 }
+
+
+def _extract_image_bytes(data: bytes | dict | np.ndarray) -> bytes:
+    """Extract raw image bytes from various formats.
+
+    Handles:
+    - Raw bytes: returned as-is
+    - numpy array: converted to bytes
+    - HuggingFace image dict: {'bytes': ..., 'path': ...}
+    """
+    if isinstance(data, dict):
+        # HuggingFace image dict format
+        if 'bytes' in data and data['bytes']:
+            return data['bytes'] if isinstance(data['bytes'], bytes) else bytes(data['bytes'])
+        elif 'path' in data and data['path']:
+            with open(data['path'], 'rb') as f:
+                return f.read()
+        else:
+            raise ValueError(f"Invalid HuggingFace image dict: {data}")
+    elif isinstance(data, np.ndarray):
+        return bytes(data)
+    elif isinstance(data, bytes):
+        return data
+    else:
+        raise TypeError(f"Unsupported image data type: {type(data)}")
 
 
 def _read_all_fields_from_litdata_chunks(
@@ -387,8 +532,8 @@ def _read_all_fields_from_litdata_chunks(
 
                             if fmt == 'jpeg' or field_types[name] == 'ImageBytes':
                                 # For images, store raw bytes and parse dimensions
-                                actual_size = find_jpeg_end(field_bytes, field_size)
-                                w, h = read_jpeg_dimensions(field_bytes[:actual_size])
+                                actual_size = find_image_end(field_bytes, field_size)
+                                w, h = read_image_dimensions(field_bytes[:actual_size])
                                 samples_by_field[name].append(bytes(field_bytes[:actual_size]))
                                 image_metadata[name]['sizes'].append(actual_size)
                                 image_metadata[name]['heights'].append(h)
@@ -587,26 +732,50 @@ class ImageBytesStorage(FieldStorage):
     def build(
         cls,
         field_name: str,
-        samples: list[bytes],
+        samples: list[bytes | dict],
         output_dir: Path,
         field_type: str,
         sizes: list[int] | None = None,
         heights: list[int] | None = None,
         widths: list[int] | None = None,
-    ) -> ImageBytesStorage:
+    ) -> tuple[ImageBytesStorage, str]:
         """Build image storage from samples.
+
+        Non-JPEG images (PNG, BMP, etc.) are automatically converted to YUV420
+        format during cache building, providing ~2x faster decode than JPEG.
 
         Args:
             field_name: Name of the field
-            samples: List of image bytes
+            samples: List of image bytes or HuggingFace image dicts
             output_dir: Directory to write storage files
             field_type: Type string (for compatibility)
             sizes: Pre-computed sizes (optional, from fast path)
             heights: Pre-computed heights (optional)
             widths: Pre-computed widths (optional)
+
+        Returns:
+            Tuple of (ImageBytesStorage, image_format) where image_format is
+            "jpeg" or "yuv420".
         """
         num_samples = len(samples)
 
+        # Extract bytes from various formats (raw bytes, numpy, HF dicts)
+        # We do this once upfront to avoid repeated extraction
+        extracted_samples: list[bytes] = []
+        for data in samples:
+            extracted_samples.append(_extract_image_bytes(data))
+
+        # Detect image format from first sample
+        detected_format = detect_image_format(extracted_samples[0]) if extracted_samples else "jpeg"
+        use_yuv420_conversion = detected_format != "jpeg"
+
+        if use_yuv420_conversion:
+            # Non-JPEG path: decode → YUV420 → store
+            return cls._build_yuv420_from_samples(
+                field_name, extracted_samples, output_dir
+            )
+
+        # JPEG path: store raw bytes
         # Use pre-computed metadata if available, otherwise compute
         if sizes is not None and heights is not None and widths is not None:
             sizes_arr = np.array(sizes, dtype=np.uint64)
@@ -619,13 +788,11 @@ class ImageBytesStorage(FieldStorage):
             widths_arr = np.zeros(num_samples, dtype=np.uint32)
             max_size = 0
 
-            for i, data in enumerate(samples):
-                if isinstance(data, np.ndarray):
-                    data = bytes(data)
-                actual_size = find_jpeg_end(data, len(data))
+            for i, data in enumerate(extracted_samples):
+                actual_size = find_image_end(data, len(data))
                 sizes_arr[i] = actual_size
                 max_size = max(max_size, actual_size)
-                w, h = read_jpeg_dimensions(data[:actual_size])
+                w, h = read_image_dimensions(data[:actual_size])
                 heights_arr[i] = h
                 widths_arr[i] = w
 
@@ -644,9 +811,7 @@ class ImageBytesStorage(FieldStorage):
         # Write data file
         data_path = output_dir / f"{field_name}.bin"
         with open(data_path, 'wb') as f:
-            for i, data in enumerate(samples):
-                if isinstance(data, np.ndarray):
-                    data = bytes(data)
+            for i, data in enumerate(extracted_samples):
                 actual_size = int(sizes_arr[i])
                 f.write(data[:actual_size])
 
@@ -656,7 +821,63 @@ class ImageBytesStorage(FieldStorage):
 
         # Load and return
         data_mmap = np.memmap(data_path, dtype=np.uint8, mode='r')
-        return cls(field_name, data_mmap, metadata, max_size)
+        return cls(field_name, data_mmap, metadata, max_size), "jpeg"
+
+    @classmethod
+    def _build_yuv420_from_samples(
+        cls,
+        field_name: str,
+        extracted_samples: list[bytes],
+        output_dir: Path,
+    ) -> tuple[ImageBytesStorage, str]:
+        """Build YUV420 storage from non-JPEG image samples.
+
+        Decodes each image with PIL, converts to YUV420P format, and stores.
+        This is used for PNG, BMP, GIF, WebP, and other non-JPEG formats.
+
+        Args:
+            field_name: Name of the field
+            extracted_samples: List of raw image bytes
+            output_dir: Directory to write storage files
+
+        Returns:
+            Tuple of (ImageBytesStorage, "yuv420")
+        """
+        num_samples = len(extracted_samples)
+        metadata = np.zeros(num_samples, dtype=VARIABLE_METADATA_DTYPE)
+        current_ptr = 0
+        max_size = 0
+
+        data_path = output_dir / f"{field_name}.bin"
+
+        with open(data_path, 'wb') as f:
+            for i, img_bytes in enumerate(extracted_samples):
+                # Decode image to RGB using PIL
+                rgb = decode_image_to_rgb(img_bytes)
+
+                # Convert RGB → YUV420P
+                yuv_bytes, pad_h, pad_w = rgb_to_yuv420(rgb)
+                enc_size = len(yuv_bytes)
+
+                f.write(yuv_bytes)
+
+                metadata[i]['data_ptr'] = current_ptr
+                metadata[i]['data_size'] = enc_size
+                metadata[i]['height'] = pad_h
+                metadata[i]['width'] = pad_w
+
+                current_ptr += enc_size
+                max_size = max(max_size, enc_size)
+
+        max_size = int(max_size * 1.2)
+
+        # Write metadata
+        meta_path = output_dir / f"{field_name}.meta.npy"
+        np.save(meta_path, metadata)
+
+        # Load and return
+        data_mmap = np.memmap(data_path, dtype=np.uint8, mode='r')
+        return cls(field_name, data_mmap, metadata, max_size), "yuv420"
 
     @classmethod
     def load(cls, field_name: str, cache_dir: Path, metadata: dict) -> ImageBytesStorage:
@@ -793,7 +1014,7 @@ class StringStorage(FieldStorage):
 
 def get_storage_class(field_type: str) -> type[FieldStorage]:
     """Get the appropriate storage class for a field type."""
-    if field_type == "ImageBytes":
+    if field_type in ("ImageBytes", "HFImageDict"):
         return ImageBytesStorage
     elif field_type == "str":
         return StringStorage
@@ -803,15 +1024,52 @@ def get_storage_class(field_type: str) -> type[FieldStorage]:
         return NumpyStorage
 
 
-def _has_litdata_cache(cache_dir: Path) -> bool:
-    """Check if directory contains LitData cache structure."""
+def _has_litdata_binary_cache(cache_dir: Path) -> bool:
+    """Check if directory contains LitData binary chunk cache structure.
+
+    Returns True only for native LitData binary chunks, not Parquet-based
+    datasets (e.g., HuggingFace datasets use ParquetLoader).
+    """
     index_path = cache_dir / "index.json"
     if not index_path.exists():
         return False
-    # Also check for config.data_format which we need for fast path
+
     with open(index_path) as f:
         index = json.load(f)
-    return "config" in index and "data_format" in index.get("config", {})
+
+    config = index.get("config", {})
+    if "data_format" not in config:
+        return False
+
+    # Parquet-based datasets (HuggingFace, etc.) use ParquetLoader
+    # These have a different chunk format and need iteration path
+    item_loader = config.get("item_loader", "")
+    if item_loader == "ParquetLoader":
+        return False
+
+    # Check that chunk files are .bin files (native LitData format)
+    chunks = index.get("chunks", [])
+    if chunks:
+        first_chunk = chunks[0].get("filename", "")
+        if first_chunk.endswith(".parquet"):
+            return False
+
+    return True
+
+
+def _is_parquet_dataset(cache_dir: Path) -> bool:
+    """Check if dataset uses Parquet-based storage (e.g., HuggingFace)."""
+    index_path = cache_dir / "index.json"
+    if not index_path.exists():
+        return False
+
+    with open(index_path) as f:
+        index = json.load(f)
+
+    config = index.get("config", {})
+    item_loader = config.get("item_loader", "")
+
+    return item_loader == "ParquetLoader"
 
 
 # =============================================================================
@@ -840,11 +1098,13 @@ class OptimizedCache:
         fields: dict[str, FieldStorage],
         field_types: dict[str, str],
         num_samples: int,
+        field_metadata: dict[str, dict] | None = None,
     ) -> None:
         self.cache_dir = cache_dir
         self.fields = fields
         self.field_types = field_types
         self.num_samples = num_samples
+        self._field_metadata = field_metadata or {}
         self._indexes: dict[str, dict] = {}
 
     @classmethod
@@ -900,9 +1160,9 @@ class OptimizedCache:
         # Check for reader fast path (read_all_fields protocol)
         reader_fast_path = hasattr(dataset, 'read_all_fields') and callable(dataset.read_all_fields)
 
-        # Check for LitData fast path
+        # Check for LitData fast path (binary chunks only, not Parquet)
         litdata_cache_dir = Path(output_dir)
-        use_litdata_fast_path = _has_litdata_cache(litdata_cache_dir)
+        use_litdata_fast_path = _has_litdata_binary_cache(litdata_cache_dir)
 
         num_samples = len(dataset)
 
@@ -933,7 +1193,10 @@ class OptimizedCache:
 
         if not use_fast_path:
             if verbose:
-                print("Using iteration path (no fast path available)")
+                if _is_parquet_dataset(litdata_cache_dir):
+                    print("Using iteration path (Parquet/HuggingFace dataset)")
+                else:
+                    print("Using iteration path (no fast path available)")
 
             # Fall back to dataset iteration
             samples_by_field = {k: [] for k in field_types}
@@ -960,18 +1223,26 @@ class OptimizedCache:
 
             # Pass pre-computed metadata for image fields if available
             extra_kwargs: dict[str, Any] = {}
-            if field_type == "ImageBytes" and use_fast_path:
+            if field_type in ("ImageBytes", "HFImageDict") and use_fast_path:
                 extra_kwargs['sizes'] = samples_by_field.get(f"__{field_name}_sizes")
                 extra_kwargs['heights'] = samples_by_field.get(f"__{field_name}_heights")
                 extra_kwargs['widths'] = samples_by_field.get(f"__{field_name}_widths")
 
-            storage = storage_cls.build(
+            build_result = storage_cls.build(
                 field_name,
                 samples_by_field[field_name],
                 cache_dir,
                 field_type,
                 **extra_kwargs,
             )
+
+            # ImageBytesStorage.build() returns (storage, image_format) tuple
+            if isinstance(build_result, tuple):
+                storage, image_format = build_result
+            else:
+                storage = build_result
+                image_format = None
+
             fields[field_name] = storage
 
             meta: dict[str, Any] = {
@@ -980,6 +1251,10 @@ class OptimizedCache:
             }
             if isinstance(storage, ImageBytesStorage):
                 meta['max_size'] = storage.max_size
+                if image_format is not None:
+                    meta['image_format'] = image_format
+                    if verbose and image_format == "yuv420":
+                        print(f"  Non-JPEG images detected → converted to YUV420 format")
             field_metadata[field_name] = meta
 
         # Write manifest
@@ -995,7 +1270,7 @@ class OptimizedCache:
         if verbose:
             print(f"Cache built: {num_samples:,} samples, {len(fields)} fields")
 
-        result = cls(cache_dir, fields, field_types, num_samples)
+        result = cls(cache_dir, fields, field_types, num_samples, field_metadata)
 
         # Run sanity check
         if verbose:
@@ -1036,7 +1311,7 @@ class OptimizedCache:
         if verbose:
             print(f"Loaded cache: {num_samples:,} samples, {len(fields)} fields")
 
-        instance = cls(cache_dir, fields, field_types, num_samples)
+        instance = cls(cache_dir, fields, field_types, num_samples, field_metadata)
         instance._discover_indexes()
         if verbose and instance._indexes:
             print(f"  Loaded indexes: {list(instance._indexes.keys())}")
@@ -1090,25 +1365,46 @@ class OptimizedCache:
                 dataset_value = sample[field_name]
                 cache_value = cache_batch[field_name]['data']
 
-                if field_type == "ImageBytes":
-                    # Compare image bytes (hash for efficiency)
-                    if isinstance(dataset_value, np.ndarray):
-                        dataset_bytes = bytes(dataset_value)
+                if field_type in ("ImageBytes", "HFImageDict"):
+                    # Check if this field was converted to YUV420 (non-JPEG source)
+                    stored_format = self.get_image_format(field_name)
+
+                    if stored_format == "yuv420":
+                        # YUV420-converted images: verify dimensions match
+                        # We can't compare bytes directly since format changed
+                        dataset_bytes = _extract_image_bytes(dataset_value)
+                        dataset_w, dataset_h = read_image_dimensions(dataset_bytes)
+
+                        cache_h = int(cache_batch[field_name]['heights'][0])
+                        cache_w = int(cache_batch[field_name]['widths'][0])
+
+                        # Cache dimensions may be padded to even values
+                        padded_h = dataset_h + (dataset_h % 2)
+                        padded_w = dataset_w + (dataset_w % 2)
+
+                        if cache_h != padded_h or cache_w != padded_w:
+                            errors.append(
+                                f"Image dimension mismatch at index {idx}, "
+                                f"field '{field_name}': expected {padded_h}x{padded_w}, "
+                                f"got {cache_h}x{cache_w}"
+                            )
                     else:
-                        dataset_bytes = dataset_value
+                        # JPEG path: compare image bytes (hash for efficiency)
+                        # Extract bytes from various formats (raw bytes, numpy, HF dicts)
+                        dataset_bytes = _extract_image_bytes(dataset_value)
 
-                    cache_size = int(cache_batch[field_name]['sizes'][0])
-                    cache_bytes = bytes(cache_value[0, :cache_size])
+                        cache_size = int(cache_batch[field_name]['sizes'][0])
+                        cache_bytes = bytes(cache_value[0, :cache_size])
 
-                    # Find actual JPEG end in dataset bytes
-                    dataset_size = find_jpeg_end(dataset_bytes, len(dataset_bytes))
-                    dataset_bytes = dataset_bytes[:dataset_size]
+                        # Find actual JPEG end in dataset bytes
+                        dataset_size = find_image_end(dataset_bytes, len(dataset_bytes))
+                        dataset_bytes = dataset_bytes[:dataset_size]
 
-                    if hashlib.md5(dataset_bytes).hexdigest() != \
-                       hashlib.md5(cache_bytes).hexdigest():
-                        errors.append(
-                            f"Image mismatch at index {idx}, field '{field_name}'"
-                        )
+                        if hashlib.md5(dataset_bytes).hexdigest() != \
+                           hashlib.md5(cache_bytes).hexdigest():
+                            errors.append(
+                                f"Image mismatch at index {idx}, field '{field_name}'"
+                            )
                 elif field_type == "bytes":
                     # Variable-length bytes field (same storage as images)
                     if isinstance(dataset_value, np.ndarray):
@@ -1174,6 +1470,19 @@ class OptimizedCache:
     def get_field_type(self, field_name: str) -> str:
         """Get the type of a field."""
         return self.field_types[field_name]
+
+    def get_image_format(self, field_name: str) -> str:
+        """Get the stored image format for a field.
+
+        Args:
+            field_name: Name of the image field
+
+        Returns:
+            Format string: "jpeg" or "yuv420"
+        """
+        if field_name not in self._field_metadata:
+            return "jpeg"  # Default for backwards compatibility
+        return self._field_metadata[field_name].get('image_format', 'jpeg')
 
     def get_image_dims(self, field_name: str, idx: int) -> tuple[int, int]:
         """Get pre-stored dimensions for an image field."""
@@ -1345,6 +1654,72 @@ def write_index(
 # YUV420 Cache Utilities
 # =============================================================================
 
+def rgb_to_yuv420(rgb: np.ndarray) -> tuple[bytes, int, int]:
+    """Convert RGB array to YUV420P bytes.
+
+    Args:
+        rgb: RGB image array, shape (H, W, 3), dtype uint8
+
+    Returns:
+        Tuple of (yuv_bytes, padded_height, padded_width).
+        Dimensions are padded to even values for YUV420 subsampling.
+    """
+    h, w = rgb.shape[:2]
+    pad_h = h + (h % 2)
+    pad_w = w + (w % 2)
+
+    # Pad to even dimensions if necessary
+    if pad_h != h or pad_w != w:
+        padded = np.zeros((pad_h, pad_w, 3), dtype=np.uint8)
+        padded[:h, :w, :] = rgb
+        if pad_h > h:
+            padded[h, :w, :] = rgb[h - 1, :, :]
+        if pad_w > w:
+            padded[:h, w, :] = rgb[:, w - 1, :]
+        if pad_h > h and pad_w > w:
+            padded[h, w, :] = rgb[h - 1, w - 1, :]
+        rgb = padded
+
+    r = rgb[:, :, 0].astype(np.float32)
+    g = rgb[:, :, 1].astype(np.float32)
+    b = rgb[:, :, 2].astype(np.float32)
+
+    # BT.601 conversion
+    y = np.clip(0.299 * r + 0.587 * g + 0.114 * b, 0, 255).astype(np.uint8)
+    u = np.clip(-0.168736 * r - 0.331264 * g + 0.5 * b + 128.0, 0, 255).astype(np.uint8)
+    v = np.clip(0.5 * r - 0.418688 * g - 0.081312 * b + 128.0, 0, 255).astype(np.uint8)
+
+    # Subsample U/V (4:2:0)
+    u_sub = u.reshape(pad_h // 2, 2, pad_w // 2, 2).mean(axis=(1, 3))
+    v_sub = v.reshape(pad_h // 2, 2, pad_w // 2, 2).mean(axis=(1, 3))
+    u_sub = np.clip(u_sub, 0, 255).astype(np.uint8)
+    v_sub = np.clip(v_sub, 0, 255).astype(np.uint8)
+
+    yuv_bytes = y.tobytes() + u_sub.tobytes() + v_sub.tobytes()
+    return yuv_bytes, pad_h, pad_w
+
+
+def decode_image_to_rgb(image_bytes: bytes) -> np.ndarray:
+    """Decode image bytes to RGB array using PIL.
+
+    Handles any format PIL supports: PNG, BMP, GIF, WebP, etc.
+
+    Args:
+        image_bytes: Raw image file bytes
+
+    Returns:
+        RGB array, shape (H, W, 3), dtype uint8
+    """
+    import io
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(image_bytes))
+    # Convert to RGB (handles grayscale, RGBA, palette modes, etc.)
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    return np.array(img, dtype=np.uint8)
+
+
 def load_yuv420_cache(
     cache_dir: Path,
     image_field: str = "image",
@@ -1498,4 +1873,7 @@ __all__ = [
     "write_index",
     "build_yuv420_cache",
     "load_yuv420_cache",
+    "detect_image_format",
+    "rgb_to_yuv420",
+    "decode_image_to_rgb",
 ]

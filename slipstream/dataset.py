@@ -46,6 +46,8 @@ __all__ = [
     "SlipstreamDataset",
     "decode_image",
     "is_image_bytes",
+    "is_hf_image_dict",
+    "extract_hf_image_bytes",
     "ensure_lightning_symlink_on_cluster",
     "get_default_cache_dir",
     "list_collate_fn",
@@ -188,8 +190,54 @@ def ensure_lightning_symlink_on_cluster() -> None:
         ) from e
 
 
-def is_image_bytes(data_bytes: bytes) -> bool:
-    """Check if bytes represent a valid image by attempting to open with PIL.
+def is_hf_image_dict(value: Any) -> bool:
+    """Check if value is a HuggingFace image dict format.
+
+    HuggingFace stores images in Parquet as dicts with 'bytes' and/or 'path' keys:
+        {'bytes': b'\\x89PNG...', 'path': None}  # inline bytes
+        {'bytes': None, 'path': '/path/to/image.jpg'}  # path reference
+
+    Args:
+        value: Value to check.
+
+    Returns:
+        True if value matches the HuggingFace image dict format.
+    """
+    if not isinstance(value, dict):
+        return False
+    if 'bytes' not in value:
+        return False
+    # Either has bytes data, or has a path to read from
+    return isinstance(value.get('bytes'), bytes) or isinstance(value.get('path'), str)
+
+
+def extract_hf_image_bytes(value: dict) -> bytes:
+    """Extract raw image bytes from a HuggingFace image dict.
+
+    Args:
+        value: HuggingFace image dict {'bytes': ..., 'path': ...}
+
+    Returns:
+        Raw image bytes.
+
+    Raises:
+        ValueError: If dict doesn't contain valid image data.
+    """
+    if 'bytes' in value and value['bytes']:
+        return value['bytes'] if isinstance(value['bytes'], bytes) else bytes(value['bytes'])
+    elif 'path' in value and value['path']:
+        with open(value['path'], 'rb') as f:
+            return f.read()
+    else:
+        raise ValueError(f"Invalid HuggingFace image dict: {value}")
+
+
+def is_image_bytes(data: bytes | dict) -> bool:
+    """Check if data represents a valid image.
+
+    Handles:
+    - Raw bytes (JPEG, PNG, etc.)
+    - HuggingFace image dicts: {'bytes': ..., 'path': ...}
 
     Uses PIL's verify() which checks file structure without decoding pixels.
     This is robust and handles edge cases well.
@@ -198,56 +246,81 @@ def is_image_bytes(data_bytes: bytes) -> bool:
     impact is negligible.
 
     Args:
-        data_bytes: Raw bytes to check.
+        data: Raw bytes or HuggingFace image dict to check.
 
     Returns:
-        True if bytes can be opened as an image, False otherwise.
+        True if data can be opened as an image, False otherwise.
     """
+    # Handle HuggingFace image dict format
+    if isinstance(data, dict):
+        if 'bytes' in data and isinstance(data['bytes'], bytes):
+            data = data['bytes']
+        elif 'path' in data and data['path']:
+            # Path-based image, assume valid if path exists
+            return True
+        else:
+            return False
+
+    if not isinstance(data, bytes):
+        return False
+
     try:
-        img = Image.open(io.BytesIO(data_bytes))
+        img = Image.open(io.BytesIO(data))
         img.verify()
         return True
     except Exception:
         return False
 
 
-def decode_image(image_bytes: bytes | np.ndarray | torch.Tensor | Image.Image,
+def decode_image(image_data: bytes | dict | np.ndarray | torch.Tensor | Image.Image,
                  to_pil: bool = False) -> torch.Tensor | Image.Image:
-    """Decode image bytes to tensor (CHW format) or PIL Image.
+    """Decode image data to tensor (CHW format) or PIL Image.
 
     Handles various input types gracefully:
     - torch.Tensor: returned as-is (or converted to PIL)
     - PIL.Image: converted to tensor CHW (or returned as-is)
     - np.ndarray (HWC): converted to tensor CHW (or PIL)
     - bytes or np.ndarray (1D): decoded using torchvision
+    - HuggingFace image dict: {'bytes': ..., 'path': ...}
 
     Args:
-        image_bytes: Image data in various formats.
+        image_data: Image data in various formats.
         to_pil: If True, return PIL Image instead of tensor.
 
     Returns:
         RGB image as torch.Tensor in CHW format (uint8 [0-255]) or PIL Image.
     """
+    # Handle HuggingFace image dict format
+    if isinstance(image_data, dict):
+        if 'bytes' in image_data and image_data['bytes']:
+            image_data = image_data['bytes']
+        elif 'path' in image_data and image_data['path']:
+            # Read from path
+            with open(image_data['path'], 'rb') as f:
+                image_data = f.read()
+        else:
+            raise ValueError(f"Invalid HuggingFace image dict: {image_data}")
+
     # Already a tensor - return as-is or convert to PIL
-    if isinstance(image_bytes, torch.Tensor):
-        return tvf.to_pil_image(image_bytes) if to_pil else image_bytes
+    if isinstance(image_data, torch.Tensor):
+        return tvf.to_pil_image(image_data) if to_pil else image_data
 
     # Already a PIL Image - convert to tensor or return as-is
-    if isinstance(image_bytes, Image.Image):
-        return image_bytes if to_pil else tvf.pil_to_tensor(image_bytes)
+    if isinstance(image_data, Image.Image):
+        return image_data if to_pil else tvf.pil_to_tensor(image_data)
 
     # Already a decoded numpy array (HWC) - convert to tensor (CHW) or PIL
-    if isinstance(image_bytes, np.ndarray) and image_bytes.ndim > 1:
+    if isinstance(image_data, np.ndarray) and image_data.ndim > 1:
         if to_pil:
-            return Image.fromarray(image_bytes)
-        return torch.from_numpy(image_bytes).permute(2, 0, 1)
+            return Image.fromarray(image_data)
+        return torch.from_numpy(image_data).permute(2, 0, 1)
 
     # Numpy array of bytes - convert to Python bytes
-    if isinstance(image_bytes, np.ndarray):
-        image_bytes = image_bytes.tobytes()
+    if isinstance(image_data, np.ndarray):
+        image_data = image_data.tobytes()
 
     # Decode bytes to tensor using torchvision (uses libjpeg-turbo backend)
-    img_buffer = torch.frombuffer(image_bytes, dtype=torch.uint8)
+    img_buffer = torch.frombuffer(image_data, dtype=torch.uint8)
     img = tv_decode_image(img_buffer, mode=ImageReadMode.RGB)
 
     if to_pil:
@@ -263,15 +336,19 @@ class SlipstreamDataset(LitDataStreamingDataset):
     - Automatic field type detection: Identifies image fields automatically
     - Pipeline support: Per-field transforms for flexible data processing
     - Cluster integration: Auto-setup for visionlab SLURM clusters
+    - HuggingFace support: Stream datasets directly via hf:// URIs
 
     Args:
-        remote_dir: Remote URL (S3, GCS, etc.) for the dataset.
-            Example: "s3://bucket/dataset/train/"
+        remote_dir: Remote URL (S3, GCS, HuggingFace, etc.) for the dataset.
+            Examples:
+                - "s3://bucket/dataset/train/"
+                - "hf://datasets/cifar10/data"
         cache_dir: Local directory to cache downloaded data.
             Defaults to lab shared cache on clusters, ~/.cache/slipstream locally.
         local_dir: Path to local dataset (no remote). Mutually exclusive with remote_dir.
-        input_dir: Direct LitData Dir object for power users.
+        input_dir: Direct LitData Dir object or URI string for power users.
             If provided, remote_dir/cache_dir/local_dir are ignored.
+            Supports: s3://, gs://, http://, https://, hf://
         decode_images: If True, automatically decode image bytes to tensors/PIL.
         to_pil: If True and decode_images=True, return PIL Images instead of tensors.
         transform: Global transform applied to all image fields.
@@ -292,6 +369,12 @@ class SlipstreamDataset(LitDataStreamingDataset):
         )
         sample = dataset[0]
         pil_image = sample['image']  # PIL Image
+
+        # HuggingFace dataset (via input_dir)
+        dataset = SlipstreamDataset(
+            input_dir="hf://datasets/cifar10/data",
+            decode_images=True,
+        )
 
         # Training usage with custom pipeline
         dataset = SlipstreamDataset(
@@ -399,7 +482,7 @@ class SlipstreamDataset(LitDataStreamingDataset):
         # String path (local directory)
         if isinstance(self.input_dir, str):
             # Check if it's a local path vs remote URL
-            if not self.input_dir.startswith(("s3://", "gs://", "http://", "https://")):
+            if not self.input_dir.startswith(("s3://", "gs://", "http://", "https://", "hf://")):
                 return pathlib.Path(self.input_dir)
 
         # Remote URL without explicit cache - LitData uses default cache location
@@ -420,9 +503,9 @@ class SlipstreamDataset(LitDataStreamingDataset):
         if hasattr(self.input_dir, "url") and self.input_dir.url:
             return self.input_dir.url
 
-        # String that looks like a URL
+        # String that looks like a URL (including HuggingFace hf://)
         if isinstance(self.input_dir, str):
-            if self.input_dir.startswith(("s3://", "gs://", "http://", "https://")):
+            if self.input_dir.startswith(("s3://", "gs://", "http://", "https://", "hf://")):
                 return self.input_dir
 
         return None
@@ -436,7 +519,7 @@ class SlipstreamDataset(LitDataStreamingDataset):
         """Resolve input_dir from intuitive API parameters.
 
         Args:
-            remote_dir: Remote URL for the dataset.
+            remote_dir: Remote URL for the dataset (s3://, gs://, hf://, etc.).
             cache_dir: Local cache directory.
             local_dir: Local-only dataset path.
 
@@ -468,7 +551,8 @@ class SlipstreamDataset(LitDataStreamingDataset):
         # Case 3: Neither specified - error
         raise ValueError(
             "Must specify one of: 'remote_dir', 'local_dir', or 'input_dir'. "
-            "Example: SlipstreamDataset(remote_dir='s3://bucket/dataset/')"
+            "Example: SlipstreamDataset(remote_dir='s3://bucket/dataset/')\n"
+            "         SlipstreamDataset(input_dir='hf://datasets/user/dataset/data')"
         )
 
     def _resolve_storage_options(
@@ -503,6 +587,10 @@ class SlipstreamDataset(LitDataStreamingDataset):
         Sets:
             self.field_types: Dict mapping field names to type info.
             self.image_fields: List of field names containing image bytes.
+
+        Handles:
+            - Raw bytes (JPEG, PNG, etc.)
+            - HuggingFace image dicts: {'bytes': ..., 'path': ...}
         """
         # Get raw sample without transforms
         raw_sample = super().__getitem__(0)
@@ -519,6 +607,13 @@ class SlipstreamDataset(LitDataStreamingDataset):
                         self.image_fields.append(key)
                     else:
                         self.field_types[key] = bytes
+                elif isinstance(value, dict) and is_hf_image_dict(value):
+                    # HuggingFace image dict format
+                    if is_image_bytes(value):
+                        self.field_types[key] = "HFImageDict"
+                        self.image_fields.append(key)
+                    else:
+                        self.field_types[key] = dict
                 else:
                     self.field_types[key] = type(value)
         else:
@@ -530,6 +625,13 @@ class SlipstreamDataset(LitDataStreamingDataset):
                         self.image_fields.append(idx)
                     else:
                         self.field_types[idx] = bytes
+                elif isinstance(value, dict) and is_hf_image_dict(value):
+                    # HuggingFace image dict format
+                    if is_image_bytes(value):
+                        self.field_types[idx] = "HFImageDict"
+                        self.image_fields.append(idx)
+                    else:
+                        self.field_types[idx] = dict
                 else:
                     self.field_types[idx] = type(value)
 
@@ -544,6 +646,9 @@ class SlipstreamDataset(LitDataStreamingDataset):
         """
         sample = super().__getitem__(idx)
 
+        # Normalize HF image dicts to raw bytes (for downstream compatibility)
+        sample = self._normalize_hf_images(sample)
+
         # Decode images if requested
         if self.decode_images:
             sample = self._decode_images(sample)
@@ -556,6 +661,27 @@ class SlipstreamDataset(LitDataStreamingDataset):
         if self.pipelines is not None:
             sample = self._apply_pipelines(sample)
 
+        return sample
+
+    def _normalize_hf_images(self, sample: dict | tuple) -> dict | tuple:
+        """Convert HuggingFace image dicts to raw bytes.
+
+        This ensures downstream code (loaders, decoders) only sees raw bytes,
+        not HF-specific dict format.
+        """
+        if hasattr(sample, "items"):
+            for key in self.image_fields:
+                if key in sample:
+                    value = sample[key]
+                    if isinstance(value, dict) and is_hf_image_dict(value):
+                        sample[key] = extract_hf_image_bytes(value)
+        else:
+            sample = list(sample)
+            for idx in self.image_fields:
+                value = sample[idx]
+                if isinstance(value, dict) and is_hf_image_dict(value):
+                    sample[idx] = extract_hf_image_bytes(value)
+            sample = tuple(sample)
         return sample
 
     def _decode_images(self, sample: dict | tuple) -> dict | tuple:
@@ -615,7 +741,7 @@ class SlipstreamDataset(LitDataStreamingDataset):
                     lines.append(f"{indent}remote_dir='{self.input_dir.url}',")
             elif isinstance(self.input_dir, str):
                 # String: could be local path or remote URL
-                if self.input_dir.startswith(("s3://", "gs://", "http://", "https://")):
+                if self.input_dir.startswith(("s3://", "gs://", "http://", "https://", "hf://")):
                     lines.append(f"{indent}remote_dir='{self.input_dir}',")
                     lines.append(f"{indent}cache_dir='~/.lightning/ (LitData default)',")
                 else:

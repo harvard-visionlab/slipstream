@@ -93,6 +93,26 @@ Ported pipeline presets matching lrm-ssl yaml configs:
 5. ✅ `lejepa` - L-JEPA 2 global + 4 local matching ssl_global2_local4_ratio1.yaml
 6. ✅ `multicrop` - Flexible global+local crops supporting all ssl_globalN_localM configs
 
+### Phase 6: HuggingFace Dataset Support ✅
+
+1. ✅ **HuggingFace `hf://` URI support** - Load datasets directly via LitData integration
+   ```python
+   dataset = SlipstreamDataset(input_dir="hf://datasets/uoft-cs/cifar10/plain_text/")
+   ```
+
+2. ✅ **Automatic non-JPEG → YUV420 conversion** - PNG, BMP, GIF, WebP images are automatically converted to YUV420 format during cache build for ~2x faster decode
+   - Detection via `detect_image_format()` from header bytes
+   - Conversion: PIL decode → RGB → YUV420P bytes
+   - Stored format tracked in manifest (`image_format: "yuv420"`)
+   - Loader auto-detects and uses YUV420 decoder
+
+3. ✅ **Auto-detection of image fields** - `SlipstreamLoader` no longer requires `image_field` parameter
+   - Auto-detects from cache field types (`ImageBytes`, `HFImageDict`)
+   - All image fields get proper handling (full dict with sizes/heights/widths)
+   - Pipelines auto-configured based on each field's stored format
+
+4. ✅ **HuggingFace image dict support** - Handles `{'bytes': ..., 'path': ...}` format
+
 ---
 
 ## Benchmark Results Summary

@@ -106,8 +106,8 @@ All presets accept: `size`, `seed`, `device`, `dtype`, `normalize`
 ### Remaining Tasks
 
 1. ⬜ **YUV crop pipelines**: `CenterCropYUV`, `RandomResizedCropYUV` — crop+resize while keeping YUV colorspace
-2. ⬜ **Pipeline demo notebook**: Demonstrate presets and common training workflows
-3. ⬜ **Additional dataset sources**: `.from_imagefolder()`, `.from_huggingface()`
+2. ✅ **HuggingFace support**: `hf://` URIs work via LitData integration
+3. ⬜ **ImageFolder reader**: `ImageFolderReader` for torchvision-style directories
 4. ⬜ **End-to-end correctness tests**: FFCV/LitData → slip cache verification
 5. ⬜ **Documentation**: README, API docs, performance guide
 
@@ -156,9 +156,13 @@ Never add `.sum()`, `.item()`, etc. to benchmark loops. On CPU, operations are s
 from slipstream import SlipstreamDataset, SlipstreamLoader
 from slipstream.pipelines import supervised_train, lejepa
 
-# Supervised training
+# Supervised training (S3)
 dataset = SlipstreamDataset(input_dir="s3://bucket/dataset/", decode_images=False)
 loader = SlipstreamLoader(dataset, batch_size=256, pipelines=supervised_train(size=224))
+
+# HuggingFace dataset (hf:// URI)
+dataset = SlipstreamDataset(input_dir="hf://datasets/cifar10/data", decode_images=True)
+sample = dataset[0]  # {'img': PIL.Image, 'label': 0}
 
 # SSL multi-crop (L-JEPA style)
 loader = SlipstreamLoader(dataset, batch_size=256, pipelines=lejepa(seed=42, device='cuda'))
