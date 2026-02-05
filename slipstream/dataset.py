@@ -31,16 +31,13 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from litdata import StreamingDataset as LitDataStreamingDataset
-from litdata.streaming.resolver import Dir
-from litdata.utilities.dataset_utilities import _read_updated_at
 from PIL import Image
 from torchvision.io import ImageReadMode
 from torchvision.io import decode_image as tv_decode_image
 from torchvision.transforms import functional as tvf
 
 if TYPE_CHECKING:
-    pass
+    from litdata.streaming.resolver import Dir
 
 __all__ = [
     "SlipstreamDataset",
@@ -51,6 +48,8 @@ __all__ = [
     "ensure_lightning_symlink_on_cluster",
     "get_default_cache_dir",
     "list_collate_fn",
+    "detect_local_dataset_type",
+    "is_imagefolder_structure",
 ]
 
 
@@ -328,24 +327,177 @@ def decode_image(image_data: bytes | dict | np.ndarray | torch.Tensor | Image.Im
     return img
 
 
-class SlipstreamDataset(LitDataStreamingDataset):
+# Supported image extensions for ImageFolder detection
+_IMG_EXTENSIONS = {".jpg", ".jpeg", ".png", ".ppm", ".bmp", ".pgm", ".tif", ".tiff", ".webp"}
+
+
+def detect_local_dataset_type(path: pathlib.Path | str) -> str:
+    """Detect dataset type from local directory structure.
+
+    Resolution order:
+    1. Streaming dataset: Has index.json with LitData structure
+    2. HuggingFace dataset: Has index.json with item_loader="ParquetLoader"
+    3. ImageFolder dataset: Has subdirectories with image files
+    4. Unknown: None of the above
+
+    Args:
+        path: Local directory path to check
+
+    Returns:
+        Dataset type string: "streaming", "huggingface", "imagefolder", or "unknown"
+
+    Example:
+        >>> detect_local_dataset_type("/path/to/imagenet/val")
+        'imagefolder'
+        >>> detect_local_dataset_type("/path/to/litdata/dataset")
+        'streaming'
+    """
+    import json
+
+    path = pathlib.Path(path)
+    if not path.exists() or not path.is_dir():
+        return "unknown"
+
+    index_path = path / "index.json"
+
+    if index_path.exists():
+        try:
+            with open(index_path) as f:
+                index = json.load(f)
+
+            config = index.get("config", {})
+            if config.get("item_loader") == "ParquetLoader":
+                return "huggingface"
+            if "data_format" in config:
+                return "streaming"
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Check for ImageFolder structure (subdirs with images)
+    if is_imagefolder_structure(path):
+        return "imagefolder"
+
+    return "unknown"
+
+
+def is_imagefolder_structure(path: pathlib.Path | str) -> bool:
+    """Check if path has ImageFolder structure (class subdirs with images).
+
+    An ImageFolder has the structure:
+        root/
+            class1/
+                img1.jpg
+                img2.jpg
+            class2/
+                img3.jpg
+                ...
+
+    Args:
+        path: Directory path to check
+
+    Returns:
+        True if path contains subdirectories with image files.
+    """
+    path = pathlib.Path(path)
+    if not path.is_dir():
+        return False
+
+    subdirs = [d for d in path.iterdir() if d.is_dir()]
+    if not subdirs:
+        return False
+
+    # Check if subdirs contain image files (sample first 3 subdirs)
+    for subdir in subdirs[:3]:
+        files = list(subdir.iterdir())[:10]  # Sample first 10 files
+        if any(f.suffix.lower() in _IMG_EXTENSIONS for f in files):
+            return True
+
+    return False
+
+
+# Tar archive extensions for S3 ImageFolder detection
+_TAR_EXTENSIONS = {".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz"}
+
+
+def _is_tar_archive(path: str) -> bool:
+    """Check if path looks like a tar archive."""
+    path_lower = path.lower()
+    for ext in _TAR_EXTENSIONS:
+        if path_lower.endswith(ext):
+            return True
+    return False
+
+
+def _is_ffcv_source(source: str | None) -> bool:
+    """Check if source is an FFCV .beton/.ffcv file."""
+    if source is None:
+        return False
+    path_part = str(source).split("?")[0]  # strip query params
+    return path_part.endswith((".ffcv", ".beton"))
+
+
+def _is_imagefolder_source(source: str | None) -> bool:
+    """Check if source should be handled as an ImageFolder dataset.
+
+    Returns True for:
+    - S3 tar archives (s3://bucket/path/data.tar.gz)
+    - Local tar archives (/path/to/data.tar.gz)
+    - Local ImageFolder directories
+
+    Returns False for:
+    - Streaming datasets (s3://bucket/path/ with index.json)
+    - HuggingFace datasets (hf://...)
+    - None
+    """
+    if source is None:
+        return False
+
+    source_str = str(source)
+
+    # HuggingFace datasets are never ImageFolders
+    if source_str.startswith("hf://"):
+        return False
+
+    # Check for tar archive (S3 or local)
+    if _is_tar_archive(source_str):
+        return True
+
+    # For local paths, check if it's an ImageFolder structure
+    if not source_str.startswith(("s3://", "gs://", "http://", "https://")):
+        path = pathlib.Path(source_str)
+        if path.exists() and path.is_dir():
+            # Check if it's a streaming dataset (has index.json)
+            if (path / "index.json").exists():
+                return False
+            # Check if it's an ImageFolder
+            return is_imagefolder_structure(path)
+
+    return False
+
+
+class SlipstreamDataset(torch.utils.data.Dataset):
     """High-performance streaming dataset for PyTorch vision workloads.
 
-    SlipstreamDataset wraps LitData's StreamingDataset with:
-    - Intuitive API: Use `remote_dir` and `cache_dir` instead of `Dir(...)`
-    - Automatic field type detection: Identifies image fields automatically
-    - Pipeline support: Per-field transforms for flexible data processing
-    - Cluster integration: Auto-setup for visionlab SLURM clusters
-    - HuggingFace support: Stream datasets directly via hf:// URIs
+    SlipstreamDataset automatically detects and handles multiple dataset formats:
+    - **Streaming datasets**: LitData format with index.json (s3://, local paths)
+    - **HuggingFace datasets**: Via hf:// URIs
+    - **ImageFolder datasets**: Local directories with class subdirectories
+    - **S3 tar archives**: Auto-download, hash, and extract (.tar, .tar.gz, etc.)
+
+    Uses composition: always returns a SlipstreamDataset wrapping an internal
+    ``_reader`` that handles source-specific I/O. Processing logic (decode,
+    transform, pipelines) lives here and is shared across all source types.
 
     Args:
         remote_dir: Remote URL (S3, GCS, HuggingFace, etc.) for the dataset.
             Examples:
-                - "s3://bucket/dataset/train/"
-                - "hf://datasets/cifar10/data"
+                - "s3://bucket/dataset/train/" (streaming)
+                - "s3://bucket/imagenet/val.tar.gz" (ImageFolder tar)
+                - "hf://datasets/cifar10/data" (HuggingFace)
         cache_dir: Local directory to cache downloaded data.
             Defaults to lab shared cache on clusters, ~/.cache/slipstream locally.
         local_dir: Path to local dataset (no remote). Mutually exclusive with remote_dir.
+            Auto-detects streaming vs ImageFolder format.
         input_dir: Direct LitData Dir object or URI string for power users.
             If provided, remote_dir/cache_dir/local_dir are ignored.
             Supports: s3://, gs://, http://, https://, hf://
@@ -358,29 +510,27 @@ class SlipstreamDataset(LitDataStreamingDataset):
         profile: Storage profile ('wasabi' for Wasabi S3-compatible storage).
         storage_options: Custom storage options dict for S3/cloud access.
         max_cache_size: Maximum cache size (e.g., '350GB'). Default: '350GB'.
-        **kwargs: Additional arguments passed to LitData StreamingDataset.
+        **kwargs: Additional arguments passed to the underlying reader.
 
     Example:
-        # Simple usage with automatic decoding
+        # Streaming dataset (LitData format)
         dataset = SlipstreamDataset(
             remote_dir="s3://visionlab-datasets/imagenet1k/.../val/",
             decode_images=True,
-            to_pil=True,
         )
-        sample = dataset[0]
-        pil_image = sample['image']  # PIL Image
 
-        # HuggingFace dataset (via input_dir)
+        # S3 tar archive (auto-download and extract)
+        dataset = SlipstreamDataset(
+            remote_dir="s3://visionlab-datasets/imagenet1k-raw/val.tar.gz",
+        )
+
+        # Local ImageFolder (auto-detected)
+        dataset = SlipstreamDataset(local_dir="/path/to/imagenet/val")
+
+        # HuggingFace dataset
         dataset = SlipstreamDataset(
             input_dir="hf://datasets/cifar10/data",
             decode_images=True,
-        )
-
-        # Training usage with custom pipeline
-        dataset = SlipstreamDataset(
-            remote_dir="s3://visionlab-datasets/imagenet1k/.../train/",
-            decode_images=False,
-            pipelines={"image": my_decoder_pipeline},
         )
     """
 
@@ -404,8 +554,7 @@ class SlipstreamDataset(LitDataStreamingDataset):
         max_cache_size: str = "350GB",
         **kwargs: Any,
     ) -> None:
-        # Ensure cluster symlinks are set up
-        ensure_lightning_symlink_on_cluster()
+        super().__init__()
 
         # Validate mutually exclusive options
         if pipelines is not None and transform is not None:
@@ -415,225 +564,132 @@ class SlipstreamDataset(LitDataStreamingDataset):
                 "'pipelines' for per-field transforms."
             )
 
-        # Store our options
+        # Store processing options
         self.pipelines = dict(pipelines) if pipelines is not None else None
         self.decode_images = decode_images
         self.to_pil = to_pil
+        self._transform = transform
 
-        # Resolve input_dir from intuitive API if not provided directly
-        if input_dir is None:
-            input_dir = self._resolve_input_dir(remote_dir, cache_dir, local_dir)
-
-        # Set up storage options
-        storage_options = self._resolve_storage_options(storage_options, profile)
-
-        # Initialize parent class
-        super().__init__(
+        # Create the source-specific reader
+        self._reader = self._create_reader(
+            remote_dir=remote_dir,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
             input_dir=input_dir,
-            transform=transform,
+            expected_version=expected_version,
+            profile=profile,
             storage_options=storage_options,
             max_cache_size=max_cache_size,
             **kwargs,
         )
 
-        # Store transform for later use (parent may modify it)
-        self._transform = transform
+    def _create_reader(
+        self,
+        remote_dir: str | None = None,
+        cache_dir: str | pathlib.Path | None = None,
+        local_dir: str | pathlib.Path | None = None,
+        input_dir: Dir | str | None = None,
+        expected_version: str | None = None,
+        profile: str | None = None,
+        storage_options: dict[str, Any] | None = None,
+        max_cache_size: str = "350GB",
+        **kwargs: Any,
+    ) -> Any:
+        """Create the appropriate reader based on data source.
 
-        # Get dataset version
-        self.version = (
-            _read_updated_at(self.input_dir) if self.input_dir is not None else None
-        )
+        Returns:
+            A reader instance (StreamingReader or SlipstreamImageFolder).
+        """
+        # Determine the source to check
+        source = input_dir or remote_dir or local_dir
 
-        # Validate version if expected
-        if expected_version is not None and self.version != str(expected_version):
-            raise ValueError(
-                f"Dataset version mismatch: expected '{expected_version}', "
-                f"got '{self.version}'"
+        # Check for FFCV .beton/.ffcv files
+        if source is not None and _is_ffcv_source(str(source)):
+            from slipstream.readers.ffcv import FFCVFileReader
+
+            verbose = kwargs.pop("verbose", True)
+            return FFCVFileReader(
+                ffcv_path=str(source),
+                cache_dir=cache_dir,
+                verbose=verbose,
             )
 
-        # Detect field types from first sample
-        self._set_field_types()
+        # Check if this should be an ImageFolder dataset
+        if source is not None and _is_imagefolder_source(str(source)):
+            from slipstream.readers.imagefolder import open_imagefolder
+
+            # Build s3_config from storage_options if present
+            s3_config = None
+            if storage_options:
+                s3_config = {
+                    "endpoint_url": storage_options.get("S3_ENDPOINT_URL"),
+                }
+
+            # Resolve cache_dir for imagefolder
+            if cache_dir is None:
+                cache_dir = get_default_cache_dir() / "slipstream" / "imagefolder"
+
+            verbose = kwargs.pop("verbose", True)
+
+            return open_imagefolder(
+                source=str(source),
+                cache_dir=cache_dir,
+                s3_config=s3_config,
+                verbose=verbose,
+            )
+
+        # Default: streaming reader (LitData)
+        from slipstream.readers.streaming import StreamingReader
+
+        return StreamingReader(
+            remote_dir=remote_dir,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+            input_dir=input_dir,
+            profile=profile,
+            storage_options=storage_options,
+            max_cache_size=max_cache_size,
+            expected_version=expected_version,
+            **kwargs,
+        )
+
+    # ---- Delegated properties ----
+
+    @property
+    def field_types(self) -> dict[str | int, str | type]:
+        """Field type mapping from the underlying reader."""
+        return self._reader.field_types
+
+    @property
+    def image_fields(self) -> list[str | int]:
+        """List of image field names from the underlying reader."""
+        return self._reader.image_fields
 
     @property
     def cache_path(self) -> pathlib.Path | None:
-        """Get the local cache directory path.
+        """Get the local cache directory path."""
+        return self._reader.cache_path
 
-        Note: This is named cache_path (not cache_dir) to avoid conflicting
-        with the parent class's cache_dir attribute.
+    def __len__(self) -> int:
+        return len(self._reader)
 
-        Returns:
-            Path to the local cache directory, or None if using remote-only mode.
+    def __getattr__(self, name: str) -> Any:
+        """Delegate attribute access to the underlying reader for reader-specific attrs.
+
+        This handles attributes like: classes, samples, input_dir, version,
+        remote_dir, on_demand_bytes, cache, _dataset, etc.
         """
-        # First check if parent class set cache_dir (from LitData's internal resolution)
-        parent_cache = getattr(super(), 'cache_dir', None)
-        if parent_cache is not None:
-            if hasattr(parent_cache, 'path'):
-                return pathlib.Path(parent_cache.path)
-            if isinstance(parent_cache, str):
-                return pathlib.Path(parent_cache)
+        # Avoid infinite recursion during init (before _reader is set)
+        if name == "_reader":
+            raise AttributeError(name)
+        try:
+            return getattr(self._reader, name)
+        except AttributeError:
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{name}'"
+            ) from None
 
-        if self.input_dir is None:
-            return None
-
-        # Dir object with explicit cache
-        if hasattr(self.input_dir, "path") and self.input_dir.path:
-            return pathlib.Path(self.input_dir.path)
-
-        # String path (local directory)
-        if isinstance(self.input_dir, str):
-            # Check if it's a local path vs remote URL
-            if not self.input_dir.startswith(("s3://", "gs://", "http://", "https://", "hf://")):
-                return pathlib.Path(self.input_dir)
-
-        # Remote URL without explicit cache - LitData uses default cache location
-        # We can try to find it, but it's complex (hash-based subdirectories)
-        return None
-
-    @property
-    def remote_dir(self) -> str | None:
-        """Get the remote URL if using remote storage.
-
-        Returns:
-            Remote URL string, or None if using local-only mode.
-        """
-        if self.input_dir is None:
-            return None
-
-        # Dir object with URL
-        if hasattr(self.input_dir, "url") and self.input_dir.url:
-            return self.input_dir.url
-
-        # String that looks like a URL (including HuggingFace hf://)
-        if isinstance(self.input_dir, str):
-            if self.input_dir.startswith(("s3://", "gs://", "http://", "https://", "hf://")):
-                return self.input_dir
-
-        return None
-
-    def _resolve_input_dir(
-        self,
-        remote_dir: str | None,
-        cache_dir: str | pathlib.Path | None,
-        local_dir: str | pathlib.Path | None,
-    ) -> Dir | str:
-        """Resolve input_dir from intuitive API parameters.
-
-        Args:
-            remote_dir: Remote URL for the dataset (s3://, gs://, hf://, etc.).
-            cache_dir: Local cache directory.
-            local_dir: Local-only dataset path.
-
-        Returns:
-            Dir object or string path for LitData.
-
-        Raises:
-            ValueError: If parameters are invalid or conflicting.
-        """
-        # Case 1: Local-only dataset
-        if local_dir is not None:
-            if remote_dir is not None:
-                raise ValueError(
-                    "Cannot specify both 'local_dir' and 'remote_dir'. "
-                    "Use 'local_dir' for local datasets, or "
-                    "'remote_dir' (with optional 'cache_dir') for remote datasets."
-                )
-            return str(local_dir)
-
-        # Case 2: Remote dataset with optional cache
-        if remote_dir is not None:
-            # If cache_dir specified, use Dir(path=cache_dir, url=remote_dir)
-            # Otherwise, just pass the URL and let LitData use its default caching
-            # (under ~/.lightning/litdata/, organized by URL hash)
-            if cache_dir is not None:
-                return Dir(path=str(cache_dir), url=remote_dir)
-            return remote_dir  # LitData handles caching automatically
-
-        # Case 3: Neither specified - error
-        raise ValueError(
-            "Must specify one of: 'remote_dir', 'local_dir', or 'input_dir'. "
-            "Example: SlipstreamDataset(remote_dir='s3://bucket/dataset/')\n"
-            "         SlipstreamDataset(input_dir='hf://datasets/user/dataset/data')"
-        )
-
-    def _resolve_storage_options(
-        self,
-        storage_options: dict[str, Any] | None,
-        profile: str | None,
-    ) -> dict[str, Any]:
-        """Resolve storage options based on profile.
-
-        Args:
-            storage_options: User-provided storage options.
-            profile: Storage profile name ('wasabi', etc.).
-
-        Returns:
-            Resolved storage options dict.
-        """
-        if storage_options is None:
-            storage_options = {}
-
-        # Apply profile defaults if no custom options provided
-        if profile == "wasabi" and not storage_options:
-            storage_options = {
-                "AWS_NO_SIGN_REQUEST": "yes",
-                "S3_ENDPOINT_URL": "https://s3.wasabisys.com",
-            }
-
-        return storage_options
-
-    def _set_field_types(self) -> None:
-        """Detect field types by inspecting the first sample.
-
-        Sets:
-            self.field_types: Dict mapping field names to type info.
-            self.image_fields: List of field names containing image bytes.
-
-        Handles:
-            - Raw bytes (JPEG, PNG, etc.)
-            - HuggingFace image dicts: {'bytes': ..., 'path': ...}
-        """
-        # Get raw sample without transforms
-        raw_sample = super().__getitem__(0)
-
-        self.image_fields: list[str | int] = []
-        self.field_types: dict[str | int, str | type] = {}
-
-        if hasattr(raw_sample, "items"):
-            # Dict-like sample
-            for key, value in raw_sample.items():
-                if isinstance(value, bytes):
-                    if is_image_bytes(value):
-                        self.field_types[key] = "ImageBytes"
-                        self.image_fields.append(key)
-                    else:
-                        self.field_types[key] = bytes
-                elif isinstance(value, dict) and is_hf_image_dict(value):
-                    # HuggingFace image dict format
-                    if is_image_bytes(value):
-                        self.field_types[key] = "HFImageDict"
-                        self.image_fields.append(key)
-                    else:
-                        self.field_types[key] = dict
-                else:
-                    self.field_types[key] = type(value)
-        else:
-            # Tuple-like sample
-            for idx, value in enumerate(raw_sample):
-                if isinstance(value, bytes):
-                    if is_image_bytes(value):
-                        self.field_types[idx] = "ImageBytes"
-                        self.image_fields.append(idx)
-                    else:
-                        self.field_types[idx] = bytes
-                elif isinstance(value, dict) and is_hf_image_dict(value):
-                    # HuggingFace image dict format
-                    if is_image_bytes(value):
-                        self.field_types[idx] = "HFImageDict"
-                        self.image_fields.append(idx)
-                    else:
-                        self.field_types[idx] = dict
-                else:
-                    self.field_types[idx] = type(value)
+    # ---- Processing logic (source-agnostic) ----
 
     def __getitem__(self, idx: int) -> dict[str, Any] | tuple[Any, ...]:
         """Get a sample by index.
@@ -644,10 +700,8 @@ class SlipstreamDataset(LitDataStreamingDataset):
         Returns:
             Sample dict or tuple with optional decoding and transforms applied.
         """
-        sample = super().__getitem__(idx)
-
-        # Normalize HF image dicts to raw bytes (for downstream compatibility)
-        sample = self._normalize_hf_images(sample)
+        # Reader handles source-specific normalization (e.g. HF image dicts)
+        sample = self._reader[idx]
 
         # Decode images if requested
         if self.decode_images:
@@ -661,27 +715,6 @@ class SlipstreamDataset(LitDataStreamingDataset):
         if self.pipelines is not None:
             sample = self._apply_pipelines(sample)
 
-        return sample
-
-    def _normalize_hf_images(self, sample: dict | tuple) -> dict | tuple:
-        """Convert HuggingFace image dicts to raw bytes.
-
-        This ensures downstream code (loaders, decoders) only sees raw bytes,
-        not HF-specific dict format.
-        """
-        if hasattr(sample, "items"):
-            for key in self.image_fields:
-                if key in sample:
-                    value = sample[key]
-                    if isinstance(value, dict) and is_hf_image_dict(value):
-                        sample[key] = extract_hf_image_bytes(value)
-        else:
-            sample = list(sample)
-            for idx in self.image_fields:
-                value = sample[idx]
-                if isinstance(value, dict) and is_hf_image_dict(value):
-                    sample[idx] = extract_hf_image_bytes(value)
-            sample = tuple(sample)
         return sample
 
     def _decode_images(self, sample: dict | tuple) -> dict | tuple:
@@ -732,23 +765,31 @@ class SlipstreamDataset(LitDataStreamingDataset):
         # Basic info
         lines.append(f"{indent}num_samples={len(self)},")
 
-        # Paths
-        if self.input_dir is not None:
-            if hasattr(self.input_dir, "path") and hasattr(self.input_dir, "url"):
-                # Dir object with explicit cache
-                lines.append(f"{indent}cache_dir='{self.input_dir.path}',")
-                if self.input_dir.url:
-                    lines.append(f"{indent}remote_dir='{self.input_dir.url}',")
-            elif isinstance(self.input_dir, str):
-                # String: could be local path or remote URL
-                if self.input_dir.startswith(("s3://", "gs://", "http://", "https://", "hf://")):
-                    lines.append(f"{indent}remote_dir='{self.input_dir}',")
+        # Paths - delegate to reader for source-specific info
+        input_dir = getattr(self._reader, 'input_dir', None)
+        if input_dir is not None:
+            if hasattr(input_dir, "path") and hasattr(input_dir, "url"):
+                lines.append(f"{indent}cache_dir='{input_dir.path}',")
+                if input_dir.url:
+                    lines.append(f"{indent}remote_dir='{input_dir.url}',")
+            elif isinstance(input_dir, str):
+                if input_dir.startswith(("s3://", "gs://", "http://", "https://", "hf://")):
+                    lines.append(f"{indent}remote_dir='{input_dir}',")
                     lines.append(f"{indent}cache_dir='~/.lightning/ (LitData default)',")
                 else:
-                    lines.append(f"{indent}local_dir='{self.input_dir}',")
+                    lines.append(f"{indent}local_dir='{input_dir}',")
+        elif hasattr(self._reader, '_remote_path'):
+            # FFCV reader
+            lines.append(f"{indent}ffcv_path='{self._reader._remote_path}',")
+        else:
+            # ImageFolder reader
+            root = getattr(self._reader, '_root_path', None)
+            if root is not None:
+                lines.append(f"{indent}local_dir='{root}',")
 
-        if self.version:
-            lines.append(f"{indent}version='{self.version}',")
+        version = getattr(self._reader, 'version', None)
+        if version:
+            lines.append(f"{indent}version='{version}',")
 
         # Field info
         lines.append(f"{indent}fields={{")
@@ -756,6 +797,10 @@ class SlipstreamDataset(LitDataStreamingDataset):
             type_str = field_type if isinstance(field_type, str) else field_type.__name__
             lines.append(f"{indent}{indent}'{key}': {type_str},")
         lines.append(f"{indent}}},")
+
+        # Reader type
+        reader_type = type(self._reader).__name__
+        lines.append(f"{indent}reader={reader_type},")
 
         # Options
         lines.append(f"{indent}decode_images={self.decode_images},")
@@ -766,10 +811,8 @@ class SlipstreamDataset(LitDataStreamingDataset):
         if self.pipelines:
             lines.append(f"{indent}pipelines={{")
             for key, pipeline in self.pipelines.items():
-                # Indent multi-line repr properly
                 pipeline_repr = repr(pipeline)
                 if "\n" in pipeline_repr:
-                    # Indent continuation lines
                     pipeline_lines = pipeline_repr.split("\n")
                     pipeline_repr = pipeline_lines[0] + "\n" + "\n".join(
                         f"{indent}{indent}    {line}" for line in pipeline_lines[1:]

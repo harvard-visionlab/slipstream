@@ -118,6 +118,7 @@ class SlipstreamLoader:
         pipelines: dict[str, Sequence[BatchTransform] | BatchTransform | Callable] | None = None,
         device: int | str = 'cpu',
         image_field: str | None = None,
+        image_format: str = "jpeg",
         exclude_fields: list[str] | None = None,
         force_rebuild: bool = False,
         presync_s3: bool = False,
@@ -146,6 +147,10 @@ class SlipstreamLoader:
                 Each pipeline can be a list of transforms, a single transform,
                 or a callable. If None, raw data is returned.
             device: Device for non-pipelined fields (labels, indices)
+            image_field: Primary image field name for prefetch optimization.
+                Auto-detected if None.
+            image_format: Image format to use ("jpeg" or "yuv420"). Default "jpeg".
+                Auto-adjusted if cache stores images in a different format.
             exclude_fields: List of field names to exclude from loading
             force_rebuild: Force rebuilding the optimized cache
             presync_s3: If True, use s5cmd to sync the dataset's S3 remote
@@ -286,12 +291,13 @@ class SlipstreamLoader:
         else:
             self._image_storage = self.cache.fields.get(self.image_field)
 
-        # Configure pipelines for image fields based on their stored format
+        # Configure pipelines for image fields based on the effective format
+        # Use self.image_format (which accounts for sibling YUV420 cache)
+        # rather than cache.get_image_format() (which only knows the main cache)
         for field_name, pipeline in self.pipelines.items():
             if field_name not in self._image_fields:
                 continue
-            # Get the stored format for this specific image field
-            field_format = self.cache.get_image_format(field_name)
+            field_format = self.image_format
             if field_format == "jpeg":
                 continue  # JPEG is the default, no configuration needed
 
@@ -313,6 +319,10 @@ class SlipstreamLoader:
 
         # Pre-allocate memory banks for prefetching (only for image field)
         self._setup_prefetch_banks()
+
+        # Track worker thread + stop event for cleanup between iterations
+        self._worker_thread: threading.Thread | None = None
+        self._stop_event: threading.Event | None = None
 
     def _generate_indices(self, epoch: int) -> np.ndarray:
         """Generate sample indices for an epoch.
@@ -514,8 +524,21 @@ class SlipstreamLoader:
 
             yield batch
 
+    def _stop_worker(self) -> None:
+        """Stop any running prefetch worker and wait for it to finish."""
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=5.0)
+        self._worker_thread = None
+        self._stop_event = None
+
     def _iter_threaded(self):
         """Threaded iteration with async prefetching."""
+        # Ensure any previous worker is fully stopped before we start a new
+        # one — otherwise two workers write to the same prefetch banks.
+        self._stop_worker()
+
         indices = self._generate_indices(self._epoch)
         self._epoch += 1
 
@@ -527,6 +550,7 @@ class SlipstreamLoader:
         # Image data is accessed directly from pre-allocated banks using slot
         output_queue: queue.Queue = queue.Queue(maxsize=self.batches_ahead)
         stop_event = threading.Event()
+        self._stop_event = stop_event
         num_slots = len(self._data_banks) if self._data_banks else 1
 
         # Get the image field storage for direct access
@@ -564,12 +588,18 @@ class SlipstreamLoader:
                         parallel=False,
                     )
 
-                # Load other fields (labels are fast - simple array indexing)
+                # Load other fields (labels are fast - simple array indexing).
+                # Use parallel=False for ALL loads in the worker thread —
+                # Numba's workqueue threading layer is not reentrant, so the
+                # main thread's NumbaBatchDecoder (parallel=True) would crash
+                # if the worker also runs parallel Numba.
                 other_fields = {}
                 for field_name in self._fields_to_load:
                     if field_name == self.image_field:
                         continue
-                    field_result = self.cache.fields[field_name].load_batch(batch_indices)
+                    field_result = self.cache.fields[field_name].load_batch(
+                        batch_indices, parallel=False
+                    )
                     # Image-type fields need full dict (data, sizes, heights, widths)
                     if field_name in self._image_fields:
                         other_fields[field_name] = field_result  # Full dict
@@ -589,6 +619,7 @@ class SlipstreamLoader:
 
         worker = threading.Thread(target=prefetch_worker, daemon=True)
         worker.start()
+        self._worker_thread = worker
 
         try:
             while True:
@@ -637,7 +668,14 @@ class SlipstreamLoader:
                 yield batch
         finally:
             stop_event.set()
-            worker.join(timeout=1.0)
+            # Drain the queue so the worker isn't blocked on put()
+            while not output_queue.empty():
+                try:
+                    output_queue.get_nowait()
+                except queue.Empty:
+                    break
+            worker.join(timeout=5.0)
+            self._worker_thread = None
 
     def __len__(self) -> int:
         """Return number of batches per epoch."""
@@ -652,6 +690,7 @@ class SlipstreamLoader:
 
     def shutdown(self) -> None:
         """Release resources."""
+        self._stop_worker()
         for field_name, pipeline in self.pipelines.items():
             if field_name in self._multi_pipeline_fields:
                 for sub_pipeline in pipeline:

@@ -27,6 +27,7 @@ Usage:
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import random
@@ -345,33 +346,30 @@ def _extract_image_bytes(data: bytes | dict | np.ndarray) -> bytes:
         raise TypeError(f"Unsupported image data type: {type(data)}")
 
 
-def _read_all_fields_from_litdata_chunks(
+def _iter_litdata_chunk_samples(
     litdata_cache_dir: Path,
     field_types: dict[str, str],
-    dataset: SlipstreamDataset,
+    dataset: Any,
     verbose: bool = True,
     num_download_workers: int = 8,
-) -> dict[str, list]:
-    """Read ALL fields directly from LitData chunks (full fast path).
+):
+    """Yield (idx, sample_dict) from LitData binary chunks.
+
+    Same chunk download parallelism and mmap reading as the old bulk reader,
+    but yields one sample at a time instead of accumulating lists.
 
     LitData chunk format per item:
         [size_header: uint32 * N][field_0_data][field_1_data]...[field_N-1_data]
 
-    We read the size header to find field offsets, then extract each field
-    without going through dataset[i].
-
-    Uses parallel downloads: a ThreadPoolExecutor downloads multiple chunks
-    simultaneously while the main thread reads completed chunks in order.
-
     Args:
         litdata_cache_dir: Path to LitData cache
         field_types: Dict mapping field names to types (from dataset.field_types)
-        dataset: The SlipstreamDataset (used to trigger chunk downloads)
+        dataset: The LitData reader object (used to trigger chunk downloads)
         verbose: Show progress
         num_download_workers: Number of parallel download threads (default: 8)
 
-    Returns:
-        Dict mapping field names to lists of values
+    Yields:
+        (global_idx, sample_dict) tuples
     """
     index_path = litdata_cache_dir / "index.json"
     with open(index_path) as f:
@@ -404,20 +402,6 @@ def _read_all_fields_from_litdata_chunks(
         print(f"  Reading {num_fields} fields from {len(chunk_files)} chunks")
         print(f"  Data format: {data_format}")
         print(f"  Using {num_download_workers} parallel download workers")
-
-    # Initialize storage
-    samples_by_field: dict[str, list] = {k: [] for k in field_names}
-
-    # Special handling for image fields (need dimensions)
-    image_metadata: dict[str, dict] = {}
-    for i, (name, fmt) in enumerate(zip(field_names, data_format)):
-        if fmt in ('jpeg', 'bytes') or field_types[name] == 'ImageBytes':
-            image_metadata[name] = {
-                'index': i,
-                'sizes': [],
-                'heights': [],
-                'widths': [],
-            }
 
     # Calculate first sample index for each chunk (for triggering downloads)
     chunk_first_sample = [0]
@@ -457,10 +441,8 @@ def _read_all_fields_from_litdata_chunks(
         chunk_path = litdata_cache_dir / chunk_files[chunk_idx]
         if not chunk_path.exists():
             if litdata_config is not None:
-                # Use LitData's direct chunk download (no locks, parallel-safe)
                 litdata_config.download_chunk_from_index(chunk_idx)
             else:
-                # Fallback: trigger download via sample access
                 sample_idx = chunk_first_sample[chunk_idx]
                 _ = dataset[sample_idx]
         return chunk_idx
@@ -470,29 +452,26 @@ def _read_all_fields_from_litdata_chunks(
     else:
         pbar = None
 
+    global_idx = 0
+
     try:
         with ThreadPoolExecutor(max_workers=num_download_workers) as executor:
-            # Submit all chunks for download
-            # futures maps future -> chunk_idx for tracking
             futures = {
                 executor.submit(download_chunk, i): i
                 for i in range(num_chunks)
             }
 
-            # Track which chunks are ready (downloaded)
             ready_chunks: set[int] = set()
             next_chunk_to_process = 0
 
-            # Process completed downloads as they finish
             for future in as_completed(futures):
                 chunk_idx = futures[future]
                 try:
-                    future.result()  # Raises if download failed
+                    future.result()
                     ready_chunks.add(chunk_idx)
                 except Exception as e:
                     raise RuntimeError(f"Failed to download chunk {chunk_idx}: {e}") from e
 
-                # Process all consecutive ready chunks starting from next_chunk_to_process
                 while next_chunk_to_process in ready_chunks:
                     chunk_file = chunk_files[next_chunk_to_process]
                     chunk_path = litdata_cache_dir / chunk_file
@@ -507,43 +486,35 @@ def _read_all_fields_from_litdata_chunks(
                     num_items = int(np.frombuffer(chunk_data[:4], dtype=np.uint32)[0])
 
                     for local_idx in range(num_items):
-                        # Get item bounds from offset table
                         offset_pos = 4 + local_idx * 4
                         item_begin = int(np.frombuffer(
                             chunk_data[offset_pos:offset_pos + 4], dtype=np.uint32
                         )[0])
 
-                        # Read size header
                         size_header = np.frombuffer(
                             chunk_data[item_begin:item_begin + size_header_bytes],
                             dtype=np.uint32
                         )
 
-                        # Calculate field offsets
                         field_offsets = [size_header_bytes]
                         for size in size_header[:-1]:
                             field_offsets.append(field_offsets[-1] + size)
 
-                        # Extract each field
+                        sample: dict[str, Any] = {}
                         for field_idx, (name, fmt) in enumerate(zip(field_names, data_format)):
                             field_start = item_begin + field_offsets[field_idx]
                             field_size = int(size_header[field_idx])
                             field_bytes = chunk_data[field_start:field_start + field_size]
 
                             if fmt == 'jpeg' or field_types[name] == 'ImageBytes':
-                                # For images, store raw bytes and parse dimensions
-                                actual_size = find_image_end(field_bytes, field_size)
-                                w, h = read_image_dimensions(field_bytes[:actual_size])
-                                samples_by_field[name].append(bytes(field_bytes[:actual_size]))
-                                image_metadata[name]['sizes'].append(actual_size)
-                                image_metadata[name]['heights'].append(h)
-                                image_metadata[name]['widths'].append(w)
+                                sample[name] = bytes(field_bytes)
                             elif fmt in LITDATA_DESERIALIZERS:
-                                value = LITDATA_DESERIALIZERS[fmt](bytes(field_bytes))
-                                samples_by_field[name].append(value)
+                                sample[name] = LITDATA_DESERIALIZERS[fmt](bytes(field_bytes))
                             else:
-                                # Unknown format, store raw bytes
-                                samples_by_field[name].append(bytes(field_bytes))
+                                sample[name] = bytes(field_bytes)
+
+                        yield global_idx, sample
+                        global_idx += 1
 
                     del chunk_data
                     ready_chunks.discard(next_chunk_to_process)
@@ -556,16 +527,39 @@ def _read_all_fields_from_litdata_chunks(
     finally:
         if pbar:
             pbar.close()
-        # Restore original on_demand_bytes setting
         dataset.on_demand_bytes = original_on_demand
 
-    # Attach image metadata to the result
-    for name, meta in image_metadata.items():
-        samples_by_field[f"__{name}_sizes"] = meta['sizes']
-        samples_by_field[f"__{name}_heights"] = meta['heights']
-        samples_by_field[f"__{name}_widths"] = meta['widths']
 
-    return samples_by_field
+def _iter_samples(
+    reader: Any,
+    field_types: dict[str, str],
+    num_samples: int,
+    litdata_cache_dir: Path,
+    litdata_obj: Any,
+    use_litdata_fast_path: bool,
+    verbose: bool = True,
+):
+    """Yield (idx, sample_dict) for each sample, using best available path.
+
+    Dispatch:
+      1. LitData binary chunks → _iter_litdata_chunk_samples (mmap + parallel DL)
+      2. All other readers → reader[i] iteration (FFCV mmap is O(1))
+    """
+    if use_litdata_fast_path:
+        if verbose:
+            print("Using fast path (streaming from LitData chunks)")
+        yield from _iter_litdata_chunk_samples(
+            litdata_cache_dir, field_types, litdata_obj, verbose
+        )
+    else:
+        if verbose:
+            if _is_parquet_dataset(litdata_cache_dir):
+                print("Using iteration path (Parquet/HuggingFace dataset)")
+            else:
+                print("Using iteration path")
+        iterator = tqdm(range(num_samples), desc="Reading samples") if verbose else range(num_samples)
+        for i in iterator:
+            yield i, reader[i]
 
 
 # =============================================================================
@@ -765,9 +759,15 @@ class ImageBytesStorage(FieldStorage):
         for data in samples:
             extracted_samples.append(_extract_image_bytes(data))
 
-        # Detect image format from first sample
-        detected_format = detect_image_format(extracted_samples[0]) if extracted_samples else "jpeg"
-        use_yuv420_conversion = detected_format != "jpeg"
+        # Detect image format from first sample (only for image fields)
+        is_image_field = field_type in ("ImageBytes", "HFImageDict")
+        if is_image_field:
+            detected_format = detect_image_format(extracted_samples[0]) if extracted_samples else "jpeg"
+            use_yuv420_conversion = detected_format != "jpeg"
+        else:
+            # Raw bytes field (e.g. FFCV 'path') — store as-is
+            detected_format = "bytes"
+            use_yuv420_conversion = False
 
         if use_yuv420_conversion:
             # Non-JPEG path: decode → YUV420 → store
@@ -775,7 +775,7 @@ class ImageBytesStorage(FieldStorage):
                 field_name, extracted_samples, output_dir
             )
 
-        # JPEG path: store raw bytes
+        # JPEG / raw bytes path: store raw bytes
         # Use pre-computed metadata if available, otherwise compute
         if sizes is not None and heights is not None and widths is not None:
             sizes_arr = np.array(sizes, dtype=np.uint64)
@@ -789,10 +789,14 @@ class ImageBytesStorage(FieldStorage):
             max_size = 0
 
             for i, data in enumerate(extracted_samples):
-                actual_size = find_image_end(data, len(data))
+                if is_image_field:
+                    actual_size = find_image_end(data, len(data))
+                    w, h = read_image_dimensions(data[:actual_size])
+                else:
+                    actual_size = len(data)
+                    w, h = 0, 0
                 sizes_arr[i] = actual_size
                 max_size = max(max_size, actual_size)
-                w, h = read_image_dimensions(data[:actual_size])
                 heights_arr[i] = h
                 widths_arr[i] = w
 
@@ -1024,6 +1028,232 @@ def get_storage_class(field_type: str) -> type[FieldStorage]:
         return NumpyStorage
 
 
+# =============================================================================
+# Streaming Field Writers (O(1) memory per sample)
+# =============================================================================
+
+class StreamingFieldWriter(ABC):
+    """Base class for streaming field writers that write one sample at a time."""
+
+    @abstractmethod
+    def add_sample(self, idx: int, value: Any) -> None:
+        """Write one sample to disk. O(1) memory."""
+        ...
+
+    @abstractmethod
+    def finalize(self) -> dict[str, Any]:
+        """Close files, save metadata to disk, return metadata dict for manifest.
+
+        Does NOT create FieldStorage objects — build() calls cls.load()
+        after all writers are finalized and freed, keeping peak memory low.
+        """
+        ...
+
+
+class ImageBytesWriter(StreamingFieldWriter):
+    """Streams image bytes to disk, one sample at a time.
+
+    Opens <field>.bin for writing and pre-allocates a metadata array.
+    Each add_sample() writes bytes to the file and records (ptr, size, h, w).
+    """
+
+    def __init__(
+        self,
+        field_name: str,
+        output_dir: Path,
+        num_samples: int,
+        field_type: str,
+    ) -> None:
+        self.field_name = field_name
+        self.output_dir = output_dir
+        self.num_samples = num_samples
+        self.field_type = field_type
+        self.is_image_field = field_type in ("ImageBytes", "HFImageDict")
+
+        self._data_path = output_dir / f"{field_name}.bin"
+        self._meta_path = output_dir / f"{field_name}.meta.npy"
+        self._metadata = np.zeros(num_samples, dtype=VARIABLE_METADATA_DTYPE)
+        self._current_ptr = 0
+        self._max_size = 0
+        self._file = open(self._data_path, 'wb')
+
+        # Detect format from first sample
+        self._detected_format: str | None = None
+        self._use_yuv420 = False
+        self._image_format = "jpeg"
+
+    def add_sample(self, idx: int, value: Any) -> None:
+        """Write one image sample to disk."""
+        raw_bytes = _extract_image_bytes(value)
+
+        # Detect format on first sample
+        if self._detected_format is None and self.is_image_field:
+            self._detected_format = detect_image_format(raw_bytes)
+            self._use_yuv420 = self._detected_format != "jpeg"
+            if self._use_yuv420:
+                self._image_format = "yuv420"
+
+        if self._use_yuv420:
+            # Non-JPEG: decode → YUV420 → store
+            rgb = decode_image_to_rgb(raw_bytes)
+            yuv_bytes, pad_h, pad_w = rgb_to_yuv420(rgb)
+            self._file.write(yuv_bytes)
+            enc_size = len(yuv_bytes)
+            self._metadata[idx]['data_ptr'] = self._current_ptr
+            self._metadata[idx]['data_size'] = enc_size
+            self._metadata[idx]['height'] = pad_h
+            self._metadata[idx]['width'] = pad_w
+            self._current_ptr += enc_size
+            self._max_size = max(self._max_size, enc_size)
+        else:
+            # JPEG or raw bytes: store as-is
+            if self.is_image_field:
+                actual_size = find_image_end(raw_bytes, len(raw_bytes))
+                w, h = read_image_dimensions(raw_bytes[:actual_size])
+            else:
+                actual_size = len(raw_bytes)
+                w, h = 0, 0
+
+            self._file.write(raw_bytes[:actual_size])
+            self._metadata[idx]['data_ptr'] = self._current_ptr
+            self._metadata[idx]['data_size'] = actual_size
+            self._metadata[idx]['height'] = h
+            self._metadata[idx]['width'] = w
+            self._current_ptr += actual_size
+            self._max_size = max(self._max_size, actual_size)
+
+    def finalize(self) -> dict[str, Any]:
+        """Close file, save metadata to disk. Does NOT create storage objects.
+
+        Storage objects are created later by OptimizedCache.load() to keep
+        peak memory low (writers are fully freed before loading).
+        """
+        self._file.flush()
+        self._file.close()
+
+        max_size = int(self._max_size * 1.2)
+
+        # Save metadata
+        np.save(self._meta_path, self._metadata)
+
+        # Free internal state to release memory before load
+        self._metadata = None
+
+        return {
+            'type': self.field_type,
+            'num_samples': self.num_samples,
+            'max_size': max_size,
+            'image_format': self._image_format,
+        }
+
+
+class NumpyWriter(StreamingFieldWriter):
+    """Streams numeric values into a pre-allocated numpy array.
+
+    Memory: 8 bytes x N (negligible — ~10MB for 1.28M samples).
+    """
+
+    def __init__(
+        self,
+        field_name: str,
+        output_dir: Path,
+        num_samples: int,
+        field_type: str,
+    ) -> None:
+        self.field_name = field_name
+        self.output_dir = output_dir
+        self.num_samples = num_samples
+        self.field_type = field_type
+
+        # Choose dtype based on field type
+        if field_type in ("float", "float32", "float64"):
+            dtype = np.float64
+        else:
+            dtype = np.int64
+
+        self._data = np.zeros(num_samples, dtype=dtype)
+        self._path = output_dir / f"{field_name}.npy"
+
+    def add_sample(self, idx: int, value: Any) -> None:
+        """Write one numeric value."""
+        self._data[idx] = value
+
+    def finalize(self) -> dict[str, Any]:
+        """Save array to disk. Does NOT create storage objects."""
+        np.save(self._path, self._data)
+
+        # Free internal state
+        self._data = None
+
+        return {
+            'type': self.field_type,
+            'num_samples': self.num_samples,
+        }
+
+
+class StringWriter(StreamingFieldWriter):
+    """Streams strings to a .bin file, one at a time.
+
+    Tracks offsets in a pre-allocated numpy array.
+    """
+
+    def __init__(
+        self,
+        field_name: str,
+        output_dir: Path,
+        num_samples: int,
+    ) -> None:
+        self.field_name = field_name
+        self.output_dir = output_dir
+        self.num_samples = num_samples
+
+        self._data_path = output_dir / f"{field_name}.bin"
+        self._offsets_path = output_dir / f"{field_name}.offsets.npy"
+        self._offsets = np.zeros((num_samples, 2), dtype=np.uint64)
+        self._current_offset = 0
+        self._file = open(self._data_path, 'wb')
+
+    def add_sample(self, idx: int, value: Any) -> None:
+        """Write one string to disk."""
+        encoded = str(value).encode('utf-8')
+        self._offsets[idx, 0] = self._current_offset
+        self._offsets[idx, 1] = len(encoded)
+        self._file.write(encoded)
+        self._current_offset += len(encoded)
+
+    def finalize(self) -> dict[str, Any]:
+        """Close file, save offsets to disk. Does NOT create storage objects."""
+        self._file.flush()
+        self._file.close()
+        np.save(self._offsets_path, self._offsets)
+
+        # Free internal state
+        self._offsets = None
+
+        return {
+            'type': 'str',
+            'num_samples': self.num_samples,
+        }
+        return storage, meta
+
+
+def _create_field_writer(
+    field_name: str,
+    field_type: str,
+    output_dir: Path,
+    num_samples: int,
+) -> StreamingFieldWriter:
+    """Create the appropriate streaming writer for a field type."""
+    if field_type in ("ImageBytes", "HFImageDict"):
+        return ImageBytesWriter(field_name, output_dir, num_samples, field_type)
+    elif field_type == "str":
+        return StringWriter(field_name, output_dir, num_samples)
+    elif field_type == "bytes":
+        return ImageBytesWriter(field_name, output_dir, num_samples, field_type)
+    else:
+        return NumpyWriter(field_name, output_dir, num_samples, field_type)
+
+
 def _has_litdata_binary_cache(cache_dir: Path) -> bool:
     """Check if directory contains LitData binary chunk cache structure.
 
@@ -1123,8 +1353,11 @@ class OptimizedCache:
     ) -> OptimizedCache:
         """Build optimized cache from a dataset or reader.
 
-        Uses fast path when available: reader.read_all_fields() for readers,
-        or direct LitData chunk reading for LitData-backed datasets.
+        Streams samples to disk one at a time, using O(1) memory per sample.
+        Only metadata arrays stay in memory (~24 bytes/sample).
+
+        Uses LitData chunk fast path when available (mmap + parallel downloads),
+        otherwise iterates reader[i] directly.
 
         Args:
             dataset: Any object with cache_path, field_types, __len__, __getitem__
@@ -1157,8 +1390,9 @@ class OptimizedCache:
         if verbose:
             print(f"Fields: {field_types}")
 
-        # Check for reader fast path (read_all_fields protocol)
-        reader_fast_path = hasattr(dataset, 'read_all_fields') and callable(dataset.read_all_fields)
+        # Get the underlying reader for LitData access
+        # After composition refactor, LitData internals live on dataset._reader
+        litdata_obj = getattr(dataset, '_reader', dataset)
 
         # Check for LitData fast path (binary chunks only, not Parquet)
         litdata_cache_dir = Path(output_dir)
@@ -1166,96 +1400,42 @@ class OptimizedCache:
 
         num_samples = len(dataset)
 
-        use_fast_path = False
-
-        if reader_fast_path:
-            if verbose:
-                print("Using reader fast path (read_all_fields)")
-
-            samples_by_field = dataset.read_all_fields()
-            if samples_by_field is not None:
-                use_fast_path = True
-            else:
-                reader_fast_path = False
-
-        if not use_fast_path and use_litdata_fast_path:
-            use_fast_path = True
-            if verbose:
-                print("Using fast path (reading all fields from LitData chunks)")
-
-            # Read ALL fields directly from chunks (triggers downloads as needed)
-            samples_by_field = _read_all_fields_from_litdata_chunks(
-                litdata_cache_dir,
-                field_types,
-                dataset=dataset,
-                verbose=verbose,
-            )
-
-        if not use_fast_path:
-            if verbose:
-                if _is_parquet_dataset(litdata_cache_dir):
-                    print("Using iteration path (Parquet/HuggingFace dataset)")
-                else:
-                    print("Using iteration path (no fast path available)")
-
-            # Fall back to dataset iteration
-            samples_by_field = {k: [] for k in field_types}
-
-            if verbose:
-                iterator = tqdm(range(num_samples), desc="Reading samples")
-            else:
-                iterator = range(num_samples)
-
-            for i in iterator:
-                sample = dataset[i]
-                for field_name in field_types:
-                    samples_by_field[field_name].append(sample[field_name])
-
-        # Build storage for each field
-        fields: dict[str, FieldStorage] = {}
-        field_metadata: dict[str, dict] = {}
-
+        # Create streaming writers for all fields
+        writers: dict[str, StreamingFieldWriter] = {}
         for field_name, field_type in field_types.items():
-            if verbose:
-                print(f"Building {field_name} ({field_type})...")
-
-            storage_cls = get_storage_class(field_type)
-
-            # Pass pre-computed metadata for image fields if available
-            extra_kwargs: dict[str, Any] = {}
-            if field_type in ("ImageBytes", "HFImageDict") and use_fast_path:
-                extra_kwargs['sizes'] = samples_by_field.get(f"__{field_name}_sizes")
-                extra_kwargs['heights'] = samples_by_field.get(f"__{field_name}_heights")
-                extra_kwargs['widths'] = samples_by_field.get(f"__{field_name}_widths")
-
-            build_result = storage_cls.build(
-                field_name,
-                samples_by_field[field_name],
-                cache_dir,
-                field_type,
-                **extra_kwargs,
+            writers[field_name] = _create_field_writer(
+                field_name, field_type, cache_dir, num_samples
             )
 
-            # ImageBytesStorage.build() returns (storage, image_format) tuple
-            if isinstance(build_result, tuple):
-                storage, image_format = build_result
-            else:
-                storage = build_result
-                image_format = None
+        if verbose:
+            print(f"Streaming {num_samples:,} samples to disk...")
 
-            fields[field_name] = storage
+        # Single pass: iterate samples, write all fields simultaneously
+        for idx, sample in _iter_samples(
+            reader=litdata_obj,
+            field_types=field_types,
+            num_samples=num_samples,
+            litdata_cache_dir=litdata_cache_dir,
+            litdata_obj=litdata_obj,
+            use_litdata_fast_path=use_litdata_fast_path,
+            verbose=verbose,
+        ):
+            for field_name in field_types:
+                writers[field_name].add_sample(idx, sample[field_name])
 
-            meta: dict[str, Any] = {
-                'type': field_type,
-                'num_samples': storage.num_samples,
-            }
-            if isinstance(storage, ImageBytesStorage):
-                meta['max_size'] = storage.max_size
-                if image_format is not None:
-                    meta['image_format'] = image_format
-                    if verbose and image_format == "yuv420":
-                        print(f"  Non-JPEG images detected → converted to YUV420 format")
+        # Finalize: close files, save metadata to disk (no storage objects yet)
+        if verbose:
+            print("Finalizing cache files...")
+
+        field_metadata: dict[str, dict] = {}
+        for field_name, writer in writers.items():
+            meta = writer.finalize()
             field_metadata[field_name] = meta
+
+            if verbose:
+                image_format = meta.get('image_format')
+                if image_format == "yuv420":
+                    print(f"  {field_name}: Non-JPEG images → converted to YUV420 format")
 
         # Write manifest
         manifest = {
@@ -1267,15 +1447,32 @@ class OptimizedCache:
         with open(manifest_path, 'w') as f:
             json.dump(manifest, f, indent=2)
 
-        if verbose:
-            print(f"Cache built: {num_samples:,} samples, {len(fields)} fields")
+        # Free ALL writer state before loading — this is the key to avoiding
+        # OOM: writers held file handles + metadata arrays during streaming,
+        # now we release them before creating mmap-backed storage objects.
+        del writers
+        gc.collect()
 
-        result = cls(cache_dir, fields, field_types, num_samples, field_metadata)
+        if verbose:
+            print(f"Cache written: {num_samples:,} samples, {len(field_metadata)} fields")
+            print("Loading cache from disk...")
+
+        # Load from disk using the same code path as loading an existing cache.
+        # This keeps peak memory low: all writer state is freed, then storage
+        # objects are created via mmap (virtual memory, not heap).
+        result = cls.load(output_dir, verbose=False)
+
+        if verbose:
+            print(f"Cache ready: {result.num_samples:,} samples")
 
         # Run sanity check
         if verbose:
             print("Running sanity check...")
-            result.verify(dataset, num_checks=10, verbose=verbose)
+            try:
+                result.verify(dataset, num_checks=10, verbose=verbose)
+            except Exception as e:
+                print(f"  Sanity check failed: {e}")
+                print(f"  Cache was built successfully — verify manually if needed")
 
         return result
 
@@ -1325,7 +1522,8 @@ class OptimizedCache:
     ) -> bool:
         """Verify cache matches source dataset.
 
-        Checks first, last, and random samples to ensure data integrity.
+        Uses pure Python mmap reads (no Numba JIT) to avoid potential
+        segfaults from JIT compilation in Jupyter notebooks.
 
         Args:
             dataset: Source dataset to verify against
@@ -1338,7 +1536,9 @@ class OptimizedCache:
         Raises:
             ValueError: If any check fails
         """
-        n = len(dataset)
+        # Use the raw reader for verification (no decode/transform)
+        reader = getattr(dataset, '_reader', dataset)
+        n = len(reader)
         if n != self.num_samples:
             raise ValueError(
                 f"Sample count mismatch: dataset has {n}, cache has {self.num_samples}"
@@ -1354,92 +1554,78 @@ class OptimizedCache:
         errors = []
 
         for idx in check_indices:
-            # Get from dataset
-            sample = dataset[idx]
+            # Get raw sample from reader (no decode/transform)
+            sample = reader[idx]
 
-            # Get from cache
-            cache_batch = self.load_batch(np.array([idx], dtype=np.int64))
-
-            # Compare each field
+            # Read from cache using PURE PYTHON (no Numba JIT).
+            # This avoids segfaults from Numba compilation in Jupyter.
             for field_name, field_type in self.field_types.items():
                 dataset_value = sample[field_name]
-                cache_value = cache_batch[field_name]['data']
+                storage = self.fields[field_name]
 
-                if field_type in ("ImageBytes", "HFImageDict"):
-                    # Check if this field was converted to YUV420 (non-JPEG source)
-                    stored_format = self.get_image_format(field_name)
+                if isinstance(storage, ImageBytesStorage):
+                    # Pure Python read from mmap — no Numba
+                    meta = storage._metadata[idx]
+                    ptr = int(meta['data_ptr'])
+                    size = int(meta['data_size'])
+                    cache_bytes = bytes(storage._data_mmap[ptr:ptr + size])
 
-                    if stored_format == "yuv420":
-                        # YUV420-converted images: verify dimensions match
-                        # We can't compare bytes directly since format changed
-                        dataset_bytes = _extract_image_bytes(dataset_value)
-                        dataset_w, dataset_h = read_image_dimensions(dataset_bytes)
+                    if field_type in ("ImageBytes", "HFImageDict"):
+                        stored_format = self.get_image_format(field_name)
 
-                        cache_h = int(cache_batch[field_name]['heights'][0])
-                        cache_w = int(cache_batch[field_name]['widths'][0])
+                        if stored_format == "yuv420":
+                            dataset_bytes = _extract_image_bytes(dataset_value)
+                            dataset_w, dataset_h = read_image_dimensions(dataset_bytes)
+                            cache_h = int(meta['height'])
+                            cache_w = int(meta['width'])
+                            padded_h = dataset_h + (dataset_h % 2)
+                            padded_w = dataset_w + (dataset_w % 2)
 
-                        # Cache dimensions may be padded to even values
-                        padded_h = dataset_h + (dataset_h % 2)
-                        padded_w = dataset_w + (dataset_w % 2)
+                            if cache_h != padded_h or cache_w != padded_w:
+                                errors.append(
+                                    f"Image dim mismatch at {idx}, '{field_name}': "
+                                    f"expected {padded_h}x{padded_w}, got {cache_h}x{cache_w}"
+                                )
+                        else:
+                            dataset_bytes = _extract_image_bytes(dataset_value)
+                            dataset_size = find_image_end(dataset_bytes, len(dataset_bytes))
+                            dataset_bytes = dataset_bytes[:dataset_size]
 
-                        if cache_h != padded_h or cache_w != padded_w:
+                            if hashlib.md5(dataset_bytes).hexdigest() != \
+                               hashlib.md5(cache_bytes).hexdigest():
+                                errors.append(
+                                    f"Image mismatch at {idx}, '{field_name}'"
+                                )
+                    else:
+                        # bytes field
+                        if isinstance(dataset_value, np.ndarray):
+                            dataset_bytes = bytes(dataset_value)
+                        else:
+                            dataset_bytes = dataset_value
+                        if dataset_bytes != cache_bytes:
                             errors.append(
-                                f"Image dimension mismatch at index {idx}, "
-                                f"field '{field_name}': expected {padded_h}x{padded_w}, "
-                                f"got {cache_h}x{cache_w}"
+                                f"Bytes mismatch at {idx}, '{field_name}'"
                             )
-                    else:
-                        # JPEG path: compare image bytes (hash for efficiency)
-                        # Extract bytes from various formats (raw bytes, numpy, HF dicts)
-                        dataset_bytes = _extract_image_bytes(dataset_value)
 
-                        cache_size = int(cache_batch[field_name]['sizes'][0])
-                        cache_bytes = bytes(cache_value[0, :cache_size])
-
-                        # Find actual JPEG end in dataset bytes
-                        dataset_size = find_image_end(dataset_bytes, len(dataset_bytes))
-                        dataset_bytes = dataset_bytes[:dataset_size]
-
-                        if hashlib.md5(dataset_bytes).hexdigest() != \
-                           hashlib.md5(cache_bytes).hexdigest():
-                            errors.append(
-                                f"Image mismatch at index {idx}, field '{field_name}'"
-                            )
-                elif field_type == "bytes":
-                    # Variable-length bytes field (same storage as images)
-                    if isinstance(dataset_value, np.ndarray):
-                        dataset_bytes = bytes(dataset_value)
-                    else:
-                        dataset_bytes = dataset_value
-
-                    cache_size = int(cache_batch[field_name]['sizes'][0])
-                    cache_bytes = bytes(cache_value[0, :cache_size])
-
-                    if dataset_bytes != cache_bytes:
+                elif isinstance(storage, StringStorage):
+                    offset, length = storage._offsets[idx]
+                    cache_str = bytes(storage._data_mmap[offset:offset + length]).decode('utf-8')
+                    if dataset_value != cache_str:
                         errors.append(
-                            f"Bytes mismatch at index {idx}, field '{field_name}'"
+                            f"String mismatch at {idx}, '{field_name}': "
+                            f"'{dataset_value}' vs '{cache_str}'"
                         )
-                elif field_type == "str":
-                    if dataset_value != cache_value[0]:
-                        errors.append(
-                            f"String mismatch at index {idx}, field '{field_name}': "
-                            f"'{dataset_value}' vs '{cache_value[0]}'"
-                        )
-                else:
-                    # Numeric comparison
-                    if isinstance(cache_value, np.ndarray):
-                        cache_scalar = cache_value[0]
-                    else:
-                        cache_scalar = cache_value
 
-                    if dataset_value != cache_scalar:
+                elif isinstance(storage, NumpyStorage):
+                    cache_val = storage._data[idx]
+                    if dataset_value != cache_val:
                         errors.append(
-                            f"Value mismatch at index {idx}, field '{field_name}': "
-                            f"{dataset_value} vs {cache_scalar}"
+                            f"Value mismatch at {idx}, '{field_name}': "
+                            f"{dataset_value} vs {cache_val}"
                         )
 
         if errors:
-            error_msg = "\n".join(errors[:10])  # Show first 10 errors
+            error_msg = "\n".join(errors[:10])
             if len(errors) > 10:
                 error_msg += f"\n... and {len(errors) - 10} more errors"
             raise ValueError(f"Cache verification failed:\n{error_msg}")

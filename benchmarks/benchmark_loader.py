@@ -9,9 +9,9 @@ Tests complete training/validation pipelines with:
 
 Usage:
     uv run python benchmarks/benchmark_loader.py
-    uv run python benchmarks/benchmark_loader.py --batch-size 256 --epochs 3
-    uv run python benchmarks/benchmark_loader.py --image-format yuv420
-    uv run python benchmarks/benchmark_loader.py --image-format all
+    uv run python benchmarks/benchmark_loader.py --batch-size 256 --epochs 2 --num-threads 12
+    uv run python benchmarks/benchmark_loader.py --batch-size 256 --epochs 2 --image-format yuv420 --num-threads 12
+    uv run python benchmarks/benchmark_loader.py --batch-size 256 --epochs 2 --image-format all
     uv run python benchmarks/benchmark_loader.py --output results/loader.json
 """
 
@@ -121,7 +121,8 @@ def benchmark_loader(
         total = run_epoch()
         elapsed = time.perf_counter() - start
         rate = total / elapsed
-        warmup_results.append({"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        warmup_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
         print(f"    Warmup {i + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
 
     # Timed epochs
@@ -131,7 +132,8 @@ def benchmark_loader(
         total = run_epoch()
         elapsed = time.perf_counter() - start
         rate = total / elapsed
-        epoch_results.append({"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        epoch_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
         print(f"  Epoch {epoch + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
 
     avg_rate = np.mean([r["samples_per_sec"] for r in epoch_results])
@@ -159,22 +161,35 @@ def benchmark_loader(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark SlipstreamLoader full pipeline")
-    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help="Dataset path (S3 or local)")
-    parser.add_argument("--cache-dir", type=str, default=None, help="Override cache directory")
-    parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
-    parser.add_argument("--epochs", type=int, default=3, help="Number of timed epochs")
-    parser.add_argument("--warmup", type=int, default=1, help="Number of warmup epochs")
-    parser.add_argument("--num-threads", type=int, default=0, help="NumbaBatchDecoder threads (0=auto)")
-    parser.add_argument("--target-size", type=int, default=224, help="Target crop size")
-    parser.add_argument("--machine-name", type=str, default=None, help="Machine name for results")
+    parser = argparse.ArgumentParser(
+        description="Benchmark SlipstreamLoader full pipeline")
+    parser.add_argument("--dataset", type=str,
+                        default=DEFAULT_DATASET, help="Dataset path (S3 or local)")
+    parser.add_argument("--cache-dir", type=str, default=None,
+                        help="Override cache directory")
+    parser.add_argument("--batch-size", type=int,
+                        default=256, help="Batch size")
+    parser.add_argument("--epochs", type=int, default=3,
+                        help="Number of timed epochs")
+    parser.add_argument("--warmup", type=int, default=1,
+                        help="Number of warmup epochs")
+    parser.add_argument("--num-threads", type=int, default=0,
+                        help="NumbaBatchDecoder threads (0=auto)")
+    parser.add_argument("--target-size", type=int,
+                        default=224, help="Target crop size")
+    parser.add_argument("--machine-name", type=str,
+                        default=None, help="Machine name for results")
     parser.add_argument("--image-format", type=str, default="jpeg",
                         choices=["jpeg", "yuv420", "all"],
                         help="Image format: jpeg, yuv420, or all (run both)")
-    parser.add_argument("--skip-multi-crop", action="store_true", help="Skip multi-crop benchmark")
-    parser.add_argument("--multi-crop", action="store_true", help="Only run multi-crop benchmark")
-    parser.add_argument("--save", action="store_true", help="Save results to JSON file")
-    parser.add_argument("--output", type=str, default=None, help="Output JSON path (implies --save)")
+    parser.add_argument("--skip-multi-crop", action="store_true",
+                        help="Skip multi-crop benchmark")
+    parser.add_argument("--multi-crop", action="store_true",
+                        help="Only run multi-crop benchmark")
+    parser.add_argument("--save", action="store_true",
+                        help="Save results to JSON file")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Output JSON path (implies --save)")
     args = parser.parse_args()
 
     # Print machine info
@@ -196,7 +211,8 @@ def main():
     cache_path = dataset.cache_path
     print(f"Cache path: {cache_path}")
     cache_drive = get_drive_info(cache_path)
-    print(f"Cache drive: {cache_drive['type']} (device: {cache_drive['device']})")
+    print(
+        f"Cache drive: {cache_drive['type']} (device: {cache_drive['device']})")
 
     results = []
 

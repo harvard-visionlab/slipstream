@@ -39,6 +39,7 @@ from slipstream.dataset import (
     decode_image,
     ensure_lightning_symlink_on_cluster,
     get_default_cache_dir,
+    is_hf_image_dict,
     is_image_bytes,
     list_collate_fn,
 )
@@ -99,7 +100,7 @@ from slipstream.pipelines import (
 )
 
 # Readers (dataset format adapters)
-from slipstream.readers import FFCVFileReader
+from slipstream.readers import FFCVFileReader, SlipstreamImageFolder, StreamingReader, open_imagefolder
 
 # Utilities
 from slipstream.s3_sync import sync_s3_dataset
@@ -118,6 +119,7 @@ __all__ = [
     # Core dataset
     "SlipstreamDataset",
     "decode_image",
+    "is_hf_image_dict",
     "is_image_bytes",
     "ensure_lightning_symlink_on_cluster",
     "get_default_cache_dir",
@@ -180,6 +182,9 @@ __all__ = [
     "FFCVFilePrefetchingDataLoader",
     # Readers
     "FFCVFileReader",
+    "SlipstreamImageFolder",
+    "StreamingReader",
+    "open_imagefolder",
     # Utilities
     "sync_s3_dataset",
     "compute_normalization_stats",

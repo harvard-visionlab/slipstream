@@ -45,8 +45,8 @@ FFCV_TYPE_TO_FIELD_TYPE = {
     FFCV_TYPE_RGB_IMAGE: "ImageBytes",
     FFCV_TYPE_INT: "int",
     FFCV_TYPE_FLOAT: "float",
-    FFCV_TYPE_BYTES: "bytes",
-    FFCV_TYPE_JSON: "bytes",
+    FFCV_TYPE_BYTES: "bytes",   # default, overridden by auto-detect
+    FFCV_TYPE_JSON: "str",      # JSON is always text
 }
 
 
@@ -221,6 +221,23 @@ def _download_fsspec(
         fs.get(resolved_path, str(local_path))
 
 
+def _find_image_end(data: bytes | np.ndarray, max_len: int) -> int:
+    """Find actual image end, trimming FFCV page-alignment padding.
+
+    FFCV rounds allocations up to page_size boundaries, so image bytes
+    include garbage padding after the actual data. For JPEG, we find the
+    FFD9 end-of-image marker. For other formats, return max_len.
+    """
+    if isinstance(data, np.ndarray):
+        data = bytes(data[:max_len])
+    if len(data) >= 2 and data[0] == 0xFF and data[1] == 0xD8:
+        # JPEG: find FFD9 end-of-image marker
+        eoi = data.find(b'\xff\xd9')
+        if eoi != -1:
+            return eoi + 2
+    return max_len
+
+
 class FFCVFileReader:
     """Reader for FFCV .beton/.ffcv files.
 
@@ -367,6 +384,11 @@ class FFCVFileReader:
     def cache_path(self) -> Path:
         return self._cache_path
 
+    @property
+    def image_fields(self) -> list[str]:
+        """List of image field names."""
+        return [name for name, ft in self.field_types.items() if ft == "ImageBytes"]
+
     def _read_header(self) -> None:
         self._header = np.fromfile(
             str(self._path), dtype=FFCV_HEADER_DTYPE, count=1
@@ -492,6 +514,21 @@ class FFCVFileReader:
             self.field_types[raw_name] = field_type
             self._field_name_map[raw_name] = i
 
+        # Auto-detect text in "bytes" fields by probing first sample
+        for name, ft in list(self.field_types.items()):
+            if ft != "bytes":
+                continue
+            field_idx = self._field_name_map[name]
+            meta = self._all_metadata[f'f{field_idx}']
+            ptr = int(meta[0]['ptr'])
+            size = int(meta[0]['size'])
+            sample_bytes = bytes(self._mmap[ptr:ptr + size])
+            try:
+                sample_bytes.decode('utf-8')
+                self.field_types[name] = "str"
+            except UnicodeDecodeError:
+                pass  # Keep as "bytes" (binary data)
+
     def __len__(self) -> int:
         return self.num_samples
 
@@ -507,13 +544,26 @@ class FFCVFileReader:
             field_idx = self._field_name_map[name]
 
             if field_type == "ImageBytes":
-                ptr = int(self._alloc_ptr[idx])
-                size = int(self._alloc_size[idx])
-                sample[name] = bytes(self._mmap[ptr:ptr + size])
+                # Use data_ptr from per-sample metadata (actual JPEG start),
+                # not alloc_ptr (page-aligned allocation start)
+                data_ptr = int(self._image_data_ptrs[idx])
+                alloc_end = int(self._alloc_ptr[idx]) + int(self._alloc_size[idx])
+                max_size = alloc_end - data_ptr
+                data = bytes(self._mmap[data_ptr:data_ptr + max_size])
+                actual_size = _find_image_end(data, max_size)
+                sample[name] = data[:actual_size]
+            elif field_type == "str":
+                meta = self._all_metadata[f'f{field_idx}']
+                ptr = int(meta[idx]['ptr'])
+                size = int(meta[idx]['size'])
+                raw = bytes(self._mmap[ptr:ptr + size])
+                text = raw.decode('utf-8')
+                # Strip null terminator (FFCV JSONField appends \0)
+                sample[name] = text.rstrip('\x00')
             elif field_type == "bytes":
-                alloc = self._var_field_alloc[field_idx]
-                ptr = int(alloc[idx]['ptr'])
-                size = int(alloc[idx]['size'])
+                meta = self._all_metadata[f'f{field_idx}']
+                ptr = int(meta[idx]['ptr'])
+                size = int(meta[idx]['size'])
                 sample[name] = bytes(self._mmap[ptr:ptr + size])
             elif field_type == "int":
                 meta = self._all_metadata[f'f{field_idx}']
@@ -541,22 +591,38 @@ class FFCVFileReader:
                 images = []
                 sizes = []
                 for i in range(n):
-                    ptr = int(self._alloc_ptr[i])
-                    size = int(self._alloc_size[i])
-                    images.append(bytes(self._mmap[ptr:ptr + size]))
-                    sizes.append(size)
+                    # Use data_ptr from per-sample metadata (actual JPEG start),
+                    # not alloc_ptr (page-aligned allocation start)
+                    data_ptr = int(self._image_data_ptrs[i])
+                    alloc_end = int(self._alloc_ptr[i]) + int(self._alloc_size[i])
+                    max_size = alloc_end - data_ptr
+                    data = bytes(self._mmap[data_ptr:data_ptr + max_size])
+                    actual_size = _find_image_end(data, max_size)
+                    images.append(data[:actual_size])
+                    sizes.append(actual_size)
 
                 result[name] = images
                 result[f"__{name}_sizes"] = sizes
                 result[f"__{name}_heights"] = self._heights.tolist()
                 result[f"__{name}_widths"] = self._widths.tolist()
 
-            elif field_type == "bytes":
-                alloc = self._var_field_alloc[field_idx]
+            elif field_type == "str":
+                meta = self._all_metadata[f'f{field_idx}']
                 values = []
                 for i in range(n):
-                    ptr = int(alloc[i]['ptr'])
-                    size = int(alloc[i]['size'])
+                    ptr = int(meta[i]['ptr'])
+                    size = int(meta[i]['size'])
+                    raw = bytes(self._mmap[ptr:ptr + size])
+                    text = raw.decode('utf-8')
+                    values.append(text.rstrip('\x00'))
+                result[name] = values
+
+            elif field_type == "bytes":
+                meta = self._all_metadata[f'f{field_idx}']
+                values = []
+                for i in range(n):
+                    ptr = int(meta[i]['ptr'])
+                    size = int(meta[i]['size'])
                     values.append(bytes(self._mmap[ptr:ptr + size]))
                 result[name] = values
 

@@ -5,7 +5,12 @@ Readers provide a uniform interface for accessing data from various formats
 """
 
 from slipstream.readers.ffcv import FFCVFileReader
+from slipstream.readers.imagefolder import SlipstreamImageFolder, open_imagefolder
+from slipstream.readers.streaming import StreamingReader
 
 __all__ = [
     "FFCVFileReader",
+    "SlipstreamImageFolder",
+    "StreamingReader",
+    "open_imagefolder",
 ]

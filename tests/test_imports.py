@@ -29,7 +29,7 @@ class TestTopLevelImports:
         from slipstream import FFCVFileDataset, FFCVFilePrefetchingDataLoader
 
     def test_readers(self):
-        from slipstream import FFCVFileReader
+        from slipstream import FFCVFileReader, SlipstreamImageFolder, StreamingReader, open_imagefolder
 
     def test_transforms(self):
         from slipstream import Compose, Normalize, ToDevice, ToTorchImage
@@ -52,7 +52,7 @@ class TestTopLevelImports:
     def test_pipeline_presets(self):
         from slipstream import make_train_pipeline, make_val_pipeline
         from slipstream import supervised_train, supervised_val
-        from slipstream import simclr, byol, multicrop
+        from slipstream import simclr, multicrop
 
     def test_crop_utils(self):
         from slipstream import CropParams, align_to_mcu
@@ -125,12 +125,6 @@ class TestPresetStructure:
         p = simclr(224, seed=42)
         assert 'image' in p
         assert len(p['image']) == 2  # two views
-
-    def test_byol_structure(self):
-        from slipstream.pipelines import byol
-        p = byol(224, seed=42)
-        assert 'image' in p
-        assert len(p['image']) == 2
 
     def test_multicrop_structure(self):
         from slipstream.pipelines import multicrop

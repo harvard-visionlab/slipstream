@@ -50,7 +50,8 @@ slipstream/
 │   ├── cache.py                # OptimizedCache (slip cache format)
 │   ├── loader.py               # SlipstreamLoader (multi-crop support)
 │   ├── readers/                # Dataset format adapters
-│   │   └── ffcv.py             # FFCVFileReader (.ffcv/.beton)
+│   │   ├── ffcv.py             # FFCVFileReader (.ffcv/.beton)
+│   │   └── imagefolder.py      # SlipstreamImageFolder (torchvision-style)
 │   ├── backends/               # Low-level dataset backends
 │   │   ├── ffcv_file.py        # FFCVFileDataset
 │   │   └── ffcv_style.py       # FFCVStyleDataset
@@ -107,9 +108,10 @@ All presets accept: `size`, `seed`, `device`, `dtype`, `normalize`
 
 1. ⬜ **YUV crop pipelines**: `CenterCropYUV`, `RandomResizedCropYUV` — crop+resize while keeping YUV colorspace
 2. ✅ **HuggingFace support**: `hf://` URIs work via LitData integration
-3. ⬜ **ImageFolder reader**: `ImageFolderReader` for torchvision-style directories
+3. ✅ **ImageFolder reader**: `SlipstreamImageFolder` for torchvision-style directories + S3 tar archives
 4. ⬜ **End-to-end correctness tests**: FFCV/LitData → slip cache verification
 5. ⬜ **Documentation**: README, API docs, performance guide
+6. ⬜ **Deprecate `transform` parameter**: Remove global `transform` in favor of `pipelines` for consistency
 
 ---
 
@@ -156,9 +158,13 @@ Never add `.sum()`, `.item()`, etc. to benchmark loops. On CPU, operations are s
 from slipstream import SlipstreamDataset, SlipstreamLoader
 from slipstream.pipelines import supervised_train, lejepa
 
-# Supervised training (S3)
+# Supervised training (S3 streaming)
 dataset = SlipstreamDataset(input_dir="s3://bucket/dataset/", decode_images=False)
 loader = SlipstreamLoader(dataset, batch_size=256, pipelines=supervised_train(size=224))
+
+# ImageFolder (local or S3 tar archive - auto-detected)
+dataset = SlipstreamDataset(local_dir="/path/to/imagenet/val")
+dataset = SlipstreamDataset(remote_dir="s3://bucket/imagenet/val.tar.gz")
 
 # HuggingFace dataset (hf:// URI)
 dataset = SlipstreamDataset(input_dir="hf://datasets/cifar10/data", decode_images=True)
