@@ -113,6 +113,45 @@ Ported pipeline presets matching lrm-ssl yaml configs:
 
 4. ✅ **HuggingFace image dict support** - Handles `{'bytes': ..., 'path': ...}` format
 
+### Phase 7: ImageFolder Reader & Dataset Composition Refactor ✅
+
+Major refactor of `SlipstreamDataset` from LitData inheritance to a composition pattern
+with pluggable readers, enabling support for torchvision-style ImageFolder directories
+alongside FFCV and LitData streaming sources.
+
+1. ✅ **Composition refactor** — `SlipstreamDataset` wraps `self._reader` (StreamingReader, SlipstreamImageFolder, or FFCVFileReader) instead of inheriting from `LitDataStreamingDataset`
+   - Processing logic (decode, transform, pipelines) is now source-agnostic
+   - Reader-specific attributes delegated via `__getattr__` fallback
+   - `_create_reader()` dispatches: FFCV (.ffcv/.beton) → ImageFolder (tar/class dirs) → StreamingReader (default)
+
+2. ✅ **SlipstreamImageFolder reader** — torchvision-style class directories + S3 tar archives
+   - Auto-detection via `is_imagefolder_structure()` and `detect_local_dataset_type()`
+   - Fast JPEG/PNG dimension parsing via `image_header.py` (no full decode)
+   - `read_all_fields()` bulk path for cache building
+
+3. ✅ **StreamingReader** — extracted LitData wrapper behind the reader protocol
+   - Same streaming interface, now a thin adapter implementing the reader protocol
+
+4. ✅ **FFCV bug fixes** (3 bugs fixed):
+   - **Data pointer bug**: Use per-sample metadata `ptr`/`size` (exact data) instead of alloc table `ptr`/`size` (page-aligned, reads garbage padding)
+   - **Image end trimming**: `_find_image_end()` strips page-alignment padding via JPEG FFD9 marker detection
+   - **Text field auto-decode**: `JSONField` → `"str"`, `BytesField` probed for UTF-8 and upgraded to `"str"` when text detected. Routes through `StringStorage` (pure Python) instead of `ImageBytesStorage` (Numba), avoiding Numba thread-safety crash
+
+5. ✅ **Cache anti-OOM refactor** — `_iter_litdata_chunk_samples()` yields one sample at a time instead of accumulating all in memory, preventing OOM on large datasets
+
+6. ✅ **Tests** — 38 new tests (20 FFCV reader, 18 ImageFolder), all 220 passing
+
+7. ✅ **Tutorial notebooks** — ImageFolder (12), FFCV (13), HuggingFace (11) dataset workflows
+
+8. ✅ **FFCV benchmark parity verified** — `SlipstreamDataset(FFCV)` top-level API matches direct `FFCVFileReader` path:
+
+   | Benchmark | Samples/sec |
+   |-----------|-------------|
+   | FFCVFileReader → SlipstreamLoader (RRC, simple) | 15,427 |
+   | FFCVFileReader → SlipstreamLoader (RRC, threaded) | 15,582 |
+   | SlipstreamDataset(FFCV) → Loader (RRC, simple) | 15,446 |
+   | SlipstreamDataset(FFCV) → Loader (RRC, threaded) | 15,502 |
+
 ---
 
 ## Benchmark Results Summary
@@ -121,6 +160,7 @@ All CPU decode targets met or exceeded. See [BENCHMARKS.md](BENCHMARKS.md) for f
 
 - **Raw I/O**: 939k img/s (2.3x FFCV)
 - **CPU RRC**: 13,851 img/s (104.5% of FFCV); YUV420: 27,955 img/s (2.04x JPEG)
+- **FFCV reader RRC**: 15,582 img/s (threaded); Dataset API at parity (15,502 img/s)
 - **H100 YUV420 RRC**: 44,987 img/s (2.69x JPEG)
 - **GPU batch augmentations**: 7.6x–53.7x speedup over per-sample
 - **GPU-optimal path**: numpy HWC → cuda: 11,680 samples/sec (2.6x faster than tensor CHW)

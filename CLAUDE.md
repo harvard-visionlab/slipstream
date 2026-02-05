@@ -46,10 +46,11 @@ uv run jupyter lab               # Launch JupyterLab
 slipstream/
 ├── slipstream/
 │   ├── __init__.py             # Package exports
-│   ├── dataset.py              # SlipstreamDataset (LitData wrapper)
+│   ├── dataset.py              # SlipstreamDataset (composition, auto-detects source)
 │   ├── cache.py                # OptimizedCache (slip cache format)
 │   ├── loader.py               # SlipstreamLoader (multi-crop support)
-│   ├── readers/                # Dataset format adapters
+│   ├── readers/                # Dataset format adapters (reader protocol)
+│   │   ├── streaming.py        # StreamingReader (LitData wrapper)
 │   │   ├── ffcv.py             # FFCVFileReader (.ffcv/.beton)
 │   │   └── imagefolder.py      # SlipstreamImageFolder (torchvision-style)
 │   ├── backends/               # Low-level dataset backends
@@ -66,6 +67,8 @@ slipstream/
 │   │   ├── ipcl.py             # ipcl (5-crop SSL)
 │   │   ├── lejepa.py           # lejepa (2 global + 4 local)
 │   │   └── multicrop_preset.py # multicrop (flexible global+local)
+│   ├── utils/
+│   │   └── image_header.py     # Fast JPEG/PNG dimension parsing
 │   └── transforms/             # GPU batch augmentations (fastaugs port)
 ├── libslipstream/              # C++ extension (TurboJPEG + stb_image_resize2)
 ├── benchmarks/                 # Benchmark scripts
@@ -109,15 +112,19 @@ All presets accept: `size`, `seed`, `device`, `dtype`, `normalize`
 1. ⬜ **YUV crop pipelines**: `CenterCropYUV`, `RandomResizedCropYUV` — crop+resize while keeping YUV colorspace
 2. ✅ **HuggingFace support**: `hf://` URIs work via LitData integration
 3. ✅ **ImageFolder reader**: `SlipstreamImageFolder` for torchvision-style directories + S3 tar archives
-4. ⬜ **End-to-end correctness tests**: FFCV/LitData → slip cache verification
-5. ⬜ **Documentation**: README, API docs, performance guide
-6. ⬜ **Deprecate `transform` parameter**: Remove global `transform` in favor of `pipelines` for consistency
+4. ✅ **FFCV reader fixes**: Data pointer bug, image end trimming, text field auto-decode (bytes→str)
+5. ✅ **Composition refactor**: `SlipstreamDataset` wraps pluggable readers (StreamingReader, ImageFolder, FFCV)
+6. ⬜ **End-to-end verification & notebook cleanup**: Update tutorial notebooks (00–13) to reflect composition refactor and new reader APIs. Many are outdated from incremental development. Also add correctness tests for FFCV/LitData → slip cache round-trips. **Note**: notebooks contain base64-encoded cell outputs — use `NotebookEdit` on individual cells or strip outputs first to avoid context bloat.
+7. ⬜ **Documentation**: README, API docs, performance guide
+8. ⬜ **Deprecate `transform` parameter**: Remove global `transform` in favor of `pipelines` for consistency
 
 ---
 
 ## Key Design Decisions
 
 ### Architecture
+- **Composition pattern**: `SlipstreamDataset` wraps a pluggable `_reader` (StreamingReader, SlipstreamImageFolder, or FFCVFileReader). Source-agnostic processing (decode, transform, pipelines) lives in the Dataset.
+- **Auto-detection**: `_create_reader()` dispatches: FFCV (.ffcv/.beton) → ImageFolder (tar/class dirs) → StreamingReader (default)
 - **Two-layer loader**: PrefetchingDataLoader (raw I/O) + SlipstreamLoader (decode + transforms)
 - **Primary decoder**: NumbaBatchDecoder (Numba prange + libslipstream C extension)
 - **GPU decoder**: nvImageCodec (optional, CPU path is faster for most workloads)
@@ -161,6 +168,10 @@ from slipstream.pipelines import supervised_train, lejepa
 # Supervised training (S3 streaming)
 dataset = SlipstreamDataset(input_dir="s3://bucket/dataset/", decode_images=False)
 loader = SlipstreamLoader(dataset, batch_size=256, pipelines=supervised_train(size=224))
+
+# FFCV file (local or S3 - auto-detected by .ffcv/.beton extension)
+dataset = SlipstreamDataset("s3://bucket/imagenet-val.ffcv")
+dataset = SlipstreamDataset(local_dir="/path/to/imagenet-val.ffcv")
 
 # ImageFolder (local or S3 tar archive - auto-detected)
 dataset = SlipstreamDataset(local_dir="/path/to/imagenet/val")

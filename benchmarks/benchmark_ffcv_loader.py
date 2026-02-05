@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Benchmark SlipstreamLoader fed from an FFCV .beton file.
 
-Tests the full FFCV reader → OptimizedCache → SlipstreamLoader pipeline
-with RandomResizedCrop, verifying performance matches the LitData path.
+Tests two paths and compares performance:
+  1. FFCVFileReader → SlipstreamLoader  (direct reader API)
+  2. SlipstreamDataset → SlipstreamLoader  (top-level API, auto-detects FFCV)
+
+Both should produce identical throughput (the Dataset path just wraps the Reader).
 
 Usage:
     uv run python benchmarks/benchmark_ffcv_loader.py
@@ -119,6 +122,101 @@ def benchmark_ffcv_loader(
     )
 
 
+def benchmark_ffcv_dataset(
+    ffcv_path: str,
+    batch_size: int,
+    num_epochs: int,
+    num_warmup: int,
+    num_threads: int = 0,
+    target_size: int = 224,
+    use_threading: bool = True,
+    cache_dir: str | None = None,
+) -> BenchmarkResult:
+    """Benchmark SlipstreamDataset(ffcv_path) → SlipstreamLoader.
+
+    Uses the top-level API that auto-detects FFCV files, rather than
+    constructing FFCVFileReader directly.
+    """
+    from slipstream import SlipstreamDataset, SlipstreamLoader
+    from slipstream.decoders import DecodeRandomResizedCrop
+
+    mode = "threaded" if use_threading else "simple"
+    name = f"SlipstreamDataset(FFCV) → Loader (RRC, {mode})"
+
+    dataset = SlipstreamDataset(ffcv_path, cache_dir=cache_dir)
+    print(f"\n{name}:")
+    print(f"  Dataset: {len(dataset):,} samples, fields={dataset.field_types}")
+
+    pipelines = {
+        "image": [
+            DecodeRandomResizedCrop(target_size, num_threads=num_threads),
+        ],
+    }
+
+    loader = SlipstreamLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        drop_last=False,
+        pipelines=pipelines,
+        exclude_fields=["path"],
+        use_threading=use_threading,
+    )
+
+    def run_epoch():
+        total_samples = 0
+        for batch in tqdm(loader, leave=False):
+            img = batch["image"]
+            total_samples += img.shape[0]
+        return total_samples
+
+    # Warmup
+    print(f"  Warmup ({num_warmup} epoch(s)):")
+    warmup_results = []
+    for i in range(num_warmup):
+        start = time.perf_counter()
+        total = run_epoch()
+        elapsed = time.perf_counter() - start
+        rate = total / elapsed
+        warmup_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        print(f"    Warmup {i + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
+
+    # Timed epochs
+    epoch_results = []
+    for epoch in range(num_epochs):
+        start = time.perf_counter()
+        total = run_epoch()
+        elapsed = time.perf_counter() - start
+        rate = total / elapsed
+        epoch_results.append(
+            {"samples_per_sec": rate, "elapsed_sec": elapsed, "total_samples": total})
+        print(f"  Epoch {epoch + 1}: {rate:,.0f} samples/sec ({elapsed:.2f}s)")
+
+    avg_rate = np.mean([r["samples_per_sec"] for r in epoch_results])
+    print(f"  Average: {avg_rate:,.0f} samples/sec")
+
+    loader.shutdown()
+
+    return BenchmarkResult(
+        name=name,
+        samples_per_sec=avg_rate,
+        total_samples=epoch_results[0]["total_samples"],
+        elapsed_sec=sum(r["elapsed_sec"] for r in epoch_results),
+        num_epochs=num_epochs,
+        warmup_epochs=num_warmup,
+        per_epoch_results=warmup_results + epoch_results,
+        metadata={
+            "pipeline_type": "train",
+            "target_size": target_size,
+            "batch_size": batch_size,
+            "num_threads": num_threads,
+            "use_threading": use_threading,
+            "source": "ffcv_via_dataset",
+        },
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Benchmark SlipstreamLoader with FFCV reader")
@@ -183,6 +281,31 @@ def main():
         num_threads=args.num_threads,
         target_size=args.target_size,
         use_threading=True,
+    )
+    results.append(result)
+
+    # ---- SlipstreamDataset API (auto-detect FFCV) ----
+    print("\n" + "=" * 60)
+    print("SlipstreamDataset(FFCV) — top-level API")
+    print("=" * 60)
+
+    # Simple mode
+    result = benchmark_ffcv_dataset(
+        args.ffcv_path, args.batch_size, args.epochs, args.warmup,
+        num_threads=args.num_threads,
+        target_size=args.target_size,
+        use_threading=False,
+        cache_dir=args.cache_dir,
+    )
+    results.append(result)
+
+    # Threaded mode
+    result = benchmark_ffcv_dataset(
+        args.ffcv_path, args.batch_size, args.epochs, args.warmup,
+        num_threads=args.num_threads,
+        target_size=args.target_size,
+        use_threading=True,
+        cache_dir=args.cache_dir,
     )
     results.append(result)
 
