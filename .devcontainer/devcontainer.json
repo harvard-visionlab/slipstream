@@ -1,0 +1,31 @@
+{
+  "name": "slipstream-ffcv",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "workspaceFolder": "/workspace",
+  "postCreateCommand": "uv sync --group dev --group ffcv-test",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter",
+        "charliermarsh.ruff"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": ".venv/bin/python"
+      }
+    }
+  },
+  "remoteUser": "root",
+  "mounts": [
+    "source=${localEnv:HOME}/.aws,target=/root/.aws,type=bind,consistency=cached",
+    "source=slipstream-venv,target=/workspace/.venv,type=volume"
+  ],
+  "remoteEnv": {
+    "AWS_REGION": "us-east-1"
+  }
+}

@@ -1571,13 +1571,22 @@ class OptimizedCache:
                     cache_bytes = bytes(storage._data_mmap[ptr:ptr + size])
 
                     if field_type in ("ImageBytes", "HFImageDict"):
+                        # Validate dimensions are non-zero (catches silent parse failures)
+                        cache_h = int(meta['height'])
+                        cache_w = int(meta['width'])
+                        if cache_h == 0 or cache_w == 0:
+                            errors.append(
+                                f"Invalid dimensions at {idx}, '{field_name}': "
+                                f"{cache_h}x{cache_w} (dimension parse may have failed)"
+                            )
+                            continue
+
                         stored_format = self.get_image_format(field_name)
 
                         if stored_format == "yuv420":
                             dataset_bytes = _extract_image_bytes(dataset_value)
                             dataset_w, dataset_h = read_image_dimensions(dataset_bytes)
-                            cache_h = int(meta['height'])
-                            cache_w = int(meta['width'])
+                            # cache_h and cache_w already set above
                             padded_h = dataset_h + (dataset_h % 2)
                             padded_w = dataset_w + (dataset_w % 2)
 
