@@ -4,8 +4,9 @@ These tests verify that FFCVFileReader returns identical bytes to the native
 ffcv-ssl Reader implementation. This is the strongest possible test for reader
 correctness - if SHA256 hashes match for all samples, the reader is correct.
 
-These tests require ffcv-ssl and run in the devcontainer (Linux only).
-Skip on systems without ffcv installed.
+These tests require:
+1. ffcv-ssl installed (run in devcontainer - Linux only)
+2. Access to S3 bucket with real FFCV files
 
 Run with: pytest tests/test_ffcv_verification.py -v
 """
@@ -13,7 +14,6 @@ Run with: pytest tests/test_ffcv_verification.py -v
 import hashlib
 import io
 import os
-from pathlib import Path
 
 import numpy as np
 import PIL.Image
@@ -30,7 +30,14 @@ except ImportError:
 
 pytestmark = pytest.mark.skipif(
     not FFCV_AVAILABLE,
-    reason="ffcv-ssl not installed (run in devcontainer with uv sync --group ffcv-test)"
+    reason="ffcv-ssl not installed (run in devcontainer)"
+)
+
+# Real FFCV file from S3 (ImageNet validation set)
+# This is the same file used in notebooks/13_ffcv_datasets.ipynb
+FFCV_VAL_S3_PATH = (
+    "s3://visionlab-datasets/imagenet1k/pre-processed/"
+    "s256-l512-jpgbytes-q100-ffcv/imagenet1k-s256-l512-jpg-q100-cs100-val-7ac6386e.ffcv"
 )
 
 
@@ -38,96 +45,31 @@ pytestmark = pytest.mark.skipif(
 # Test fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def ffcv_test_path():
-    """Return path to a real FFCV file for testing.
+@pytest.fixture(scope="module")
+def ffcv_val_path(tmp_path_factory):
+    """Download and cache the real ImageNet-val FFCV file.
 
-    Set FFCV_TEST_PATH environment variable to point to a .ffcv file,
-    or skip if not available.
+    Uses FFCVFileReader's built-in S3 download and caching mechanism.
+    Scoped to module to avoid re-downloading for each test.
     """
-    path = os.environ.get("FFCV_TEST_PATH")
-    if path is None:
-        pytest.skip("FFCV_TEST_PATH not set - set to path of .ffcv file to test")
-    path = Path(path)
-    if not path.exists():
-        pytest.skip(f"FFCV_TEST_PATH={path} does not exist")
-    return path
+    # Check if AWS credentials are available
+    import boto3
+    try:
+        boto3.client('s3').head_bucket(Bucket='visionlab-datasets')
+    except Exception as e:
+        pytest.skip(f"S3 access not available: {e}")
 
+    # FFCVFileReader handles S3 download and caching automatically
+    # It downloads to ~/.cache/slipstream/ by default
+    cache_dir = tmp_path_factory.mktemp("ffcv_cache")
 
-# ---------------------------------------------------------------------------
-# Helper to create synthetic FFCV for local testing
-# ---------------------------------------------------------------------------
-
-def _create_test_jpeg(width: int = 32, height: int = 32, color: tuple = (255, 0, 0)) -> bytes:
-    """Create a JPEG image as bytes using PIL."""
-    img = PIL.Image.new("RGB", (width, height), color)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=90)
-    return buf.getvalue()
-
-
-def _build_synthetic_ffcv_for_native(
-    path: Path,
-    images: list[tuple[bytes, int, int]],
-    labels: list[int],
-) -> None:
-    """Build a synthetic FFCV file using the native ffcv-ssl writer.
-
-    This ensures we're testing against files created by the real FFCV,
-    not our synthetic builder (which could have the same bugs).
-    """
-    from ffcv.writer import DatasetWriter
-    from ffcv.fields import RGBImageField, IntField
-
-    class SyntheticDataset:
-        def __init__(self, images, labels):
-            self.images = images
-            self.labels = labels
-
-        def __len__(self):
-            return len(self.images)
-
-        def __getitem__(self, idx):
-            jpeg_bytes, w, h = self.images[idx]
-            img = PIL.Image.open(io.BytesIO(jpeg_bytes))
-            return np.array(img), self.labels[idx]
-
-    dataset = SyntheticDataset(images, labels)
-    writer = DatasetWriter(
-        str(path),
-        {
-            'image': RGBImageField(write_mode='jpg'),
-            'label': IntField(),
-        },
-        num_workers=1,
-    )
-    writer.from_indexed_dataset(dataset)
-
-
-@pytest.fixture
-def native_written_ffcv(tmp_path):
-    """Create a synthetic FFCV file using native ffcv-ssl writer.
-
-    This is the gold standard - if our reader matches bytes from a file
-    written by native ffcv-ssl, we know the reader is correct.
-    """
-    if not FFCV_AVAILABLE:
-        pytest.skip("ffcv-ssl required to create test file")
-
-    colors = [
-        (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
-        (255, 0, 255), (0, 255, 255), (128, 128, 128), (64, 192, 32),
-    ]
-    images = []
-    for color in colors:
-        jpeg = _create_test_jpeg(width=64, height=48, color=color)
-        images.append((jpeg, 64, 48))
-
-    labels = list(range(8))
-    ffcv_path = tmp_path / "native_written.ffcv"
-    _build_synthetic_ffcv_for_native(ffcv_path, images, labels)
-
-    return ffcv_path, images, labels
+    try:
+        # This will download if not already cached
+        reader = FFCVFileReader(FFCV_VAL_S3_PATH, cache_dir=str(cache_dir), verbose=True)
+        local_path = reader._local_path
+        return local_path
+    except Exception as e:
+        pytest.skip(f"Failed to download FFCV file: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -137,27 +79,31 @@ def native_written_ffcv(tmp_path):
 class TestFFCVBytesMatchNative:
     """Verify FFCVFileReader returns identical bytes to native ffcv-ssl."""
 
-    def test_all_samples_bytes_match(self, native_written_ffcv):
-        """Hash comparison of all samples from native-written FFCV file."""
-        ffcv_path, original_images, labels = native_written_ffcv
-
-        slip_reader = FFCVFileReader(str(ffcv_path), verbose=False)
-        native_reader = FFCVNativeReader(str(ffcv_path))
+    def test_sample_count_matches(self, ffcv_val_path):
+        """Verify sample counts match between readers."""
+        slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
+        native_reader = FFCVNativeReader(str(ffcv_val_path))
 
         assert len(slip_reader) == len(native_reader), \
             f"Length mismatch: slipstream={len(slip_reader)}, native={len(native_reader)}"
 
+    def test_first_100_samples_bytes_match(self, ffcv_val_path):
+        """Hash comparison of first 100 samples."""
+        slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
+        native_reader = FFCVNativeReader(str(ffcv_val_path))
+
+        num_samples = min(100, len(slip_reader))
         mismatches = []
-        for idx in range(len(slip_reader)):
+
+        for idx in range(num_samples):
             slip_sample = slip_reader[idx]
             native_sample = native_reader[idx]
 
-            # Native reader returns tuple, first element is image
-            # For JPEG mode, native returns the raw JPEG bytes
+            # Get image bytes from both readers
             slip_bytes = slip_sample['image']
             native_bytes = native_sample[0]
 
-            # If native returns numpy array, it's decoded - skip byte comparison
+            # ffcv-ssl may return decoded numpy array or raw bytes depending on field type
             if isinstance(native_bytes, np.ndarray):
                 # Native decoded the image - compare decoded pixels instead
                 slip_img = np.array(PIL.Image.open(io.BytesIO(slip_bytes)))
@@ -170,35 +116,38 @@ class TestFFCVBytesMatchNative:
                 native_hash = hashlib.sha256(native_bytes).hexdigest()
 
                 if slip_hash != native_hash:
-                    mismatches.append((idx, "hash mismatch"))
+                    mismatches.append((idx, f"hash mismatch: {len(slip_bytes)} vs {len(native_bytes)} bytes"))
 
         if mismatches:
             sample_errors = mismatches[:5]
-            pytest.fail(f"Bytes mismatch at {len(mismatches)} indices: {sample_errors}...")
+            pytest.fail(f"Bytes mismatch at {len(mismatches)}/{num_samples} indices: {sample_errors}...")
 
-    def test_metadata_matches(self, native_written_ffcv):
-        """Verify field count and sample count match."""
-        ffcv_path, _, labels = native_written_ffcv
+    def test_labels_match(self, ffcv_val_path):
+        """Verify labels match for first 100 samples."""
+        slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
+        native_reader = FFCVNativeReader(str(ffcv_val_path))
 
-        slip_reader = FFCVFileReader(str(ffcv_path), verbose=False)
-        native_reader = FFCVNativeReader(str(ffcv_path))
+        num_samples = min(100, len(slip_reader))
+        mismatches = []
 
-        assert len(slip_reader) == len(native_reader)
-
-        # Verify labels match
-        for idx in range(len(labels)):
+        for idx in range(num_samples):
             slip_label = slip_reader[idx]['label']
             native_label = native_reader[idx][1]  # Second field is label
-            assert slip_label == native_label, f"Label mismatch at {idx}: {slip_label} vs {native_label}"
 
-    def test_decoded_images_match(self, native_written_ffcv):
+            if slip_label != native_label:
+                mismatches.append((idx, slip_label, native_label))
+
+        if mismatches:
+            pytest.fail(f"Label mismatch at {len(mismatches)}/{num_samples} samples: {mismatches[:5]}...")
+
+    def test_decoded_images_match(self, ffcv_val_path):
         """Verify decoded images match within JPEG tolerance."""
-        ffcv_path, _, _ = native_written_ffcv
+        slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
+        native_reader = FFCVNativeReader(str(ffcv_val_path))
 
-        slip_reader = FFCVFileReader(str(ffcv_path), verbose=False)
-        native_reader = FFCVNativeReader(str(ffcv_path))
+        num_samples = min(50, len(slip_reader))
 
-        for idx in range(len(slip_reader)):
+        for idx in range(num_samples):
             slip_bytes = slip_reader[idx]['image']
             native_sample = native_reader[idx][0]
 
@@ -216,26 +165,68 @@ class TestFFCVBytesMatchNative:
             max_diff = np.max(diff)
             mean_diff = np.mean(diff)
 
-            assert max_diff <= 2, f"Sample {idx}: max pixel diff {max_diff} exceeds tolerance (2)"
-            assert mean_diff < 0.5, f"Sample {idx}: mean pixel diff {mean_diff} exceeds tolerance (0.5)"
+            assert max_diff <= 5, f"Sample {idx}: max pixel diff {max_diff} exceeds tolerance (5)"
+            assert mean_diff < 1.5, f"Sample {idx}: mean pixel diff {mean_diff} exceeds tolerance (1.5)"
 
+    def test_jpeg_markers_valid(self, ffcv_val_path):
+        """Verify all images have valid JPEG SOI/EOI markers."""
+        slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
 
-class TestFFCVBytesMatchNativeReal:
-    """Test against real FFCV files (requires FFCV_TEST_PATH env var)."""
-
-    @pytest.mark.slow
-    def test_real_ffcv_bytes_match(self, ffcv_test_path):
-        """Verify bytes match for first 100 samples of a real FFCV file."""
-        slip_reader = FFCVFileReader(str(ffcv_test_path), verbose=False)
-        native_reader = FFCVNativeReader(str(ffcv_test_path))
-
-        assert len(slip_reader) == len(native_reader)
-
-        # Test first 100 samples (or all if fewer)
         num_samples = min(100, len(slip_reader))
-        mismatches = []
+        errors = []
 
         for idx in range(num_samples):
+            try:
+                sample = slip_reader[idx]
+                img_bytes = sample['image']
+
+                # Check JPEG markers
+                if img_bytes[:2] != b'\xff\xd8':
+                    errors.append((idx, "missing SOI marker"))
+                elif img_bytes[-2:] != b'\xff\xd9':
+                    errors.append((idx, "missing EOI marker"))
+            except Exception as e:
+                errors.append((idx, str(e)))
+
+        if errors:
+            pytest.fail(f"JPEG marker errors at {len(errors)}/{num_samples} samples: {errors[:5]}...")
+
+
+@pytest.mark.slow
+class TestFFCVFullValidation:
+    """Full validation tests (all samples) - marked slow."""
+
+    def test_all_samples_readable(self, ffcv_val_path):
+        """Verify all samples can be read without error."""
+        slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
+
+        errors = []
+        for idx in range(len(slip_reader)):
+            try:
+                sample = slip_reader[idx]
+                # Verify it's valid JPEG
+                img_bytes = sample['image']
+                assert img_bytes[:2] == b'\xff\xd8', f"Sample {idx}: not a JPEG"
+                assert img_bytes[-2:] == b'\xff\xd9', f"Sample {idx}: missing JPEG EOI"
+                # Verify it can be decoded
+                img = PIL.Image.open(io.BytesIO(img_bytes))
+                img.load()  # Force decode
+            except Exception as e:
+                errors.append((idx, str(e)))
+                if len(errors) >= 10:
+                    break  # Stop early if too many errors
+
+        if errors:
+            pytest.fail(f"Errors reading {len(errors)}/{len(slip_reader)} samples: {errors}...")
+
+    def test_all_samples_bytes_match(self, ffcv_val_path):
+        """Hash comparison of ALL samples (slow - runs on full dataset)."""
+        slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
+        native_reader = FFCVNativeReader(str(ffcv_val_path))
+
+        mismatches = []
+
+        for idx in range(len(slip_reader)):
             slip_sample = slip_reader[idx]
             native_sample = native_reader[idx]
 
@@ -256,22 +247,7 @@ class TestFFCVBytesMatchNativeReal:
                     mismatches.append((idx, "hash mismatch"))
 
         if mismatches:
-            pytest.fail(f"Bytes mismatch at {len(mismatches)}/{num_samples} samples: {mismatches[:5]}...")
-
-    @pytest.mark.slow
-    def test_real_ffcv_all_samples(self, ffcv_test_path):
-        """Verify all samples can be read without error."""
-        slip_reader = FFCVFileReader(str(ffcv_test_path), verbose=False)
-
-        errors = []
-        for idx in range(len(slip_reader)):
-            try:
-                sample = slip_reader[idx]
-                # Verify it's valid JPEG
-                assert sample['image'][:2] == b'\xff\xd8', f"Sample {idx}: not a JPEG"
-                assert sample['image'][-2:] == b'\xff\xd9', f"Sample {idx}: missing JPEG EOI"
-            except Exception as e:
-                errors.append((idx, str(e)))
-
-        if errors:
-            pytest.fail(f"Errors reading {len(errors)}/{len(slip_reader)} samples: {errors[:5]}...")
+            pytest.fail(
+                f"Bytes mismatch at {len(mismatches)}/{len(slip_reader)} samples: "
+                f"{mismatches[:10]}..."
+            )

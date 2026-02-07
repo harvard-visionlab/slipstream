@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy and run install scripts
 # (module load commands fail silently with || true)
-COPY install_libjpegturbo.sh install_opencv.sh install_aws_cli.sh /tmp/
+COPY .devcontainer/install_libjpegturbo.sh .devcontainer/install_opencv.sh .devcontainer/install_aws_cli.sh /tmp/
 
 RUN chmod +x /tmp/install_*.sh && \
     /tmp/install_libjpegturbo.sh && \

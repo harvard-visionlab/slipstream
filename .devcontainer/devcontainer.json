@@ -6,7 +6,7 @@
   },
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
   "workspaceFolder": "/workspace",
-  "postCreateCommand": "uv sync --group dev --group ffcv-test",
+  "postCreateCommand": "uv venv && uv pip install -r .devcontainer/requirements-ffcv.txt && uv run python libslipstream/setup.py build_ext --inplace",
   "customizations": {
     "vscode": {
       "extensions": [
