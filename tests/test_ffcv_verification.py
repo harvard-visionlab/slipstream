@@ -66,8 +66,8 @@ def ffcv_val_path(tmp_path_factory):
     try:
         # This will download if not already cached
         reader = FFCVFileReader(FFCV_VAL_S3_PATH, cache_dir=str(cache_dir), verbose=True)
-        local_path = reader._local_path
-        return local_path
+        local_path = reader._path  # Local path after S3 download
+        return str(local_path)
     except Exception as e:
         pytest.skip(f"Failed to download FFCV file: {e}")
 
