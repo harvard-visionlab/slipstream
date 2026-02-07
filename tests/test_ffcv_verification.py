@@ -24,9 +24,14 @@ from slipstream.readers.ffcv import FFCVFileReader
 # Check if ffcv-ssl is available
 try:
     from ffcv.reader import Reader as FFCVNativeReader
+    from ffcv.fields import IntField, RGBImageField
     FFCV_AVAILABLE = True
 except ImportError:
     FFCV_AVAILABLE = False
+
+# Custom field handlers for the ImageNet FFCV file
+# Required because the file uses custom field types
+CUSTOM_HANDLERS = {'image': RGBImageField, 'label': IntField} if FFCV_AVAILABLE else {}
 
 pytestmark = pytest.mark.skipif(
     not FFCV_AVAILABLE,
@@ -82,7 +87,7 @@ class TestFFCVBytesMatchNative:
     def test_sample_count_matches(self, ffcv_val_path):
         """Verify sample counts match between readers."""
         slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
-        native_reader = FFCVNativeReader(str(ffcv_val_path))
+        native_reader = FFCVNativeReader(str(ffcv_val_path), custom_handlers=CUSTOM_HANDLERS)
 
         assert len(slip_reader) == len(native_reader), \
             f"Length mismatch: slipstream={len(slip_reader)}, native={len(native_reader)}"
@@ -90,7 +95,7 @@ class TestFFCVBytesMatchNative:
     def test_first_100_samples_bytes_match(self, ffcv_val_path):
         """Hash comparison of first 100 samples."""
         slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
-        native_reader = FFCVNativeReader(str(ffcv_val_path))
+        native_reader = FFCVNativeReader(str(ffcv_val_path), custom_handlers=CUSTOM_HANDLERS)
 
         num_samples = min(100, len(slip_reader))
         mismatches = []
@@ -125,7 +130,7 @@ class TestFFCVBytesMatchNative:
     def test_labels_match(self, ffcv_val_path):
         """Verify labels match for first 100 samples."""
         slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
-        native_reader = FFCVNativeReader(str(ffcv_val_path))
+        native_reader = FFCVNativeReader(str(ffcv_val_path), custom_handlers=CUSTOM_HANDLERS)
 
         num_samples = min(100, len(slip_reader))
         mismatches = []
@@ -143,7 +148,7 @@ class TestFFCVBytesMatchNative:
     def test_decoded_images_match(self, ffcv_val_path):
         """Verify decoded images match within JPEG tolerance."""
         slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
-        native_reader = FFCVNativeReader(str(ffcv_val_path))
+        native_reader = FFCVNativeReader(str(ffcv_val_path), custom_handlers=CUSTOM_HANDLERS)
 
         num_samples = min(50, len(slip_reader))
 
@@ -222,7 +227,7 @@ class TestFFCVFullValidation:
     def test_all_samples_bytes_match(self, ffcv_val_path):
         """Hash comparison of ALL samples (slow - runs on full dataset)."""
         slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
-        native_reader = FFCVNativeReader(str(ffcv_val_path))
+        native_reader = FFCVNativeReader(str(ffcv_val_path), custom_handlers=CUSTOM_HANDLERS)
 
         mismatches = []
 
