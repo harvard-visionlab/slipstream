@@ -401,7 +401,6 @@ class SlipstreamImageFolder(ImageFolder):
         cache_dir: Where to store the optimized cache. Defaults to root/.slipstream-cache
         decode_images: If True, decode image bytes to tensors/PIL images.
         to_pil: If True and decode_images=True, return PIL Images instead of tensors.
-        transform: Global transform applied to image field after decoding.
         pipelines: Dict mapping field names to transform functions.
         **kwargs: Additional arguments passed to ImageFolder
 
@@ -422,7 +421,6 @@ class SlipstreamImageFolder(ImageFolder):
         cache_dir: str | Path | None = None,
         decode_images: bool = False,
         to_pil: bool = True,
-        transform: Any = None,
         pipelines: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -448,7 +446,6 @@ class SlipstreamImageFolder(ImageFolder):
         # Store processing options
         self.decode_images = decode_images
         self.to_pil = to_pil
-        self._transform = transform
         self.pipelines = dict(pipelines) if pipelines is not None else None
         self.image_fields = ["image"]  # For compatibility with SlipstreamDataset
 
@@ -496,10 +493,6 @@ class SlipstreamImageFolder(ImageFolder):
         if self.decode_images:
             from slipstream.dataset import decode_image
             sample["image"] = decode_image(sample["image"], to_pil=self.to_pil)
-
-        # Apply global transform to image field
-        if self._transform is not None:
-            sample["image"] = self._transform(sample["image"])
 
         # Apply per-field pipelines
         if self.pipelines is not None:
@@ -592,7 +585,6 @@ def open_imagefolder(
     verbose: bool = True,
     decode_images: bool = False,
     to_pil: bool = True,
-    transform: Any = None,
     pipelines: dict[str, Any] | None = None,
 ) -> SlipstreamImageFolder:
     """Open ImageFolder from local path or S3 tar archive.
@@ -615,7 +607,6 @@ def open_imagefolder(
         verbose: Print progress information
         decode_images: If True, decode image bytes to tensors/PIL images.
         to_pil: If True and decode_images=True, return PIL Images instead of tensors.
-        transform: Global transform applied to image field after decoding.
         pipelines: Dict mapping field names to transform functions.
 
     Returns:
@@ -667,7 +658,6 @@ def open_imagefolder(
         cache_dir=cache_dir / "cache",
         decode_images=decode_images,
         to_pil=to_pil,
-        transform=transform,
         pipelines=pipelines,
     )
 

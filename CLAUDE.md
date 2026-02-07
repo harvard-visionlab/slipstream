@@ -109,14 +109,14 @@ All presets accept: `size`, `seed`, `device`, `dtype`, `normalize`
 
 ### Remaining Tasks
 
-1. ⬜ **YUV crop pipelines**: `CenterCropYUV`, `RandomResizedCropYUV` — crop+resize while keeping YUV colorspace
+1. ✅ **YUV crop pipelines**: `DecodeYUVCenterCrop`, `DecodeYUVRandomResizedCrop`, `DecodeYUVResizeCrop` — crop+resize while keeping YUV colorspace
 2. ✅ **HuggingFace support**: `hf://` URIs work via LitData integration
 3. ✅ **ImageFolder reader**: `SlipstreamImageFolder` for torchvision-style directories + S3 tar archives
 4. ✅ **FFCV reader fixes**: Data pointer bug, image end trimming, text field auto-decode (bytes→str)
 5. ✅ **Composition refactor**: `SlipstreamDataset` wraps pluggable readers (StreamingReader, ImageFolder, FFCV)
 6. ⬜ **End-to-end verification & notebook cleanup**: Update tutorial notebooks (00–13) to reflect composition refactor and new reader APIs. Many are outdated from incremental development. Also add correctness tests for FFCV/LitData → slip cache round-trips. **Note**: notebooks contain base64-encoded cell outputs — use `NotebookEdit` on individual cells or strip outputs first to avoid context bloat.
 7. ⬜ **Documentation**: README, API docs, performance guide
-8. ⬜ **Deprecate `transform` parameter**: Remove global `transform` in favor of `pipelines` for consistency
+8. ✅ **Remove `transform` parameter**: Removed global `transform` in favor of `pipelines` for consistency
 
 ---
 

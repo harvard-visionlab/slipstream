@@ -503,9 +503,7 @@ class SlipstreamDataset(torch.utils.data.Dataset):
             Supports: s3://, gs://, http://, https://, hf://
         decode_images: If True, automatically decode image bytes to tensors/PIL.
         to_pil: If True and decode_images=True, return PIL Images instead of tensors.
-        transform: Global transform applied to all image fields.
         pipelines: Dict mapping field names to transform functions.
-            Cannot be used with `transform`.
         expected_version: Expected dataset version string. Raises if mismatch.
         profile: Storage profile ('wasabi' for Wasabi S3-compatible storage).
         storage_options: Custom storage options dict for S3/cloud access.
@@ -545,7 +543,6 @@ class SlipstreamDataset(torch.utils.data.Dataset):
         # Dataset behavior
         decode_images: bool = False,
         to_pil: bool = True,
-        transform: Callable | None = None,
         pipelines: Mapping[str, Callable] | None = None,
         # Validation and storage
         expected_version: str | None = None,
@@ -556,19 +553,10 @@ class SlipstreamDataset(torch.utils.data.Dataset):
     ) -> None:
         super().__init__()
 
-        # Validate mutually exclusive options
-        if pipelines is not None and transform is not None:
-            raise ValueError(
-                "Cannot specify both 'pipelines' and 'transform'. "
-                "Use 'transform' for simple image transforms, or "
-                "'pipelines' for per-field transforms."
-            )
-
         # Store processing options
         self.pipelines = dict(pipelines) if pipelines is not None else None
         self.decode_images = decode_images
         self.to_pil = to_pil
-        self._transform = transform
 
         # Create the source-specific reader
         self._reader = self._create_reader(
@@ -707,10 +695,6 @@ class SlipstreamDataset(torch.utils.data.Dataset):
         if self.decode_images:
             sample = self._decode_images(sample)
 
-        # Apply global transform to image fields
-        if self._transform is not None:
-            sample = self._apply_transform(sample)
-
         # Apply per-field pipelines
         if self.pipelines is not None:
             sample = self._apply_pipelines(sample)
@@ -727,19 +711,6 @@ class SlipstreamDataset(torch.utils.data.Dataset):
             sample = list(sample)
             for idx in self.image_fields:
                 sample[idx] = decode_image(sample[idx], to_pil=self.to_pil)
-            sample = tuple(sample)
-        return sample
-
-    def _apply_transform(self, sample: dict | tuple) -> dict | tuple:
-        """Apply global transform to image fields."""
-        if hasattr(sample, "items"):
-            for key in self.image_fields:
-                if key in sample:
-                    sample[key] = self._transform(sample[key])
-        else:
-            sample = list(sample)
-            for idx in self.image_fields:
-                sample[idx] = self._transform(sample[idx])
             sample = tuple(sample)
         return sample
 
@@ -819,11 +790,6 @@ class SlipstreamDataset(torch.utils.data.Dataset):
                     )
                 lines.append(f"{indent}{indent}'{key}': {pipeline_repr},")
             lines.append(f"{indent}}},")
-
-        # Transform
-        if self._transform is not None:
-            transform_repr = repr(self._transform).split("\n")[0]
-            lines.append(f"{indent}transform={transform_repr},")
 
         lines.append(")")
 
