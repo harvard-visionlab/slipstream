@@ -1,6 +1,6 @@
 """Dataset statistics computation.
 
-Computes per-channel RGB normalization stats (mean, std) from a slip cache.
+Computes per-channel normalization stats (mean, std) from a slip cache.
 
 For JPEG images, uses PyTurboJPEG directly (accurate DCT, matches PIL/torchvision
 exactly) rather than the C extension's FASTDCT path. Stats is a one-time operation
@@ -9,10 +9,16 @@ where accuracy matters more than peak throughput.
 Usage:
     from slipstream import compute_normalization_stats
 
+    # RGB stats (default)
     cache = OptimizedCache.load(cache_dir)
     stats = compute_normalization_stats(cache)
     print(stats)
     # {'mean': (0.485, 0.456, 0.406), 'std': (0.229, 0.224, 0.225)}
+
+    # YUV stats (for YUV420 cache with YUV decoders)
+    stats = compute_normalization_stats(cache, image_format="yuv420", colorspace="yuv")
+    print(stats)
+    # {'mean': (0.449, 0.476, 0.511), 'std': (0.262, 0.036, 0.051)}
 """
 
 from __future__ import annotations
@@ -37,12 +43,13 @@ def compute_normalization_stats(
     cache: OptimizedCache,
     image_field: str = "image",
     image_format: str = "jpeg",
+    colorspace: str = "rgb",
     num_samples: int | None = None,
     batch_size: int = 256,
     num_threads: int = 0,
     verbose: bool = True,
 ) -> dict[str, tuple[float, float, float]]:
-    """Compute per-channel RGB normalization statistics from a slip cache.
+    """Compute per-channel normalization statistics from a slip cache.
 
     For JPEG, uses PyTurboJPEG with accurate DCT (matches PIL/torchvision
     exactly). For YUV420, uses the YUV420NumbaBatchDecoder. Accumulation
@@ -53,6 +60,10 @@ def compute_normalization_stats(
         image_field: Name of the image field in the cache.
         image_format: ``"jpeg"`` or ``"yuv420"`` — selects which cache
             storage and decoder to use.
+        colorspace: ``"rgb"`` (default) or ``"yuv"``. For YUV420 caches,
+            ``"rgb"`` converts to RGB before computing stats (standard),
+            ``"yuv"`` keeps YUV colorspace (use with DecodeYUV* stages).
+            Ignored for JPEG caches (always RGB).
         num_samples: Number of samples to use. ``None`` = all samples.
         batch_size: Decode batch size.
         num_threads: Decoder threads. 0 = auto. For JPEG, controls the
@@ -61,7 +72,8 @@ def compute_normalization_stats(
 
     Returns:
         Dict with ``'mean'`` and ``'std'`` keys, each a tuple of 3 floats
-        (R, G, B) in [0, 1] range.
+        in [0, 1] range. Channels are (R, G, B) for colorspace="rgb" or
+        (Y, U, V) for colorspace="yuv".
     """
     from slipstream.cache import ImageBytesStorage, load_yuv420_cache
 
@@ -144,16 +156,28 @@ def compute_normalization_stats(
         from slipstream.decoders.yuv420_decoder import YUV420NumbaBatchDecoder
         decoder = YUV420NumbaBatchDecoder(num_threads=num_threads)
 
+        # Choose decode method based on desired colorspace
+        use_yuv_output = colorspace.lower() == "yuv"
+
         for batch_idx in iterator:
             start = batch_idx * batch_size
             end = min(start + batch_size, total)
             batch_indices = indices[start:end]
 
             batch_data = storage.load_batch(batch_indices)
-            images = decoder.decode_batch(
-                batch_data['data'], batch_data['sizes'],
-                batch_data['heights'], batch_data['widths'],
-            )
+
+            if use_yuv_output:
+                # Keep YUV colorspace (for use with DecodeYUV* stages)
+                images = decoder.decode_batch_yuv_fullres(
+                    batch_data['data'], batch_data['sizes'],
+                    batch_data['heights'], batch_data['widths'],
+                )
+            else:
+                # Convert to RGB (default, matches standard normalization)
+                images = decoder.decode_batch(
+                    batch_data['data'], batch_data['sizes'],
+                    batch_data['heights'], batch_data['widths'],
+                )
 
             for img in images:
                 pixels = img.reshape(-1, 3).astype(np.float64) / 255.0
@@ -176,8 +200,10 @@ def compute_normalization_stats(
     }
 
     if verbose:
-        print(f"Normalization stats ({total:,} samples, {pixel_count:,} pixels):")
-        print(f"  mean: ({mean[0]:.6f}, {mean[1]:.6f}, {mean[2]:.6f})")
-        print(f"  std:  ({std[0]:.6f}, {std[1]:.6f}, {std[2]:.6f})")
+        cs_label = "YUV" if (image_format == "yuv420" and colorspace.lower() == "yuv") else "RGB"
+        ch_names = "(Y, U, V)" if cs_label == "YUV" else "(R, G, B)"
+        print(f"Normalization stats ({total:,} samples, {pixel_count:,} pixels, {cs_label}):")
+        print(f"  mean {ch_names}: ({mean[0]:.6f}, {mean[1]:.6f}, {mean[2]:.6f})")
+        print(f"  std  {ch_names}: ({std[0]:.6f}, {std[1]:.6f}, {std[2]:.6f})")
 
     return result

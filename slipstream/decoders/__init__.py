@@ -8,12 +8,14 @@ Low-level decoders:
 
 Fused decode+crop stages (for SlipstreamLoader pipelines):
 - DecodeOnly, DecodeYUVFullRes, DecodeYUVPlanes: pure decode
-- CenterCrop, RandomResizedCrop, DirectRandomResizedCrop, ResizeCrop: decode+crop
-- MultiCropRandomResizedCrop, MultiRandomResizedCrop, MultiCropPipeline: multi-crop
+- DecodeCenterCrop, DecodeRandomResizedCrop, DecodeDirectRandomResizedCrop, DecodeResizeCrop: decode → RGB + crop
+- DecodeYUVCenterCrop, DecodeYUVRandomResizedCrop, DecodeYUVResizeCrop: decode → YUV + crop (keeps colorspace)
+- DecodeMultiRandomResizedCrop, DecodeUniformMultiRandomResizedCrop, MultiCropPipeline: multi-crop
 
 Usage:
     from slipstream.decoders import CPUDecoder, GPUDecoder, get_decoder
-    from slipstream.decoders import RandomResizedCrop, CenterCrop
+    from slipstream.decoders import DecodeRandomResizedCrop, DecodeCenterCrop
+    from slipstream.decoders import DecodeYUVRandomResizedCrop  # keeps YUV colorspace
 """
 
 from slipstream.decoders.base import BatchTransform
@@ -50,6 +52,9 @@ from slipstream.decoders.decode import (
     DecodeOnly,
     DecodeYUVFullRes,
     DecodeYUVPlanes,
+    DecodeYUVCenterCrop,
+    DecodeYUVRandomResizedCrop,
+    DecodeYUVResizeCrop,
 )
 from slipstream.decoders.crop import (
     DecodeCenterCrop,
@@ -95,6 +100,10 @@ __all__ = [
     "DecodeOnly",
     "DecodeYUVFullRes",
     "DecodeYUVPlanes",
+    # YUV-output crop stages
+    "DecodeYUVCenterCrop",
+    "DecodeYUVRandomResizedCrop",
+    "DecodeYUVResizeCrop",
     # Fused decode+crop stages (new names)
     "DecodeCenterCrop",
     "DecodeRandomResizedCrop",

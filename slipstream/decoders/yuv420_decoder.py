@@ -311,6 +311,52 @@ def _create_yuv420_to_yuv_fullres_function() -> Any:
     return Compiler.compile(decode_yuv_fullres_batch)
 
 
+def _create_yuv420_to_yuv_with_crop_function() -> Any:
+    """Create YUV420→YUV decode + crop function (keeps YUV colorspace)."""
+    yuv_fullres_c = Compiler.compile(_make_yuv420_fullres_wrapper())
+    resize_crop_c = Compiler.compile(resize_crop_numba)
+    my_range = Compiler.get_iterator()
+
+    def decode_yuv_crop_batch(
+        yuv_data: np.ndarray,
+        sizes: np.ndarray,
+        heights: np.ndarray,
+        widths: np.ndarray,
+        crop_params: np.ndarray,
+        temp_buffer: np.ndarray,
+        destination: np.ndarray,
+        target_h: int,
+        target_w: int,
+    ) -> np.ndarray:
+        batch_size = len(sizes)
+        for i in my_range(batch_size):
+            size = int(sizes[i])
+            h = int(heights[i])
+            w = int(widths[i])
+            source = yuv_data[i, :size]
+            temp = temp_buffer[i, :h, :w, :]
+            # Decode to YUV (not RGB)
+            yuv_fullres_c(source, temp, h, w, w)
+
+            crop_x = int(crop_params[i, 0])
+            crop_y = int(crop_params[i, 1])
+            crop_w = int(crop_params[i, 2])
+            crop_h = int(crop_params[i, 3])
+
+            dest = destination[i, :, :, :]
+            resize_crop_c(
+                temp, h, w,
+                crop_y, crop_x, crop_h, crop_w,
+                dest, target_h, target_w,
+                w, 0,
+            )
+
+        return destination[:batch_size]
+
+    decode_yuv_crop_batch.is_parallel = True
+    return Compiler.compile(decode_yuv_crop_batch)
+
+
 def _create_yuv420_extract_planes_function() -> Any:
     extract_c = Compiler.compile(_make_yuv420_extract_planes_wrapper())
     my_range = Compiler.get_iterator()
@@ -345,6 +391,7 @@ _yuv420_decode_crop_compiled: Any = None
 _yuv420_decode_multi_crop_compiled: Any = None
 _yuv420_decode_multi_crop_varied_compiled: Any = None
 _yuv420_yuv_fullres_compiled: Any = None
+_yuv420_yuv_crop_compiled: Any = None
 _yuv420_extract_planes_compiled: Any = None
 
 
@@ -388,6 +435,14 @@ def _get_yuv420_yuv_fullres() -> Any:
     return _yuv420_yuv_fullres_compiled
 
 
+def _get_yuv420_yuv_crop() -> Any:
+    global _yuv420_yuv_crop_compiled
+    if _yuv420_yuv_crop_compiled is None:
+        _setup_yuv420_ctypes()
+        _yuv420_yuv_crop_compiled = _create_yuv420_to_yuv_with_crop_function()
+    return _yuv420_yuv_crop_compiled
+
+
 def _get_yuv420_extract_planes() -> Any:
     global _yuv420_extract_planes_compiled
     if _yuv420_extract_planes_compiled is None:
@@ -414,11 +469,13 @@ class YUV420NumbaBatchDecoder:
         self._decode_multi_crop_fn = _get_yuv420_decode_multi_crop()
         self._decode_multi_crop_varied_fn = _get_yuv420_decode_multi_crop_varied()
         self._yuv_fullres_fn = _get_yuv420_yuv_fullres()
+        self._yuv_crop_fn = _get_yuv420_yuv_crop()
         self._extract_planes_fn = _get_yuv420_extract_planes()
         self._seed_counter = 0
 
         self._temp_buffer: np.ndarray | None = None
         self._dest_buffer: np.ndarray | None = None
+        self._yuv_dest_buffer: np.ndarray | None = None  # For YUV-output crops
         self._chw_buffer: np.ndarray | None = None
         self._multi_crop_buffer: np.ndarray | None = None
         self._multi_chw_buffer: np.ndarray | None = None
@@ -444,6 +501,14 @@ class YUV420NumbaBatchDecoder:
             self._dest_buffer.shape[2] != target_w):
             self._dest_buffer = np.zeros((batch_size, target_h, target_w, 3), dtype=np.uint8)
         return self._dest_buffer
+
+    def _ensure_yuv_dest_buffer(self, batch_size: int, target_h: int, target_w: int) -> np.ndarray:
+        if (self._yuv_dest_buffer is None or
+            self._yuv_dest_buffer.shape[0] < batch_size or
+            self._yuv_dest_buffer.shape[1] != target_h or
+            self._yuv_dest_buffer.shape[2] != target_w):
+            self._yuv_dest_buffer = np.zeros((batch_size, target_h, target_w, 3), dtype=np.uint8)
+        return self._yuv_dest_buffer
 
     def decode_batch_to_buffer(
         self,
@@ -932,9 +997,164 @@ class YUV420NumbaBatchDecoder:
             results.append((y, u, v))
         return results
 
+    # ---- YUV-output crop methods (keep YUV colorspace) ----
+
+    def decode_batch_yuv_center_crop(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray,
+        heights: NDArray,
+        widths: NDArray,
+        crop_size: int = 224,
+    ) -> NDArray[np.uint8]:
+        """Decode YUV420P to YUV with center crop.
+
+        Returns [B, crop_size, crop_size, 3] uint8 in YUV colorspace.
+        """
+        batch_size = len(sizes)
+        max_h = int(np.max(heights))
+        max_w = int(np.max(widths))
+
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+        heights_i32 = heights if heights.dtype == np.int32 else np.ascontiguousarray(heights, dtype=np.int32)
+        widths_i32 = widths if widths.dtype == np.int32 else np.ascontiguousarray(widths, dtype=np.int32)
+
+        crop_params = _generate_center_crop_params_batch(widths_i32, heights_i32, crop_size)
+        temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
+        dest_buffer = self._ensure_yuv_dest_buffer(batch_size, crop_size, crop_size)
+
+        self._yuv_crop_fn(
+            data, sizes_u64, heights_u32, widths_u32,
+            crop_params, temp_buffer, dest_buffer,
+            crop_size, crop_size,
+        )
+        return dest_buffer[:batch_size]
+
+    def decode_batch_yuv_random_crop(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray,
+        heights: NDArray,
+        widths: NDArray,
+        target_size: int = 224,
+        scale: tuple[float, float] = (0.08, 1.0),
+        ratio: tuple[float, float] = (3.0 / 4.0, 4.0 / 3.0),
+        seed: int | None = None,
+    ) -> NDArray[np.uint8]:
+        """Decode YUV420P to YUV with random resized crop.
+
+        Returns [B, target_size, target_size, 3] uint8 in YUV colorspace.
+        """
+        import math
+
+        batch_size = len(sizes)
+        max_h = int(np.max(heights))
+        max_w = int(np.max(widths))
+
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+        heights_i32 = heights if heights.dtype == np.int32 else np.ascontiguousarray(heights, dtype=np.int32)
+        widths_i32 = widths if widths.dtype == np.int32 else np.ascontiguousarray(widths, dtype=np.int32)
+
+        log_ratio_min = math.log(ratio[0])
+        log_ratio_max = math.log(ratio[1])
+
+        self._seed_counter += 1
+        if seed is not None:
+            batch_seed = (seed + batch_size * self._seed_counter) % 2147483647
+        else:
+            batch_seed = (batch_size * self._seed_counter) % 2147483647
+
+        crop_params = _generate_random_crop_params_batch(
+            widths_i32, heights_i32,
+            scale[0], scale[1],
+            log_ratio_min, log_ratio_max,
+            batch_seed,
+        )
+
+        temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
+        dest_buffer = self._ensure_yuv_dest_buffer(batch_size, target_size, target_size)
+
+        self._yuv_crop_fn(
+            data, sizes_u64, heights_u32, widths_u32,
+            crop_params, temp_buffer, dest_buffer,
+            target_size, target_size,
+        )
+        return dest_buffer[:batch_size]
+
+    def decode_batch_yuv_resize_crop(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray,
+        heights: NDArray,
+        widths: NDArray,
+        resize_size: int = 256,
+        crop_size: int = 224,
+    ) -> NDArray[np.uint8]:
+        """Decode YUV420P to YUV with resize shortest edge + center crop.
+
+        Returns [B, crop_size, crop_size, 3] uint8 in YUV colorspace.
+        """
+        batch_size = len(sizes)
+        max_h = int(np.max(heights))
+        max_w = int(np.max(widths))
+
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+
+        crop_params = np.zeros((batch_size, 4), dtype=np.int32)
+        for i in range(batch_size):
+            h = int(heights[i])
+            w = int(widths[i])
+
+            if h < w:
+                scale = resize_size / h
+                new_h = resize_size
+                new_w = int(w * scale + 0.5)
+            else:
+                scale = resize_size / w
+                new_w = resize_size
+                new_h = int(h * scale + 0.5)
+
+            crop_h_resized = min(crop_size, new_h)
+            crop_w_resized = min(crop_size, new_w)
+            start_y_resized = (new_h - crop_h_resized) // 2
+            start_x_resized = (new_w - crop_w_resized) // 2
+
+            crop_x = int(start_x_resized / scale + 0.5)
+            crop_y = int(start_y_resized / scale + 0.5)
+            crop_w_orig = int(crop_w_resized / scale + 0.5)
+            crop_h_orig = int(crop_h_resized / scale + 0.5)
+
+            crop_x = max(0, min(crop_x, w - 1))
+            crop_y = max(0, min(crop_y, h - 1))
+            crop_w_orig = max(1, min(crop_w_orig, w - crop_x))
+            crop_h_orig = max(1, min(crop_h_orig, h - crop_y))
+
+            crop_params[i, 0] = crop_x
+            crop_params[i, 1] = crop_y
+            crop_params[i, 2] = crop_w_orig
+            crop_params[i, 3] = crop_h_orig
+
+        temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
+        dest_buffer = self._ensure_yuv_dest_buffer(batch_size, crop_size, crop_size)
+
+        self._yuv_crop_fn(
+            data, sizes_u64, heights_u32, widths_u32,
+            crop_params, temp_buffer, dest_buffer,
+            crop_size, crop_size,
+        )
+
+        return dest_buffer[:batch_size]
+
     def shutdown(self) -> None:
         self._temp_buffer = None
         self._dest_buffer = None
+        self._yuv_dest_buffer = None
         self._chw_buffer = None
         self._multi_crop_buffer = None
         self._multi_chw_buffer = None
