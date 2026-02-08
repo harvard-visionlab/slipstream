@@ -8,7 +8,7 @@ End-to-end accuracy verification for all supported data formats.
 |--------|--------|-------|--------|----------|
 | FFCV (.ffcv/.beton) | ✅ | ⬜ | ✅ | ⬜ |
 | LitData (streaming) | ⬜ | ⬜ | ✅ | ⬜ |
-| ImageFolder | ⬜ | ⬜ | ✅ | ⬜ |
+| ImageFolder | ✅ | ⬜ | ✅ | ⬜ |
 | SlipCache (.slipcache) | n/a | ✅ | ✅ | ⬜ |
 
 **Column key:**
@@ -39,9 +39,11 @@ Verify readers return identical bytes to reference implementations.
 - [ ] All samples readable
 
 ### ImageFolder Reader
-- [ ] Sample count matches `torchvision.datasets.ImageFolder`
-- [ ] Image bytes match direct file read
-- [ ] Labels match class folder indices
+- [x] Sample count matches `torchvision.datasets.ImageFolder` — `test_imagefolder_verification.py::test_sample_count_matches`
+- [x] Image bytes match direct file read — `test_imagefolder_verification.py::test_image_bytes_match_file`
+- [x] Labels match class folder indices — `test_imagefolder_verification.py::test_all_labels_match`
+- [x] Class structure matches torchvision — `test_imagefolder_verification.py::test_class_to_idx_matches`
+- [x] Decoded images match — `test_imagefolder_verification.py::test_decoded_images_match`
 - [ ] S3 tar archive extraction correct
 
 ---
@@ -143,6 +145,7 @@ docker run --rm \
 | File | Purpose |
 |------|---------|
 | `tests/test_ffcv_verification.py` | FFCV reader vs native ffcv-ssl |
+| `tests/test_imagefolder_verification.py` | ImageFolder reader vs torchvision |
 | `tests/test_cache_roundtrip.py` | Cache build/load integrity |
 | `tests/test_decode_correctness.py` | Decoder tolerance tests |
 | `scripts/verify_pipeline.py` | Human-readable sanity check |
