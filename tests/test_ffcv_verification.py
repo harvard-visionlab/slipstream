@@ -8,7 +8,22 @@ These tests require:
 1. ffcv-ssl installed (run in devcontainer - Linux only)
 2. Access to S3 bucket with real FFCV files
 
-Run with: pytest tests/test_ffcv_verification.py -v -s
+Run with docker (copy-paste this command):
+
+    docker run --rm \
+      -v "$(pwd)":/workspace \
+      -v ~/.aws:/root/.aws:ro \
+      -v "$(pwd)/.devcontainer/cache":/root/.cache \
+      -e SLIPSTREAM_CACHE_DIR=/root/.cache/slipstream \
+      -w /workspace \
+      slipstream-ffcv \
+      bash -c "uv venv --clear && uv pip install -r .devcontainer/requirements-ffcv.txt && uv run python libslipstream/setup.py build_ext --inplace && uv run pytest tests/test_ffcv_verification.py -v"
+
+First time setup (build the docker image):
+
+    docker build -t slipstream-ffcv -f .devcontainer/Dockerfile .
+
+The FFCV file (~4GB) is cached in .devcontainer/cache/ after first download.
 """
 
 import hashlib
