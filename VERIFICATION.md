@@ -11,6 +11,14 @@ End-to-end accuracy verification for all supported data formats.
 | ImageFolder | ⬜ | ⬜ | ✅ | ⬜ |
 | SlipCache (.slipcache) | n/a | ✅ | ✅ | ⬜ |
 
+**Column key:**
+| Column | Description | Pass Criterion |
+|--------|-------------|----------------|
+| Reader | Raw bytes match reference implementation | SHA256 hash identical |
+| Cache | Data survives build→load round-trip | JPEG: byte-identical; YUV420: pixels ±1 |
+| Decode | Decoded pixels match PIL/reference | Max diff ≤5, mean diff <1.5 |
+| Accuracy | Model accuracy consistent across formats | All within 0.1% of each other |
+
 ---
 
 ## Layer 1: Reader Correctness
