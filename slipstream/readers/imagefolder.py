@@ -62,6 +62,34 @@ def _compute_file_hash(file_path: Path, length: int = 12) -> str:
     return sha256.hexdigest()[:length]
 
 
+def _get_cached_hash(tar_path: Path) -> str | None:
+    """Return cached hash if tar file hasn't been modified, else None.
+
+    Uses a sidecar file (e.g., val.tar.gz.sha256) containing the hash and
+    the tar file's mtime at the time of hashing. If the mtime matches,
+    the cached hash is still valid.
+    """
+    sidecar = tar_path.with_suffix(tar_path.suffix + ".sha256")
+    if not sidecar.exists():
+        return None
+    try:
+        content = sidecar.read_text().strip().split()
+        if len(content) != 2:
+            return None
+        cached_hash, cached_mtime = content[0], float(content[1])
+        if tar_path.stat().st_mtime == cached_mtime:
+            return cached_hash
+    except (ValueError, OSError):
+        pass
+    return None
+
+
+def _save_hash_cache(tar_path: Path, file_hash: str) -> None:
+    """Save hash to sidecar file alongside the tar."""
+    sidecar = tar_path.with_suffix(tar_path.suffix + ".sha256")
+    sidecar.write_text(f"{file_hash} {tar_path.stat().st_mtime}")
+
+
 def _download_s5cmd(
     remote_path: str,
     local_path: Path,
@@ -360,12 +388,18 @@ def _download_and_extract_s3_tar(
             size_gb = tar_path.stat().st_size / 1e9
             print(f"Using cached tar: {tar_path} ({size_gb:.2f} GB)")
 
-    # Compute hash of tar file
-    if verbose:
-        print("  Computing hash...")
-    file_hash = _compute_file_hash(tar_path)
-    if verbose:
-        print(f"  Hash: {file_hash}")
+    # Get hash (from cache if available, otherwise compute and cache)
+    file_hash = _get_cached_hash(tar_path)
+    if file_hash is not None:
+        if verbose:
+            print(f"  Using cached hash: {file_hash}")
+    else:
+        if verbose:
+            print("  Computing hash...")
+        file_hash = _compute_file_hash(tar_path)
+        _save_hash_cache(tar_path, file_hash)
+        if verbose:
+            print(f"  Hash: {file_hash}")
 
     # Check if already extracted
     extract_base = cache_dir / "hashid" / file_hash
