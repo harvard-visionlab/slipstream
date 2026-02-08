@@ -38,13 +38,13 @@ Verify readers return identical bytes to reference implementations.
 - [ ] Labels match native
 - [ ] All samples readable
 
-### ImageFolder Reader
-- [x] Sample count matches `torchvision.datasets.ImageFolder` — `test_imagefolder_verification.py::test_sample_count_matches`
-- [x] Image bytes match direct file read — `test_imagefolder_verification.py::test_image_bytes_match_file`
-- [x] Labels match class folder indices — `test_imagefolder_verification.py::test_all_labels_match`
-- [x] Class structure matches torchvision — `test_imagefolder_verification.py::test_class_to_idx_matches`
-- [x] Decoded images match — `test_imagefolder_verification.py::test_decoded_images_match`
-- [ ] S3 tar archive extraction correct — `test_imagefolder_verification.py::TestImageFolderS3` (pending)
+### ImageFolder Reader (uses real ImageNet val from S3)
+- [x] Sample count = 50,000 — `test_imagefolder_verification.py::TestImageFolderStructure::test_sample_count_matches`
+- [x] Class count = 1,000 — `test_imagefolder_verification.py::TestImageFolderStructure::test_class_count_matches`
+- [x] Image bytes match torchvision file read — `test_imagefolder_verification.py::TestImageFolderBytes::test_image_bytes_match_file`
+- [x] Labels match torchvision ordering — `test_imagefolder_verification.py::TestImageFolderLabels::test_labels_match_torchvision`
+- [x] Decoded images match torchvision — `test_imagefolder_verification.py::TestImageFolderDecode::test_decoded_images_match`
+- [x] S3 tar archive caching works — `test_imagefolder_verification.py::TestImageFolderS3Cache::test_s3_uses_cache_on_second_load`
 
 ---
 
@@ -118,11 +118,11 @@ Verify model accuracy matches across all formats.
 ## Running Tests
 
 ```bash
-# Local tests (no special setup)
-uv run pytest tests/test_cache_roundtrip.py tests/test_decode_correctness.py tests/test_imagefolder_verification.py -v -m "not s3"
+# Local tests (no special setup, no S3 required)
+uv run pytest tests/test_cache_roundtrip.py tests/test_decode_correctness.py -v
 
-# ImageFolder S3 tests (requires AWS credentials, downloads ~7GB)
-uv run pytest tests/test_imagefolder_verification.py -v -m "s3"
+# ImageFolder tests (requires AWS credentials, downloads ~7GB on first run)
+uv run pytest tests/test_imagefolder_verification.py -v
 
 # Human-readable verification
 uv run python scripts/verify_pipeline.py

@@ -158,6 +158,16 @@ Never add `.sum()`, `.item()`, etc. to benchmark loops. On CPU, operations are s
 - **CPU**: `img.shape[0]` is sufficient
 - **GPU**: Use `torch.cuda.synchronize()`, NOT `.sum()`
 
+### DO NOT use synthetic data for testing
+Always use real datasets for verification tests. Synthetic data tests can pass while real data fails due to edge cases in actual image files (corrupted headers, unusual dimensions, encoding variations, etc.).
+
+**Real datasets for testing:**
+- **FFCV**: `s3://visionlab-datasets/imagenet1k/pre-processed/s256-l512-jpgbytes-q100-ffcv/imagenet1k-s256-l512-jpg-q100-cs100-val-7ac6386e.ffcv`
+- **LitData**: `s3://visionlab-datasets/imagenet1k/pre-processed/s256-l512-jpgbytes-q100-streaming/val/`
+- **ImageFolder**: `s3://visionlab-datasets/imagenet1k-raw/val.tar.gz`
+
+Tests requiring S3 access should be marked with `@pytest.mark.s3` so they can be skipped when credentials are unavailable.
+
 ---
 
 ## Usage Example
