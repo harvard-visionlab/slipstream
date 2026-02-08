@@ -44,14 +44,13 @@ def _print_progress(msg: str) -> None:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def imagenet_cache_dir(tmp_path_factory):
-    """Get or create cache directory for ImageNet data."""
-    import os
+def imagenet_cache_dir():
+    """Get cache directory for ImageNet data (persistent across test runs)."""
+    from slipstream.dataset import get_default_cache_dir
 
-    cache_dir = os.environ.get("SLIPSTREAM_CACHE_DIR")
-    if cache_dir:
-        return Path(cache_dir) / "imagefolder"
-    return tmp_path_factory.mktemp("imagenet_cache")
+    cache_dir = get_default_cache_dir() / "slipstream" / "imagefolder"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
 
 
 @pytest.fixture(scope="module")
