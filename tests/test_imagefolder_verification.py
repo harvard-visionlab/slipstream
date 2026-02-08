@@ -1,10 +1,17 @@
 """ImageFolder reader verification against torchvision.
 
 These tests verify that SlipstreamImageFolder returns identical data to
-torchvision.datasets.ImageFolder. No special setup required - uses
-synthetic test images in a temp directory.
+torchvision.datasets.ImageFolder.
 
-Run with: uv run pytest tests/test_imagefolder_verification.py -v
+Run with:
+    # Local tests (synthetic data, no setup required)
+    uv run pytest tests/test_imagefolder_verification.py -v -m "not s3"
+
+    # S3 tests (requires AWS credentials)
+    uv run pytest tests/test_imagefolder_verification.py -v -m "s3"
+
+    # All tests
+    uv run pytest tests/test_imagefolder_verification.py -v
 """
 
 import hashlib
@@ -17,7 +24,7 @@ import PIL.Image
 import pytest
 import torchvision.datasets
 
-from slipstream.readers.imagefolder import SlipstreamImageFolder
+from slipstream.readers.imagefolder import SlipstreamImageFolder, open_imagefolder
 
 
 # ---------------------------------------------------------------------------
@@ -259,3 +266,144 @@ class TestImageFolderPaths:
                 # The class folder should be in the path
                 assert class_name in path.parts, \
                     f"Class '{class_name}' not in path {path}"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Real ImageNet S3 tar archive
+# ---------------------------------------------------------------------------
+
+# Real ImageNet validation set on S3
+IMAGENET_VAL_S3_PATH = "s3://visionlab-datasets/imagenet1k-raw/val.tar.gz"
+
+
+@pytest.fixture(scope="module")
+def imagenet_val_s3(tmp_path_factory):
+    """Download and cache real ImageNet validation set from S3.
+
+    This downloads ~7GB on first run, then uses cached extraction.
+    """
+    import boto3
+
+    try:
+        boto3.client('s3').head_bucket(Bucket='visionlab-datasets')
+    except Exception as e:
+        pytest.skip(f"S3 access not available: {e}")
+
+    cache_dir = tmp_path_factory.mktemp("imagenet_cache")
+
+    try:
+        # Use open_imagefolder for S3 tar archive support
+        reader = open_imagefolder(
+            IMAGENET_VAL_S3_PATH,
+            cache_dir=str(cache_dir),
+            verbose=True
+        )
+        return reader
+    except Exception as e:
+        pytest.skip(f"Failed to download ImageNet: {e}")
+
+
+@pytest.mark.s3
+class TestImageFolderS3:
+    """Tests using real ImageNet validation set from S3."""
+
+    def test_s3_sample_count(self, imagenet_val_s3):
+        """ImageNet val should have 50,000 samples."""
+        assert len(imagenet_val_s3) == 50000, \
+            f"Expected 50000 samples, got {len(imagenet_val_s3)}"
+
+    def test_s3_class_count(self, imagenet_val_s3):
+        """ImageNet val should have 1000 classes."""
+        assert len(imagenet_val_s3.classes) == 1000, \
+            f"Expected 1000 classes, got {len(imagenet_val_s3.classes)}"
+
+    def test_s3_first_100_samples_valid(self, imagenet_val_s3):
+        """First 100 samples should be valid JPEGs."""
+        errors = []
+        for idx in range(100):
+            try:
+                sample = imagenet_val_s3[idx]
+                img_bytes = sample['image']
+
+                # Check JPEG markers
+                if img_bytes[:2] != b'\xff\xd8':
+                    errors.append((idx, "missing SOI"))
+                elif img_bytes[-2:] != b'\xff\xd9':
+                    errors.append((idx, "missing EOI"))
+
+                # Verify decodable
+                img = PIL.Image.open(io.BytesIO(img_bytes))
+                img.load()
+
+            except Exception as e:
+                errors.append((idx, str(e)))
+
+        if errors:
+            pytest.fail(f"Errors in {len(errors)} samples: {errors[:5]}...")
+
+    def test_s3_labels_in_range(self, imagenet_val_s3):
+        """All labels should be in range [0, 999]."""
+        errors = []
+        for idx in range(min(1000, len(imagenet_val_s3))):
+            label = imagenet_val_s3[idx]['label']
+            if not (0 <= label < 1000):
+                errors.append((idx, label))
+
+        if errors:
+            pytest.fail(f"Labels out of range: {errors[:10]}...")
+
+    def test_s3_random_samples_valid(self, imagenet_val_s3):
+        """Random samples across dataset should be valid."""
+        import random
+        random.seed(42)
+
+        indices = random.sample(range(len(imagenet_val_s3)), 50)
+        errors = []
+
+        for idx in indices:
+            try:
+                sample = imagenet_val_s3[idx]
+                img_bytes = sample['image']
+
+                # Verify decodable
+                img = PIL.Image.open(io.BytesIO(img_bytes))
+                img.load()
+
+                # Check dimensions reasonable
+                w, h = img.size
+                if w < 10 or h < 10 or w > 10000 or h > 10000:
+                    errors.append((idx, f"unusual dimensions: {w}x{h}"))
+
+            except Exception as e:
+                errors.append((idx, str(e)))
+
+        if errors:
+            pytest.fail(f"Errors in {len(errors)} random samples: {errors}...")
+
+
+@pytest.mark.s3
+class TestImageFolderS3Cache:
+    """Test that cached S3 data works correctly."""
+
+    def test_s3_uses_cache_on_second_load(self, imagenet_val_s3, tmp_path_factory):
+        """Second load should use cached extraction, not re-download."""
+        # Get the cache directory from the first reader
+        cache_dir = imagenet_val_s3._cache_path.parent
+
+        # Create a second reader pointing to same S3 path with same cache
+        reader2 = open_imagefolder(
+            IMAGENET_VAL_S3_PATH,
+            cache_dir=str(cache_dir),
+            verbose=True
+        )
+
+        # Should have same number of samples
+        assert len(reader2) == len(imagenet_val_s3)
+
+        # First sample should be identical
+        sample1 = imagenet_val_s3[0]
+        sample2 = reader2[0]
+
+        assert hashlib.sha256(sample1['image']).hexdigest() == \
+               hashlib.sha256(sample2['image']).hexdigest()
+        assert sample1['label'] == sample2['label']

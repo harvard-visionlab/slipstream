@@ -44,7 +44,7 @@ Verify readers return identical bytes to reference implementations.
 - [x] Labels match class folder indices — `test_imagefolder_verification.py::test_all_labels_match`
 - [x] Class structure matches torchvision — `test_imagefolder_verification.py::test_class_to_idx_matches`
 - [x] Decoded images match — `test_imagefolder_verification.py::test_decoded_images_match`
-- [ ] S3 tar archive extraction correct
+- [ ] S3 tar archive extraction correct — `test_imagefolder_verification.py::TestImageFolderS3` (pending)
 
 ---
 
@@ -119,7 +119,10 @@ Verify model accuracy matches across all formats.
 
 ```bash
 # Local tests (no special setup)
-uv run pytest tests/test_cache_roundtrip.py tests/test_decode_correctness.py -v
+uv run pytest tests/test_cache_roundtrip.py tests/test_decode_correctness.py tests/test_imagefolder_verification.py -v -m "not s3"
+
+# ImageFolder S3 tests (requires AWS credentials, downloads ~7GB)
+uv run pytest tests/test_imagefolder_verification.py -v -m "s3"
 
 # Human-readable verification
 uv run python scripts/verify_pipeline.py

@@ -99,6 +99,7 @@ addopts = "-v --tb=short"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "imagenet: marks tests requiring ImageNet data",
+    "s3: marks tests requiring S3 access (deselect with '-m \"not s3\"')",
 ]
 
 [tool.mypy]
