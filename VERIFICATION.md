@@ -39,12 +39,23 @@ Verify readers return identical bytes to reference implementations.
 - [ ] All samples readable
 
 ### ImageFolder Reader (uses real ImageNet val from S3)
-- [x] Sample count = 50,000 — `test_imagefolder_verification.py::TestImageFolderStructure::test_sample_count_matches`
-- [x] Class count = 1,000 — `test_imagefolder_verification.py::TestImageFolderStructure::test_class_count_matches`
-- [x] Image bytes match torchvision file read — `test_imagefolder_verification.py::TestImageFolderBytes::test_image_bytes_match_file`
-- [x] Labels match torchvision ordering — `test_imagefolder_verification.py::TestImageFolderLabels::test_labels_match_torchvision`
-- [x] Decoded images match torchvision — `test_imagefolder_verification.py::TestImageFolderDecode::test_decoded_images_match`
-- [x] S3 tar archive caching works — `test_imagefolder_verification.py::TestImageFolderS3Cache::test_s3_uses_cache_on_second_load`
+
+Tests run twice: once via S3 path (`open_imagefolder("s3://...")`), once via local path (`SlipstreamImageFolder("/path")`).
+
+- [x] Sample count = 50,000 — `test_sample_count_matches[s3]`, `[local]`
+- [x] Class count = 1,000 — `test_class_count_matches[s3]`, `[local]`
+- [x] Class-to-index consistent (0-999) — `test_class_to_idx_consistent[s3]`, `[local]`
+- [x] Labels in valid range — `test_all_labels_in_range[s3]`, `[local]`
+- [x] Labels match torchvision ordering — `test_labels_match_torchvision[s3]`, `[local]`
+- [x] Image bytes match file read (SHA256) — `test_image_bytes_match_file[s3]`, `[local]`
+- [x] Valid JPEG markers (SOI/EOI) — `test_first_100_samples_valid_jpeg[s3]`, `[local]`
+- [x] Decoded pixels match torchvision — `test_decoded_images_match[s3]`, `[local]`
+- [x] Random samples decodable — `test_random_samples_valid[s3]`, `[local]`
+- [x] Path structure correct — `test_paths_have_class_and_filename[s3]`, `[local]`
+- [x] Path class matches label — `test_path_class_matches_label[s3]`, `[local]`
+- [x] S3 cache reuse works — `test_s3_uses_cache_on_second_load`
+
+**23 tests total** (11 core × 2 variants + 1 cache test)
 
 ---
 
@@ -122,7 +133,8 @@ Verify model accuracy matches across all formats.
 uv run pytest tests/test_cache_roundtrip.py tests/test_decode_correctness.py -v
 
 # ImageFolder tests (requires AWS credentials, downloads ~7GB on first run)
-uv run pytest tests/test_imagefolder_verification.py -v
+# Use -s to see download/extraction progress
+uv run pytest tests/test_imagefolder_verification.py -v -s
 
 # Human-readable verification
 uv run python scripts/verify_pipeline.py
