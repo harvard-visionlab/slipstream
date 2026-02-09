@@ -7,7 +7,7 @@ End-to-end accuracy verification for all supported data formats.
 | Format | Reader | Cache | Decode | Accuracy |
 |--------|--------|-------|--------|----------|
 | FFCV (.ffcv/.beton) | ✅ | ⬜ | ✅ | ⬜ |
-| LitData (streaming) | ⬜ | ⬜ | ✅ | ⬜ |
+| LitData (streaming) | ✅ | ⬜ | ✅ | ⬜ |
 | ImageFolder | ✅ | ⬜ | ✅ | ⬜ |
 | SlipCache (.slipcache) | n/a | ✅ | ✅ | ⬜ |
 
@@ -32,11 +32,24 @@ Verify readers return identical bytes to reference implementations.
 - [x] All samples readable — `test_ffcv_verification.py::test_all_samples_readable`
 - [x] Full dataset bytes match — `test_ffcv_verification.py::test_all_samples_bytes_match`
 
-### LitData Reader
-- [ ] Sample count matches native `litdata.StreamingDataset`
-- [ ] Image bytes match native (SHA256)
-- [ ] Labels match native
-- [ ] All samples readable
+### LitData Reader (uses real ImageNet val from S3)
+
+Tests run twice: once via S3 path (`StreamingReader(remote_dir=...)`), once via local cached path.
+
+- [x] Sample count = 50,000 — `test_sample_count_is_50000[s3]`, `[local]`
+- [x] Sample count matches native — `test_sample_count_matches[s3]`, `[local]`
+- [x] Field types detected — `test_field_types_detected[s3]`, `[local]`
+- [x] Labels in valid range — `test_all_labels_in_range[s3]`, `[local]`
+- [x] Labels match native — `test_labels_match_native[s3]`, `[local]`
+- [x] Image bytes match native (SHA256) — `test_image_bytes_match_native[s3]`, `[local]`
+- [x] Valid JPEG markers (SOI/EOI) — `test_first_100_samples_valid_jpeg[s3]`, `[local]`
+- [x] Decoded pixels match native — `test_decoded_images_match[s3]`, `[local]`
+- [x] Random samples decodable — `test_random_samples_valid[s3]`, `[local]`
+- [x] Index field matches sample index — `test_indices_sequential[s3]`, `[local]`
+- [x] Path field matches native — `test_paths_match_native[s3]`, `[local]`
+- [x] All samples readable (slow) — `test_all_samples_readable[s3]`, `[local]`
+
+**24 tests total** (12 core × 2 variants)
 
 ### ImageFolder Reader (uses real ImageNet val from S3)
 
@@ -136,6 +149,9 @@ uv run pytest tests/test_cache_roundtrip.py tests/test_decode_correctness.py -v
 # Use -s to see download/extraction progress
 uv run pytest tests/test_imagefolder_verification.py -v -s
 
+# LitData tests (requires AWS credentials, streams from S3)
+uv run pytest tests/test_litdata_verification.py -v -s
+
 # Human-readable verification
 uv run python scripts/verify_pipeline.py
 
@@ -160,6 +176,7 @@ docker run --rm \
 | File | Purpose |
 |------|---------|
 | `tests/test_ffcv_verification.py` | FFCV reader vs native ffcv-ssl |
+| `tests/test_litdata_verification.py` | LitData reader vs native litdata |
 | `tests/test_imagefolder_verification.py` | ImageFolder reader vs torchvision |
 | `tests/test_cache_roundtrip.py` | Cache build/load integrity |
 | `tests/test_decode_correctness.py` | Decoder tolerance tests |

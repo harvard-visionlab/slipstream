@@ -28,12 +28,18 @@ The FFCV file (~4GB) is cached in .devcontainer/cache/ after first download.
 
 import hashlib
 import io
+import sys
 
 import numpy as np
 import PIL.Image
 import pytest
 
 from slipstream.readers.ffcv import FFCVFileReader
+
+
+def _print_progress(msg: str) -> None:
+    """Print to stderr so pytest doesn't capture it."""
+    print(msg, file=sys.stderr, flush=True)
 
 # Check if ffcv-ssl is available
 try:
@@ -169,6 +175,7 @@ class TestFFCVBytesMatchNative:
         slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
 
         num_samples = min(100, len(slip_reader))
+        _print_progress(f"\n  Comparing bytes for {num_samples} samples...")
         mismatches = []
 
         # Read samples from native loader
@@ -202,6 +209,7 @@ class TestFFCVBytesMatchNative:
         slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
 
         num_samples = min(100, len(slip_reader))
+        _print_progress(f"\n  Comparing labels for {num_samples} samples...")
         mismatches = []
 
         native_iter = iter(native_loader)
@@ -222,6 +230,7 @@ class TestFFCVBytesMatchNative:
         slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
 
         num_samples = min(50, len(slip_reader))
+        _print_progress(f"\n  Comparing decoded pixels for {num_samples} samples...")
         native_iter = iter(native_loader)
 
         for idx in range(num_samples):
@@ -247,6 +256,7 @@ class TestFFCVBytesMatchNative:
         slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
 
         num_samples = min(100, len(slip_reader))
+        _print_progress(f"\n  Validating JPEG markers for {num_samples} samples...")
         errors = []
 
         for idx in range(num_samples):
@@ -272,9 +282,12 @@ class TestFFCVFullValidation:
     def test_all_samples_readable(self, ffcv_val_path):
         """Verify all samples can be read without error."""
         slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
+        _print_progress(f"\n  Reading all {len(slip_reader)} samples...")
 
         errors = []
         for idx in range(len(slip_reader)):
+            if idx % 10000 == 0:
+                _print_progress(f"    {idx}/{len(slip_reader)}...")
             try:
                 sample = slip_reader[idx]
                 img_bytes = sample['image']
@@ -294,6 +307,7 @@ class TestFFCVFullValidation:
     def test_all_samples_bytes_match(self, ffcv_val_path, native_loader):
         """Hash comparison of ALL samples (slow - runs on full dataset)."""
         slip_reader = FFCVFileReader(ffcv_val_path, verbose=False)
+        _print_progress(f"\n  Comparing bytes for all {len(slip_reader)} samples...")
 
         # Reset loader to sequential order
         native_loader.traversal_order = native_loader.traversal_order.__class__(native_loader)
@@ -302,6 +316,8 @@ class TestFFCVFullValidation:
         mismatches = []
 
         for idx in range(len(slip_reader)):
+            if idx % 10000 == 0:
+                _print_progress(f"    {idx}/{len(slip_reader)}...")
             slip_bytes = slip_reader[idx]['image']
             native_batch = next(native_iter)
             native_bytes_padded = native_batch[0][0]
