@@ -1,0 +1,24 @@
+# Requirements for FFCV verification tests (devcontainer only)
+# ffcv-ssl requires scipy==1.11.4 which conflicts with dev group
+# Install with: uv pip install -r .devcontainer/requirements-ffcv.txt
+
+# Test dependencies
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# Core slipstream dependencies
+numpy>=1.21,<2
+torch
+torchvision
+numba
+pillow
+tqdm
+boto3
+
+# FFCV-specific (pinned for compatibility)
+scipy==1.11.4
+opencv-python-headless
+ffcv-ssl @ git+https://github.com/harvard-visionlab/FFCV-SSL.git@6458e33f0753e7a35bc639517a763350a0fc2177
+
+# Install slipstream itself (editable)
+-e .

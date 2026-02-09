@@ -114,7 +114,8 @@ All presets accept: `size`, `seed`, `device`, `dtype`, `normalize`
 3. ✅ **ImageFolder reader**: `SlipstreamImageFolder` for torchvision-style directories + S3 tar archives
 4. ✅ **FFCV reader fixes**: Data pointer bug, image end trimming, text field auto-decode (bytes→str)
 5. ✅ **Composition refactor**: `SlipstreamDataset` wraps pluggable readers (StreamingReader, ImageFolder, FFCV)
-6. ⬜ **End-to-end verification & notebook cleanup**: Update tutorial notebooks (00–13) to reflect composition refactor and new reader APIs. Many are outdated from incremental development. Also add correctness tests for FFCV/LitData → slip cache round-trips. **Note**: notebooks contain base64-encoded cell outputs — use `NotebookEdit` on individual cells or strip outputs first to avoid context bloat.
+6. ✅ **End-to-end verification tests**: Comprehensive verification test suite added. Includes: FFCV reader byte-for-byte verification against native ffcv-ssl (devcontainer required), cache round-trip tests (JPEG byte-identical, PNG→YUV420 ±2 tolerance), decode correctness tests (vs PIL ±5 tolerance, BT.601 YUV coefficients), and functional model accuracy tests (ResNet50 cross-format). Also added dimension validation in cache verify() to catch silent parse failures.
+   - ⬜ **Notebook cleanup**: Update tutorial notebooks (00–13) to reflect composition refactor and new reader APIs. Many are outdated.
 7. ⬜ **Documentation**: README, API docs, performance guide
 8. ✅ **Remove `transform` parameter**: Removed global `transform` in favor of `pipelines` for consistency
 
@@ -156,6 +157,16 @@ Benchmark scripts output progress bars that consume excessive tokens. Instead:
 Never add `.sum()`, `.item()`, etc. to benchmark loops. On CPU, operations are synchronous.
 - **CPU**: `img.shape[0]` is sufficient
 - **GPU**: Use `torch.cuda.synchronize()`, NOT `.sum()`
+
+### DO NOT use synthetic data for testing
+Always use real datasets for verification tests. Synthetic data tests can pass while real data fails due to edge cases in actual image files (corrupted headers, unusual dimensions, encoding variations, etc.).
+
+**Real datasets for testing:**
+- **FFCV**: `s3://visionlab-datasets/imagenet1k/pre-processed/s256-l512-jpgbytes-q100-ffcv/imagenet1k-s256-l512-jpg-q100-cs100-val-7ac6386e.ffcv`
+- **LitData**: `s3://visionlab-datasets/imagenet1k/pre-processed/s256-l512-jpgbytes-q100-streaming/val/`
+- **ImageFolder**: `s3://visionlab-datasets/imagenet1k-raw/val.tar.gz`
+
+Tests requiring S3 access should be marked with `@pytest.mark.s3` so they can be skipped when credentials are unavailable.
 
 ---
 

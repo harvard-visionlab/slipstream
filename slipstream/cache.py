@@ -1063,6 +1063,7 @@ class ImageBytesWriter(StreamingFieldWriter):
         output_dir: Path,
         num_samples: int,
         field_type: str,
+        image_format: str | None = None,
     ) -> None:
         self.field_name = field_name
         self.output_dir = output_dir
@@ -1077,21 +1078,24 @@ class ImageBytesWriter(StreamingFieldWriter):
         self._max_size = 0
         self._file = open(self._data_path, 'wb')
 
-        # Detect format from first sample
+        # Format can be forced via parameter, or auto-detected from first sample
+        self._forced_format = image_format  # None = auto-detect, "jpeg" or "yuv420"
         self._detected_format: str | None = None
-        self._use_yuv420 = False
-        self._image_format = "jpeg"
+        self._use_yuv420 = image_format == "yuv420" if image_format else False
+        self._image_format = image_format if image_format else "jpeg"
 
     def add_sample(self, idx: int, value: Any) -> None:
         """Write one image sample to disk."""
         raw_bytes = _extract_image_bytes(value)
 
-        # Detect format on first sample
+        # Detect format on first sample (only if not forced)
         if self._detected_format is None and self.is_image_field:
             self._detected_format = detect_image_format(raw_bytes)
-            self._use_yuv420 = self._detected_format != "jpeg"
-            if self._use_yuv420:
-                self._image_format = "yuv420"
+            # Only auto-detect if format wasn't forced
+            if self._forced_format is None:
+                self._use_yuv420 = self._detected_format != "jpeg"
+                if self._use_yuv420:
+                    self._image_format = "yuv420"
 
         if self._use_yuv420:
             # Non-JPEG: decode → YUV420 → store
@@ -1106,10 +1110,29 @@ class ImageBytesWriter(StreamingFieldWriter):
             self._current_ptr += enc_size
             self._max_size = max(self._max_size, enc_size)
         else:
-            # JPEG or raw bytes: store as-is
+            # JPEG mode: store as JPEG bytes
             if self.is_image_field:
-                actual_size = find_image_end(raw_bytes, len(raw_bytes))
-                w, h = read_image_dimensions(raw_bytes[:actual_size])
+                # Check if this sample is actually JPEG
+                sample_format = detect_image_format(raw_bytes)
+                if sample_format != "jpeg":
+                    # Non-JPEG in JPEG mode: transcode to JPEG
+                    # This handles PNG-in-JPEG files common in ImageNet
+                    rgb = decode_image_to_rgb(raw_bytes)
+                    h, w = rgb.shape[:2]
+                    # Encode as JPEG (quality 100 for near-lossless)
+                    img = Image.fromarray(rgb)
+                    buffer = io.BytesIO()
+                    img.save(buffer, format='JPEG', quality=100)
+                    raw_bytes = buffer.getvalue()
+
+                # Don't call find_image_end - all readers return complete image bytes:
+                # - ImageFolder: files from disk are complete
+                # - LitData: LitData handles padding internally
+                # - FFCVFileReader: already trims to find JPEG end marker
+                # The find_image_end function can incorrectly truncate at
+                # early FFD9 markers in EXIF thumbnails.
+                actual_size = len(raw_bytes)
+                w, h = read_image_dimensions(raw_bytes)
             else:
                 actual_size = len(raw_bytes)
                 w, h = 0, 0
@@ -1242,14 +1265,23 @@ def _create_field_writer(
     field_type: str,
     output_dir: Path,
     num_samples: int,
+    image_format: str | None = None,
 ) -> StreamingFieldWriter:
-    """Create the appropriate streaming writer for a field type."""
+    """Create the appropriate streaming writer for a field type.
+
+    Args:
+        image_format: Force image format ("jpeg" or "yuv420"). None = auto-detect.
+    """
     if field_type in ("ImageBytes", "HFImageDict"):
-        return ImageBytesWriter(field_name, output_dir, num_samples, field_type)
+        return ImageBytesWriter(
+            field_name, output_dir, num_samples, field_type, image_format=image_format
+        )
     elif field_type == "str":
         return StringWriter(field_name, output_dir, num_samples)
     elif field_type == "bytes":
-        return ImageBytesWriter(field_name, output_dir, num_samples, field_type)
+        return ImageBytesWriter(
+            field_name, output_dir, num_samples, field_type, image_format=image_format
+        )
     else:
         return NumpyWriter(field_name, output_dir, num_samples, field_type)
 
@@ -1350,6 +1382,7 @@ class OptimizedCache:
         dataset: Any,
         output_dir: Path | None = None,
         verbose: bool = True,
+        image_format: str | None = None,
     ) -> OptimizedCache:
         """Build optimized cache from a dataset or reader.
 
@@ -1363,6 +1396,9 @@ class OptimizedCache:
             dataset: Any object with cache_path, field_types, __len__, __getitem__
             output_dir: Where to store cache (defaults to dataset.cache_path)
             verbose: Show progress
+            image_format: Force image format ("jpeg" or "yuv420"). None = auto-detect
+                from first sample. Use "yuv420" to force all images to YUV420 format
+                regardless of source format.
 
         Returns:
             Loaded OptimizedCache instance
@@ -1404,7 +1440,8 @@ class OptimizedCache:
         writers: dict[str, StreamingFieldWriter] = {}
         for field_name, field_type in field_types.items():
             writers[field_name] = _create_field_writer(
-                field_name, field_type, cache_dir, num_samples
+                field_name, field_type, cache_dir, num_samples,
+                image_format=image_format
             )
 
         if verbose:
@@ -1571,13 +1608,23 @@ class OptimizedCache:
                     cache_bytes = bytes(storage._data_mmap[ptr:ptr + size])
 
                     if field_type in ("ImageBytes", "HFImageDict"):
+                        # Validate dimensions are non-zero (catches silent parse failures)
+                        cache_h = int(meta['height'])
+                        cache_w = int(meta['width'])
+                        if cache_h == 0 or cache_w == 0:
+                            errors.append(
+                                f"Invalid dimensions at {idx}, '{field_name}': "
+                                f"{cache_h}x{cache_w} (dimension parse may have failed)"
+                            )
+                            continue
+
                         stored_format = self.get_image_format(field_name)
+                        dataset_bytes = _extract_image_bytes(dataset_value)
+                        source_format = detect_image_format(dataset_bytes)
 
                         if stored_format == "yuv420":
-                            dataset_bytes = _extract_image_bytes(dataset_value)
+                            # YUV420 mode: verify dimensions match (with padding)
                             dataset_w, dataset_h = read_image_dimensions(dataset_bytes)
-                            cache_h = int(meta['height'])
-                            cache_w = int(meta['width'])
                             padded_h = dataset_h + (dataset_h % 2)
                             padded_w = dataset_w + (dataset_w % 2)
 
@@ -1586,16 +1633,51 @@ class OptimizedCache:
                                     f"Image dim mismatch at {idx}, '{field_name}': "
                                     f"expected {padded_h}x{padded_w}, got {cache_h}x{cache_w}"
                                 )
-                        else:
-                            dataset_bytes = _extract_image_bytes(dataset_value)
-                            dataset_size = find_image_end(dataset_bytes, len(dataset_bytes))
-                            dataset_bytes = dataset_bytes[:dataset_size]
-
-                            if hashlib.md5(dataset_bytes).hexdigest() != \
-                               hashlib.md5(cache_bytes).hexdigest():
+                        elif source_format == "jpeg":
+                            # JPEG source in JPEG mode: must be byte-identical
+                            # Do NOT call find_image_end - readers return complete bytes
+                            if hashlib.sha256(dataset_bytes).hexdigest() != \
+                               hashlib.sha256(cache_bytes).hexdigest():
                                 errors.append(
-                                    f"Image mismatch at {idx}, '{field_name}'"
+                                    f"Image hash mismatch at {idx}, '{field_name}': "
+                                    f"source={len(dataset_bytes)} bytes, "
+                                    f"cache={len(cache_bytes)} bytes"
                                 )
+                        else:
+                            # PNG/other source in JPEG mode: transcoded, verify pixels
+                            # Cache should be JPEG format after transcoding
+                            if detect_image_format(cache_bytes) != "jpeg":
+                                errors.append(
+                                    f"Transcoding failed at {idx}, '{field_name}': "
+                                    f"source={source_format}, cache not JPEG"
+                                )
+                            else:
+                                # Compare decoded pixels with tolerance
+                                try:
+                                    source_rgb = decode_image_to_rgb(dataset_bytes)
+                                    cache_rgb = decode_image_to_rgb(cache_bytes)
+
+                                    if source_rgb.shape != cache_rgb.shape:
+                                        errors.append(
+                                            f"Dimension mismatch at {idx}, '{field_name}': "
+                                            f"source={source_rgb.shape}, cache={cache_rgb.shape}"
+                                        )
+                                    else:
+                                        diff = np.abs(
+                                            source_rgb.astype(np.int16) -
+                                            cache_rgb.astype(np.int16)
+                                        )
+                                        max_diff = int(np.max(diff))
+                                        # JPEG quality 100 should be very close
+                                        if max_diff > 5:
+                                            errors.append(
+                                                f"Pixel mismatch at {idx}, '{field_name}': "
+                                                f"max_diff={max_diff}"
+                                            )
+                                except Exception as e:
+                                    errors.append(
+                                        f"Decode error at {idx}, '{field_name}': {e}"
+                                    )
                     else:
                         # bytes field
                         if isinstance(dataset_value, np.ndarray):

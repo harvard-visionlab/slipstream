@@ -62,6 +62,34 @@ def _compute_file_hash(file_path: Path, length: int = 12) -> str:
     return sha256.hexdigest()[:length]
 
 
+def _get_cached_hash(tar_path: Path) -> str | None:
+    """Return cached hash if tar file hasn't been modified, else None.
+
+    Uses a sidecar file (e.g., val.tar.gz.sha256) containing the hash and
+    the tar file's mtime at the time of hashing. If the mtime matches,
+    the cached hash is still valid.
+    """
+    sidecar = tar_path.with_suffix(tar_path.suffix + ".sha256")
+    if not sidecar.exists():
+        return None
+    try:
+        content = sidecar.read_text().strip().split()
+        if len(content) != 2:
+            return None
+        cached_hash, cached_mtime = content[0], float(content[1])
+        if tar_path.stat().st_mtime == cached_mtime:
+            return cached_hash
+    except (ValueError, OSError):
+        pass
+    return None
+
+
+def _save_hash_cache(tar_path: Path, file_hash: str) -> None:
+    """Save hash to sidecar file alongside the tar."""
+    sidecar = tar_path.with_suffix(tar_path.suffix + ".sha256")
+    sidecar.write_text(f"{file_hash} {tar_path.stat().st_mtime}")
+
+
 def _download_s5cmd(
     remote_path: str,
     local_path: Path,
@@ -276,9 +304,16 @@ def _extract_tar(tar_path: Path, output_dir: Path, verbose: bool = True) -> Path
 
         if not extract_path.exists():
             # Extract with progress bar
+            # Note: filter="data" requires Python 3.12+
+            import sys
+            use_filter = sys.version_info >= (3, 12)
+
             desc = f"  Extracting {tar_path.name}"
             for member in tqdm(members, desc=desc, disable=not verbose):
-                tar.extract(member, output_dir, filter="data")
+                if use_filter:
+                    tar.extract(member, output_dir, filter="data")
+                else:
+                    tar.extract(member, output_dir)
 
     if verbose:
         print(f"  Extracted to {extract_path}")
@@ -360,12 +395,18 @@ def _download_and_extract_s3_tar(
             size_gb = tar_path.stat().st_size / 1e9
             print(f"Using cached tar: {tar_path} ({size_gb:.2f} GB)")
 
-    # Compute hash of tar file
-    if verbose:
-        print("  Computing hash...")
-    file_hash = _compute_file_hash(tar_path)
-    if verbose:
-        print(f"  Hash: {file_hash}")
+    # Get hash (from cache if available, otherwise compute and cache)
+    file_hash = _get_cached_hash(tar_path)
+    if file_hash is not None:
+        if verbose:
+            print(f"  Using cached hash: {file_hash}")
+    else:
+        if verbose:
+            print("  Computing hash...")
+        file_hash = _compute_file_hash(tar_path)
+        _save_hash_cache(tar_path, file_hash)
+        if verbose:
+            print(f"  Hash: {file_hash}")
 
     # Check if already extracted
     extract_base = cache_dir / "hashid" / file_hash
@@ -429,11 +470,11 @@ class SlipstreamImageFolder(ImageFolder):
 
         self._root_path = Path(root)
 
-        # Set up cache path
+        # Set up base cache path (user-specified or derived from root)
         if cache_dir is not None:
-            self._cache_path = Path(cache_dir)
+            self._base_cache_path = Path(cache_dir)
         else:
-            self._cache_path = self._root_path / ".slipstream-cache"
+            self._base_cache_path = self._root_path / ".slipstream-cache"
 
         # Store field types for compatibility with SlipstreamLoader
         self._field_types = {
@@ -450,9 +491,46 @@ class SlipstreamImageFolder(ImageFolder):
         self.image_fields = ["image"]  # For compatibility with SlipstreamDataset
 
     @property
+    def dataset_hash(self) -> str:
+        """Get content-based hash for this dataset.
+
+        For S3 tar archives: extracts the file hash from the extraction path
+        (e.g., /hashid/abc123def456/val → abc123de).
+
+        For local directories: computes hash from file listing metadata
+        (relative paths, mtimes, sizes), cached in .slipstream-hash sidecar.
+
+        Returns first 8 characters.
+        """
+        from slipstream.utils.hash import (
+            extract_hash_from_path,
+            get_or_compute_directory_hash,
+            IMG_EXTENSIONS,
+        )
+
+        # Check if path contains hash from S3 tar extraction
+        extracted_hash = extract_hash_from_path(self._root_path)
+        if extracted_hash:
+            return extracted_hash[:8]
+
+        # Local directory: compute hash from file listing metadata
+        return get_or_compute_directory_hash(
+            self._root_path,
+            extensions=IMG_EXTENSIONS,
+            length=12,
+            verbose=False,
+        )[:8]
+
+    @property
     def cache_path(self) -> Path:
-        """Path where optimized cache will be stored."""
-        return self._cache_path
+        """Path where optimized SlipCache will be stored.
+
+        Returns a versioned path that includes the dataset hash to prevent
+        stale cache issues when the source changes.
+
+        Path format: {base_cache_path}/slipcache-{hash[:8]}/
+        """
+        return self._base_cache_path / f"slipcache-{self.dataset_hash}"
 
     @property
     def field_types(self) -> dict[str, str]:
@@ -509,7 +587,6 @@ class SlipstreamImageFolder(ImageFolder):
             Dict mapping field names to lists of values, with image metadata
             stored under __image_sizes, __image_heights, __image_widths.
         """
-        from slipstream.cache import find_image_end
         from slipstream.utils.image_header import read_image_dimensions
 
         n = len(self.samples)
@@ -522,14 +599,12 @@ class SlipstreamImageFolder(ImageFolder):
         widths: list[int] = []
 
         for idx, (img_path, label) in enumerate(self.samples):
-            # Read raw bytes
+            # Read raw bytes - files from disk are complete, no trimming needed
+            # (find_image_end is only for FFCV files with page-aligned padding)
             with open(img_path, "rb") as f:
                 img_bytes = f.read()
 
-            # Find actual image end (trims trailing garbage after JPEG FFD9)
-            actual_size = find_image_end(img_bytes, len(img_bytes))
-
-            images.append(img_bytes[:actual_size])
+            images.append(img_bytes)
             labels.append(label)
             indices.append(idx)
 
@@ -543,7 +618,7 @@ class SlipstreamImageFolder(ImageFolder):
 
             # Get dimensions from header (fast, no decode)
             try:
-                w, h = read_image_dimensions(img_bytes[:actual_size])
+                w, h = read_image_dimensions(img_bytes)
             except Exception:
                 # Fallback: decode to get dimensions
                 from PIL import Image
@@ -551,7 +626,7 @@ class SlipstreamImageFolder(ImageFolder):
                 with Image.open(io.BytesIO(img_bytes)) as img:
                     w, h = img.size
 
-            sizes.append(actual_size)
+            sizes.append(len(img_bytes))
             heights.append(h)
             widths.append(w)
 
@@ -573,7 +648,7 @@ class SlipstreamImageFolder(ImageFolder):
             f"    num_samples={len(self):,},\n"
             f"    num_classes={len(self.classes)},\n"
             f"    fields={{{fields_str}}},\n"
-            f"    cache_path='{self._cache_path}',\n"
+            f"    cache_path='{self.cache_path}',\n"
             f")"
         )
 
