@@ -60,6 +60,8 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 
 def extract_filename(path: str) -> str:
     """Extract canonical filename from path (e.g., 'n01440764/ILSVRC2012_val_00000293.JPEG')."""
+    # Strip any surrounding quotes (FFCV paths may have embedded quotes)
+    path = path.strip('"').strip("'")
     # Handle various path formats
     # LitData: 'val/n01440764/ILSVRC2012_val_00000293.JPEG'
     # ImageFolder: 'n01440764/ILSVRC2012_val_00000293.JPEG'
