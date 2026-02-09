@@ -227,12 +227,10 @@ class SlipCacheDataset(Dataset):
     def _get_path(self, idx: int) -> str:
         """Get path for sample, or index-based identifier if no path field."""
         if self.has_path:
-            # Path field stores strings
+            # StringStorage uses _offsets array with (offset, length) pairs
             path_storage = self.cache.fields["path"]
-            meta = path_storage._metadata[idx]
-            ptr = int(meta["data_ptr"])
-            size = int(meta["data_size"])
-            path_bytes = bytes(path_storage._data_mmap[ptr:ptr + size])
+            offset, length = path_storage._offsets[idx]
+            path_bytes = bytes(path_storage._data_mmap[offset:offset + length])
             return path_bytes.decode("utf-8")
         return f"__idx__{idx}"
 
