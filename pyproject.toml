@@ -13,8 +13,8 @@ dependencies = [
     "tqdm",
     # Numba for JIT-compiled batch loading
     "numba",
-    # LitData (use main branch to match visionlab-datasets)
-    "litdata@git+https://github.com/Lightning-AI/litdata.git@main",
+    # LitData for streaming datasets
+    "litdata>=0.2.59",
     # PyTurboJPEG for fast JPEG decoding
     "PyTurboJPEG@git+https://github.com/lilohuang/PyTurboJPEG.git",
     # AWS/S3 support
@@ -79,10 +79,6 @@ explicit = true
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
-
-# Workaround: litdata's setup.py uses pkg_resources but doesn't declare it
-[tool.uv.extra-build-dependencies]
-litdata = ["setuptools"]
 
 [build-system]
 requires = ["hatchling", "setuptools"]
