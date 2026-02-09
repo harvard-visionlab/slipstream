@@ -304,9 +304,16 @@ def _extract_tar(tar_path: Path, output_dir: Path, verbose: bool = True) -> Path
 
         if not extract_path.exists():
             # Extract with progress bar
+            # Note: filter="data" requires Python 3.12+
+            import sys
+            use_filter = sys.version_info >= (3, 12)
+
             desc = f"  Extracting {tar_path.name}"
             for member in tqdm(members, desc=desc, disable=not verbose):
-                tar.extract(member, output_dir, filter="data")
+                if use_filter:
+                    tar.extract(member, output_dir, filter="data")
+                else:
+                    tar.extract(member, output_dir)
 
     if verbose:
         print(f"  Extracted to {extract_path}")
