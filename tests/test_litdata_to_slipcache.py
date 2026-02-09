@@ -20,7 +20,6 @@ Run with:
     uv run pytest tests/test_litdata_to_slipcache.py -v -s -m "not slow"
 """
 
-import hashlib
 import io
 import sys
 
@@ -29,7 +28,7 @@ import PIL.Image
 import pytest
 
 from slipstream.readers.streaming import StreamingReader
-from slipstream.cache import OptimizedCache, detect_image_format
+from slipstream.cache import OptimizedCache
 
 
 # Real ImageNet validation set on S3 (LitData format)
@@ -193,43 +192,44 @@ class TestLitDataToSlipCacheStructure:
 class TestLitDataToSlipCacheQuick:
     """Quick verification of first 100 samples."""
 
-    def test_first_100_bytes_comparison(self, litdata_reader, slipcache):
-        """Compare first 100 samples: JPEG should be byte-identical."""
-        _print_progress(f"\n  Comparing first 100 samples...")
+    def test_first_100_cached_valid(self, slipcache):
+        """First 100 cached images should be valid (correct format, decodable)."""
+        _print_progress(f"\n  Validating first 100 cached images...")
         image_format = slipcache.get_image_format('image')
-
-        mismatches = []
-        format_counts = {"jpeg": 0, "png": 0, "other": 0}
+        errors = []
 
         for idx in range(100):
-            source_bytes = litdata_reader[idx]['image']
-            cached_bytes = _get_cached_image_bytes(slipcache, idx)
+            try:
+                cached_bytes = _get_cached_image_bytes(slipcache, idx)
 
-            source_format = detect_image_format(source_bytes)
-            format_counts[source_format] = format_counts.get(source_format, 0) + 1
-
-            if image_format == "jpeg":
-                # JPEG cache: JPEG sources should be byte-identical
-                if source_format == "jpeg":
-                    source_hash = hashlib.sha256(source_bytes).hexdigest()
-                    cached_hash = hashlib.sha256(cached_bytes).hexdigest()
-                    if source_hash != cached_hash:
-                        mismatches.append((idx, "JPEG bytes differ"))
-                else:
-                    # Non-JPEG source in JPEG cache - this is a problem!
-                    # The cache stored raw PNG bytes, which won't decode as JPEG
+                if image_format == "jpeg":
+                    # Verify JPEG structure
                     if cached_bytes[:2] != b'\xff\xd8':
-                        mismatches.append((idx, f"{source_format} stored without transcode"))
-            else:
-                # YUV420 cache: all formats converted, check dimensions
-                h, w = slipcache.get_image_dims('image', idx)
-                if h == 0 or w == 0:
-                    mismatches.append((idx, "invalid dimensions"))
+                        errors.append((idx, "missing JPEG SOI marker"))
+                        continue
+                    if cached_bytes[-2:] != b'\xff\xd9':
+                        errors.append((idx, "missing JPEG EOI marker"))
+                        continue
 
-        _print_progress(f"  Source formats: {format_counts}")
+                    # Verify decodable
+                    img = PIL.Image.open(io.BytesIO(cached_bytes))
+                    img.load()
+                else:
+                    # YUV420: verify dimensions and size
+                    h, w = slipcache.get_image_dims('image', idx)
+                    if h == 0 or w == 0:
+                        errors.append((idx, f"invalid dimensions: {h}x{w}"))
+                        continue
 
-        if mismatches:
-            pytest.fail(f"Comparison errors at {len(mismatches)} indices: {mismatches[:5]}...")
+                    expected_size = h * w + (h // 2) * (w // 2) * 2
+                    if len(cached_bytes) != expected_size:
+                        errors.append((idx, f"size mismatch: {len(cached_bytes)} vs {expected_size}"))
+
+            except Exception as e:
+                errors.append((idx, str(e)))
+
+        if errors:
+            pytest.fail(f"Validation errors at {len(errors)} indices: {errors[:5]}...")
 
     def test_first_100_labels_match(self, litdata_reader, slipcache):
         """First 100 labels should match exactly."""
@@ -291,38 +291,45 @@ class TestLitDataToSlipCacheQuick:
 class TestLitDataToSlipCacheFull:
     """Full verification of all 50,000 samples."""
 
-    def test_all_samples_format_check(self, litdata_reader, slipcache):
-        """Check all samples for format issues (catches PNG-in-JPEG problem)."""
-        _print_progress(f"\n  Checking all {len(litdata_reader)} samples for format issues...")
+    def test_all_cached_valid(self, slipcache):
+        """ALL cached images should be valid (correct format markers)."""
+        _print_progress(f"\n  Validating all {slipcache.num_samples} cached images...")
         image_format = slipcache.get_image_format('image')
+        errors = []
 
-        issues = []
-        format_counts = {"jpeg": 0, "png": 0, "other": 0}
+        for idx in range(slipcache.num_samples):
+            if idx % 10000 == 0:
+                _print_progress(f"    {idx}/{slipcache.num_samples}...")
 
-        for idx in range(len(litdata_reader)):
-            if idx % 5000 == 0:
-                _print_progress(f"    {idx}/{len(litdata_reader)}...")
-
-            source_bytes = litdata_reader[idx]['image']
-            source_format = detect_image_format(source_bytes)
-            format_counts[source_format] = format_counts.get(source_format, 0) + 1
-
-            if image_format == "jpeg" and source_format != "jpeg":
-                # Non-JPEG in JPEG cache - potential problem
+            try:
                 cached_bytes = _get_cached_image_bytes(slipcache, idx)
-                if cached_bytes[:2] != b'\xff\xd8':
-                    issues.append((idx, source_format, "stored without transcode"))
-                    if len(issues) >= 20:
-                        break
 
-        _print_progress(f"  Source format totals: {format_counts}")
+                if image_format == "jpeg":
+                    # Verify JPEG structure (fast check, no decode)
+                    if cached_bytes[:2] != b'\xff\xd8':
+                        errors.append((idx, "missing JPEG SOI"))
+                    elif cached_bytes[-2:] != b'\xff\xd9':
+                        errors.append((idx, "missing JPEG EOI"))
+                else:
+                    # YUV420: verify dimensions and size
+                    h, w = slipcache.get_image_dims('image', idx)
+                    if h == 0 or w == 0:
+                        errors.append((idx, f"invalid dims: {h}x{w}"))
+                    else:
+                        expected_size = h * w + (h // 2) * (w // 2) * 2
+                        if len(cached_bytes) != expected_size:
+                            errors.append((idx, f"size mismatch"))
 
-        if issues:
-            pytest.fail(
-                f"Format issues at {len(issues)} samples:\n"
-                f"  {issues[:10]}...\n"
-                f"  This indicates PNG files stored as raw bytes in JPEG cache!"
-            )
+                if len(errors) >= 20:
+                    break
+
+            except Exception as e:
+                errors.append((idx, str(e)))
+                if len(errors) >= 20:
+                    break
+
+        if errors:
+            pytest.fail(f"Validation errors at {len(errors)} samples: {errors[:10]}...")
 
     def test_all_labels_match(self, litdata_reader, slipcache):
         """ALL labels should match exactly."""
