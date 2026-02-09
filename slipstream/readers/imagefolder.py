@@ -580,7 +580,6 @@ class SlipstreamImageFolder(ImageFolder):
             Dict mapping field names to lists of values, with image metadata
             stored under __image_sizes, __image_heights, __image_widths.
         """
-        from slipstream.cache import find_image_end
         from slipstream.utils.image_header import read_image_dimensions
 
         n = len(self.samples)
@@ -593,14 +592,12 @@ class SlipstreamImageFolder(ImageFolder):
         widths: list[int] = []
 
         for idx, (img_path, label) in enumerate(self.samples):
-            # Read raw bytes
+            # Read raw bytes - files from disk are complete, no trimming needed
+            # (find_image_end is only for FFCV files with page-aligned padding)
             with open(img_path, "rb") as f:
                 img_bytes = f.read()
 
-            # Find actual image end (trims trailing garbage after JPEG FFD9)
-            actual_size = find_image_end(img_bytes, len(img_bytes))
-
-            images.append(img_bytes[:actual_size])
+            images.append(img_bytes)
             labels.append(label)
             indices.append(idx)
 
@@ -614,7 +611,7 @@ class SlipstreamImageFolder(ImageFolder):
 
             # Get dimensions from header (fast, no decode)
             try:
-                w, h = read_image_dimensions(img_bytes[:actual_size])
+                w, h = read_image_dimensions(img_bytes)
             except Exception:
                 # Fallback: decode to get dimensions
                 from PIL import Image
@@ -622,7 +619,7 @@ class SlipstreamImageFolder(ImageFolder):
                 with Image.open(io.BytesIO(img_bytes)) as img:
                     w, h = img.size
 
-            sizes.append(actual_size)
+            sizes.append(len(img_bytes))
             heights.append(h)
             widths.append(w)
 
