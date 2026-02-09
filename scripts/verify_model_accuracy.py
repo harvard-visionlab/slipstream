@@ -201,7 +201,7 @@ class FFCVDataset(Dataset):
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         img_tensor = self.transform(img)
 
-        return img_tensor, label, path
+        return img_tensor, label, extract_filename(path)
 
 
 class SlipCacheDataset(Dataset):
@@ -326,6 +326,7 @@ def run_inference(
 def compare_predictions(
     gold: FormatResult,
     other: FormatResult,
+    debug: bool = False,
 ) -> dict[str, Any]:
     """Compare predictions between gold standard and another format.
 
@@ -334,6 +335,18 @@ def compare_predictions(
     """
     gold_map = gold.get_prediction_map()
     other_map = other.get_prediction_map()
+
+    # Debug: show sample filenames and find mismatches
+    if debug:
+        gold_keys = set(gold_map.keys())
+        other_keys = set(other_map.keys())
+        only_in_gold = gold_keys - other_keys
+        only_in_other = other_keys - gold_keys
+        if only_in_gold or only_in_other:
+            print(f"\n  DEBUG: Filename alignment issues:")
+            print(f"    Total gold: {len(gold_keys)}, other: {len(other_keys)}")
+            print(f"    Only in gold ({len(only_in_gold)}): {sorted(only_in_gold)[:5]}")
+            print(f"    Only in other ({len(only_in_other)}): {sorted(only_in_other)[:5]}")
 
     # Check if we're using index-based alignment (no real filenames)
     uses_index = any(f.startswith("__idx__") for f in other_map.keys())
@@ -499,6 +512,21 @@ def main():
     ffcv_reader = load_ffcv()
     ffcv_ds = FFCVDataset(ffcv_reader, transform)
 
+    # Debug: print sample paths from each reader to verify alignment
+    print("\n" + "-" * 40)
+    print("DEBUG: Sample paths from each reader")
+    print("-" * 40)
+    for name, reader in [("ImageFolder", imagefolder_reader),
+                         ("LitData", litdata_reader),
+                         ("FFCV", ffcv_reader)]:
+        sample = reader[0]
+        raw_path = sample.get("path", f"__idx__0")
+        canonical = extract_filename(raw_path)
+        print(f"{name}:")
+        print(f"  Raw: {raw_path}")
+        print(f"  Canonical: {canonical}")
+    print("-" * 40)
+
     # SlipCaches (build or load)
     slipcache_datasets = {}
     if not args.skip_cache_build:
@@ -565,7 +593,7 @@ def main():
             if ds_name == "ImageFolder":
                 continue
 
-            comparison = compare_predictions(gold, result)
+            comparison = compare_predictions(gold, result, debug=True)
             comparisons[ds_name] = comparison
 
             status = "✅" if comparison["agreement_rate"] > 0.999 else "⚠️"
