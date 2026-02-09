@@ -58,6 +58,18 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
+def extract_filename(path: str) -> str:
+    """Extract canonical filename from path (e.g., 'n01440764/ILSVRC2012_val_00000293.JPEG')."""
+    # Handle various path formats
+    # LitData: 'val/n01440764/ILSVRC2012_val_00000293.JPEG'
+    # ImageFolder: 'n01440764/ILSVRC2012_val_00000293.JPEG'
+    # Just use class/filename as the canonical key
+    parts = path.replace("\\", "/").split("/")
+    if len(parts) >= 2:
+        return f"{parts[-2]}/{parts[-1]}"  # class/filename
+    return parts[-1]
+
+
 @dataclass
 class FormatResult:
     """Results for a single format."""
@@ -66,6 +78,7 @@ class FormatResult:
     top5_correct: int = 0
     total: int = 0
     predictions: list[int] = field(default_factory=list)
+    filenames: list[str] = field(default_factory=list)  # For alignment
     inference_time: float = 0.0
 
     @property
@@ -75,6 +88,10 @@ class FormatResult:
     @property
     def top5_accuracy(self) -> float:
         return self.top5_correct / self.total if self.total > 0 else 0.0
+
+    def get_prediction_map(self) -> dict[str, int]:
+        """Return filename -> prediction mapping."""
+        return dict(zip(self.filenames, self.predictions))
 
 
 def get_model(name: str, device: torch.device) -> nn.Module:
@@ -113,19 +130,20 @@ class ImageFolderDataset(Dataset):
     def __len__(self) -> int:
         return len(self.reader)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int, str]:
         import io
         from PIL import Image
 
         sample = self.reader[idx]
         img_bytes = sample["image"]
         label = sample["label"]
+        path = sample.get("path", str(idx))
 
         # Decode and transform
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         img_tensor = self.transform(img)
 
-        return img_tensor, label
+        return img_tensor, label, extract_filename(path)
 
 
 class LitDataDataset(Dataset):
@@ -138,23 +156,28 @@ class LitDataDataset(Dataset):
     def __len__(self) -> int:
         return len(self.reader)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int, str]:
         import io
         from PIL import Image
 
         sample = self.reader[idx]
         img_bytes = sample["image"]
         label = sample["label"]
+        path = sample.get("path", str(idx))
 
         # Decode and transform
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         img_tensor = self.transform(img)
 
-        return img_tensor, label
+        return img_tensor, label, extract_filename(path)
 
 
 class FFCVDataset(Dataset):
-    """Wrapper for FFCVFileReader that applies transforms."""
+    """Wrapper for FFCVFileReader that applies transforms.
+
+    Note: FFCV files typically don't store filenames, so we use index-based
+    alignment. FFCV files are assumed to be in the same order as ImageFolder.
+    """
 
     def __init__(self, reader: Any, transform: transforms.Compose):
         self.reader = reader
@@ -163,19 +186,22 @@ class FFCVDataset(Dataset):
     def __len__(self) -> int:
         return len(self.reader)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int, str]:
         import io
         from PIL import Image
 
         sample = self.reader[idx]
         img_bytes = sample["image"]
         label = sample["label"]
+        # FFCV doesn't store paths, use index as identifier
+        # This works because FFCV is created in same order as ImageFolder
+        path = sample.get("path", f"__idx__{idx}")
 
         # Decode and transform
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         img_tensor = self.transform(img)
 
-        return img_tensor, label
+        return img_tensor, label, path
 
 
 class SlipCacheDataset(Dataset):
@@ -185,6 +211,7 @@ class SlipCacheDataset(Dataset):
         self.cache = cache
         self.transform = transform
         self.image_format = cache.get_image_format("image")
+        self.has_path = "path" in cache.fields
 
     def __len__(self) -> int:
         return self.cache.num_samples
@@ -197,12 +224,25 @@ class SlipCacheDataset(Dataset):
         size = int(meta["data_size"])
         return bytes(storage._data_mmap[ptr:ptr + size])
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+    def _get_path(self, idx: int) -> str:
+        """Get path for sample, or index-based identifier if no path field."""
+        if self.has_path:
+            # Path field stores strings
+            path_storage = self.cache.fields["path"]
+            meta = path_storage._metadata[idx]
+            ptr = int(meta["data_ptr"])
+            size = int(meta["data_size"])
+            path_bytes = bytes(path_storage._data_mmap[ptr:ptr + size])
+            return path_bytes.decode("utf-8")
+        return f"__idx__{idx}"
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int, str]:
         import io
         from PIL import Image
 
         img_bytes = self._get_image_bytes(idx)
         label = int(self.cache.fields["label"]._data[idx])
+        path = self._get_path(idx)
 
         if self.image_format == "yuv420":
             # YUV420 requires special decoding
@@ -226,7 +266,7 @@ class SlipCacheDataset(Dataset):
             img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
         img_tensor = self.transform(img)
-        return img_tensor, label
+        return img_tensor, label, extract_filename(path)
 
 
 def run_inference(
@@ -238,7 +278,7 @@ def run_inference(
     max_samples: int | None = None,
     desc: str = "Inference",
 ) -> FormatResult:
-    """Run inference and collect predictions."""
+    """Run inference and collect predictions with filenames for alignment."""
     result = FormatResult(name=desc)
 
     # Limit samples if requested
@@ -257,7 +297,9 @@ def run_inference(
     start_time = time.time()
 
     with torch.no_grad():
-        for images, labels in tqdm(loader, desc=desc, leave=False):
+        for batch in tqdm(loader, desc=desc, leave=False):
+            # Unpack batch - now includes filenames
+            images, labels, filenames = batch
             images = images.to(device)
             labels = labels.to(device)
 
@@ -267,6 +309,7 @@ def run_inference(
             _, preds = outputs.topk(1, dim=1)
             preds = preds.squeeze(1)
             result.predictions.extend(preds.cpu().tolist())
+            result.filenames.extend(filenames)
 
             # Top-1 accuracy
             result.top1_correct += (preds == labels).sum().item()
@@ -286,24 +329,71 @@ def compare_predictions(
     gold: FormatResult,
     other: FormatResult,
 ) -> dict[str, Any]:
-    """Compare predictions between gold standard and another format."""
-    assert len(gold.predictions) == len(other.predictions), \
-        f"Prediction count mismatch: {len(gold.predictions)} vs {len(other.predictions)}"
+    """Compare predictions between gold standard and another format.
 
-    agreements = sum(
-        g == o for g, o in zip(gold.predictions, other.predictions)
-    )
+    Uses filename-based alignment to handle shuffled datasets like LitData.
+    For formats without filenames (using __idx__), falls back to position-based.
+    """
+    gold_map = gold.get_prediction_map()
+    other_map = other.get_prediction_map()
+
+    # Check if we're using index-based alignment (no real filenames)
+    uses_index = any(f.startswith("__idx__") for f in other_map.keys())
+
+    if uses_index:
+        # Index-based comparison (assumes same order)
+        common_keys = sorted(gold_map.keys() & other_map.keys())
+        if not common_keys:
+            # Fallback to position-based for __idx__ keys
+            agreements = sum(
+                g == o for g, o in zip(gold.predictions, other.predictions)
+            )
+            disagreements = []
+            for idx, (g, o) in enumerate(zip(gold.predictions, other.predictions)):
+                if g != o:
+                    disagreements.append({"index": idx, "gold": g, "other": o})
+            return {
+                "total": len(gold.predictions),
+                "agreements": agreements,
+                "agreement_rate": agreements / len(gold.predictions),
+                "disagreements": disagreements[:20],
+                "num_disagreements": len(disagreements),
+                "alignment": "position",
+            }
+    else:
+        # Filename-based comparison
+        common_keys = sorted(gold_map.keys() & other_map.keys())
+
+    if not common_keys:
+        return {
+            "total": 0,
+            "agreements": 0,
+            "agreement_rate": 0.0,
+            "disagreements": [],
+            "num_disagreements": 0,
+            "alignment": "none",
+            "error": "No common filenames found",
+        }
+
+    agreements = 0
     disagreements = []
-    for idx, (g, o) in enumerate(zip(gold.predictions, other.predictions)):
-        if g != o:
-            disagreements.append({"index": idx, "gold": g, "other": o})
+    for filename in common_keys:
+        g = gold_map[filename]
+        o = other_map[filename]
+        if g == o:
+            agreements += 1
+        else:
+            disagreements.append({"filename": filename, "gold": g, "other": o})
 
     return {
-        "total": len(gold.predictions),
+        "total": len(common_keys),
         "agreements": agreements,
-        "agreement_rate": agreements / len(gold.predictions),
+        "agreement_rate": agreements / len(common_keys),
         "disagreements": disagreements[:20],  # First 20 only
         "num_disagreements": len(disagreements),
+        "alignment": "filename",
+        "gold_total": len(gold_map),
+        "other_total": len(other_map),
     }
 
 
@@ -334,12 +424,21 @@ def load_ffcv(verbose: bool = True) -> Any:
     return FFCVFileReader(FFCV_VAL_S3, verbose=verbose)
 
 
-def build_or_load_slipcache(reader: Any, name: str, verbose: bool = True) -> Any:
+def build_or_load_slipcache(
+    reader: Any, name: str, verbose: bool = True, rebuild: bool = False
+) -> Any:
     """Build or load SlipCache for a reader."""
+    import shutil
     from slipstream.cache import OptimizedCache
 
     cache_path = reader.cache_path
     manifest_path = cache_path / ".slipstream" / "manifest.json"
+
+    # Delete existing cache if rebuild requested
+    if rebuild and cache_path.exists():
+        if verbose:
+            print(f"Deleting existing SlipCache for {name}: {cache_path}")
+        shutil.rmtree(cache_path)
 
     if manifest_path.exists():
         if verbose:
@@ -365,6 +464,8 @@ def main():
                         help="Number of data loader workers")
     parser.add_argument("--output", type=str, default=None,
                         help="Output JSON file for results")
+    parser.add_argument("--rebuild-caches", action="store_true",
+                        help="Delete and rebuild all SlipCaches (useful if caches are stale)")
     args = parser.parse_args()
 
     # Device setup
@@ -412,7 +513,7 @@ def main():
             ("LitData", litdata_reader),
             ("FFCV", ffcv_reader),
         ]:
-            cache = build_or_load_slipcache(reader, name)
+            cache = build_or_load_slipcache(reader, name, rebuild=args.rebuild_caches)
             slipcache_datasets[f"SlipCache-{name}"] = SlipCacheDataset(cache, transform)
 
     # All datasets to evaluate
@@ -470,7 +571,9 @@ def main():
             comparisons[ds_name] = comparison
 
             status = "✅" if comparison["agreement_rate"] > 0.999 else "⚠️"
+            alignment = comparison.get("alignment", "position")
             print(f"\n{ds_name}:")
+            print(f"  Alignment: {alignment}")
             print(f"  Agreement: {comparison['agreements']}/{comparison['total']} "
                   f"({comparison['agreement_rate'] * 100:.3f}%) {status}")
             print(f"  Top-1 diff: {abs(gold.top1_accuracy - result.top1_accuracy) * 100:.3f}%")
