@@ -1106,10 +1106,29 @@ class ImageBytesWriter(StreamingFieldWriter):
             self._current_ptr += enc_size
             self._max_size = max(self._max_size, enc_size)
         else:
-            # JPEG or raw bytes: store as-is
+            # JPEG mode: store as JPEG bytes
             if self.is_image_field:
-                actual_size = find_image_end(raw_bytes, len(raw_bytes))
-                w, h = read_image_dimensions(raw_bytes[:actual_size])
+                # Check if this sample is actually JPEG
+                sample_format = detect_image_format(raw_bytes)
+                if sample_format != "jpeg":
+                    # Non-JPEG in JPEG mode: transcode to JPEG
+                    # This handles PNG-in-JPEG files common in ImageNet
+                    rgb = decode_image_to_rgb(raw_bytes)
+                    h, w = rgb.shape[:2]
+                    # Encode as JPEG (quality 100 for near-lossless)
+                    img = Image.fromarray(rgb)
+                    buffer = io.BytesIO()
+                    img.save(buffer, format='JPEG', quality=100)
+                    raw_bytes = buffer.getvalue()
+
+                # Don't call find_image_end - all readers return complete image bytes:
+                # - ImageFolder: files from disk are complete
+                # - LitData: LitData handles padding internally
+                # - FFCVFileReader: already trims to find JPEG end marker
+                # The find_image_end function can incorrectly truncate at
+                # early FFD9 markers in EXIF thumbnails.
+                actual_size = len(raw_bytes)
+                w, h = read_image_dimensions(raw_bytes)
             else:
                 actual_size = len(raw_bytes)
                 w, h = 0, 0

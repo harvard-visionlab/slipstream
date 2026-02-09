@@ -1914,7 +1914,7 @@ wheels = [
 [[package]]
 name = "litdata"
 version = "0.2.60"
-source = { git = "https://github.com/Lightning-AI/litdata.git?rev=main#c8a94a463ae7868bd560796233a003b11f205b34" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "boto3" },
     { name = "filelock" },
@@ -1931,6 +1931,10 @@ dependencies = [
     { name = "torchvision", version = "0.20.1+cu121", source = { registry = "https://download.pytorch.org/whl/cu121" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "torchvision", version = "0.25.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torchvision", version = "0.25.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux')" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/12/14/5acd9eaf619c074ffa13c3c77c372fb960205f9d6aaf06293f989a06a436/litdata-0.2.60.tar.gz", hash = "sha256:e178f2f10f7221a5d38fdc6b5d5a0b5bb62b05ef5bbff0971eb94b2da4055fca", size = 213791, upload-time = "2026-01-28T14:27:05.458Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/9a/ff1e49223acf36900bfb1986983213042291d3ccd211067829174b041810/litdata-0.2.60-py3-none-any.whl", hash = "sha256:49361bfc532ff5520c430ecbfe39ee177cf1bb2d81468a902cb394bcc193f014", size = 199305, upload-time = "2026-01-28T14:27:03.794Z" },
 ]
 
 [[package]]
@@ -4472,6 +4476,10 @@ dependencies = [
     { name = "typing-extensions", marker = "sys_platform == 'darwin'" },
 ]
 wheels = [
+    { url = "https://download.pytorch.org/whl/cpu/torch-2.10.0-1-cp310-none-macosx_11_0_arm64.whl", hash = "sha256:4db72a4d257c45c3502f11764ee41460a87312fdc3dff47a8957812efe961725" },
+    { url = "https://download.pytorch.org/whl/cpu/torch-2.10.0-1-cp311-none-macosx_11_0_arm64.whl", hash = "sha256:0826ac8e409551e12b2360ac18b4161a838cbd111933e694752f351191331d09" },
+    { url = "https://download.pytorch.org/whl/cpu/torch-2.10.0-1-cp312-none-macosx_11_0_arm64.whl", hash = "sha256:7fbbf409143a4fe0812a40c0b46a436030a7e1d14fe8c5234dfbe44df47f617e" },
+    { url = "https://download.pytorch.org/whl/cpu/torch-2.10.0-1-cp313-none-macosx_11_0_arm64.whl", hash = "sha256:b39cafff7229699f9d6e172cac74d85fd71b568268e439e08d9c540e54732a3e" },
     { url = "https://download.pytorch.org/whl/cpu/torch-2.10.0-cp310-none-macosx_11_0_arm64.whl", hash = "sha256:2d16abfce6c92584ceeb00c3b2665d5798424dd9ed235ea69b72e045cd53ae97" },
     { url = "https://download.pytorch.org/whl/cpu/torch-2.10.0-cp311-none-macosx_11_0_arm64.whl", hash = "sha256:4584ab167995c0479f6821e3dceaf199c8166c811d3adbba5d8eedbbfa6764fd" },
     { url = "https://download.pytorch.org/whl/cpu/torch-2.10.0-cp312-none-macosx_11_0_arm64.whl", hash = "sha256:45a1c5057629444aeb1c452c18298fa7f30f2f7aeadd4dc41f9d340980294407" },
@@ -4791,7 +4799,7 @@ requires-dist = [
     { name = "fsspec", extras = ["s3"] },
     { name = "hf-transfer" },
     { name = "huggingface-hub" },
-    { name = "litdata", git = "https://github.com/Lightning-AI/litdata.git?rev=main" },
+    { name = "litdata", specifier = ">=0.2.59" },
     { name = "numba" },
     { name = "numpy" },
     { name = "polars" },
