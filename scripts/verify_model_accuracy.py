@@ -609,6 +609,25 @@ def main():
             if comparison["num_disagreements"] > 0:
                 print(f"  First disagreements: {comparison['disagreements'][:5]}")
 
+        # Compare pre-processed formats against each other (should be 100%)
+        if "SlipCache-LitData" in results and "SlipCache-FFCV" in results:
+            print("\n" + "-" * 40)
+            print("PRE-PROCESSED FORMAT COMPARISON")
+            print("-" * 40)
+            print("(LitData and FFCV are from same pre-processed source, should be 100%)")
+
+            litdata_result = results["SlipCache-LitData"]
+            ffcv_result = results["SlipCache-FFCV"]
+            comparison = compare_predictions(litdata_result, ffcv_result, debug=True)
+
+            status = "✅" if comparison["agreement_rate"] > 0.999 else "⚠️"
+            print(f"\nSlipCache-LitData vs SlipCache-FFCV:")
+            print(f"  Agreement: {comparison['agreements']}/{comparison['total']} "
+                  f"({comparison['agreement_rate'] * 100:.3f}%) {status}")
+
+            if comparison["num_disagreements"] > 0:
+                print(f"  First disagreements: {comparison['disagreements'][:5]}")
+
         # Summary
         print("\n" + "-" * 40)
         print("SUMMARY")
