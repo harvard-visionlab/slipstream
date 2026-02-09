@@ -1063,6 +1063,7 @@ class ImageBytesWriter(StreamingFieldWriter):
         output_dir: Path,
         num_samples: int,
         field_type: str,
+        image_format: str | None = None,
     ) -> None:
         self.field_name = field_name
         self.output_dir = output_dir
@@ -1077,21 +1078,24 @@ class ImageBytesWriter(StreamingFieldWriter):
         self._max_size = 0
         self._file = open(self._data_path, 'wb')
 
-        # Detect format from first sample
+        # Format can be forced via parameter, or auto-detected from first sample
+        self._forced_format = image_format  # None = auto-detect, "jpeg" or "yuv420"
         self._detected_format: str | None = None
-        self._use_yuv420 = False
-        self._image_format = "jpeg"
+        self._use_yuv420 = image_format == "yuv420" if image_format else False
+        self._image_format = image_format if image_format else "jpeg"
 
     def add_sample(self, idx: int, value: Any) -> None:
         """Write one image sample to disk."""
         raw_bytes = _extract_image_bytes(value)
 
-        # Detect format on first sample
+        # Detect format on first sample (only if not forced)
         if self._detected_format is None and self.is_image_field:
             self._detected_format = detect_image_format(raw_bytes)
-            self._use_yuv420 = self._detected_format != "jpeg"
-            if self._use_yuv420:
-                self._image_format = "yuv420"
+            # Only auto-detect if format wasn't forced
+            if self._forced_format is None:
+                self._use_yuv420 = self._detected_format != "jpeg"
+                if self._use_yuv420:
+                    self._image_format = "yuv420"
 
         if self._use_yuv420:
             # Non-JPEG: decode → YUV420 → store
@@ -1261,14 +1265,23 @@ def _create_field_writer(
     field_type: str,
     output_dir: Path,
     num_samples: int,
+    image_format: str | None = None,
 ) -> StreamingFieldWriter:
-    """Create the appropriate streaming writer for a field type."""
+    """Create the appropriate streaming writer for a field type.
+
+    Args:
+        image_format: Force image format ("jpeg" or "yuv420"). None = auto-detect.
+    """
     if field_type in ("ImageBytes", "HFImageDict"):
-        return ImageBytesWriter(field_name, output_dir, num_samples, field_type)
+        return ImageBytesWriter(
+            field_name, output_dir, num_samples, field_type, image_format=image_format
+        )
     elif field_type == "str":
         return StringWriter(field_name, output_dir, num_samples)
     elif field_type == "bytes":
-        return ImageBytesWriter(field_name, output_dir, num_samples, field_type)
+        return ImageBytesWriter(
+            field_name, output_dir, num_samples, field_type, image_format=image_format
+        )
     else:
         return NumpyWriter(field_name, output_dir, num_samples, field_type)
 
@@ -1369,6 +1382,7 @@ class OptimizedCache:
         dataset: Any,
         output_dir: Path | None = None,
         verbose: bool = True,
+        image_format: str | None = None,
     ) -> OptimizedCache:
         """Build optimized cache from a dataset or reader.
 
@@ -1382,6 +1396,9 @@ class OptimizedCache:
             dataset: Any object with cache_path, field_types, __len__, __getitem__
             output_dir: Where to store cache (defaults to dataset.cache_path)
             verbose: Show progress
+            image_format: Force image format ("jpeg" or "yuv420"). None = auto-detect
+                from first sample. Use "yuv420" to force all images to YUV420 format
+                regardless of source format.
 
         Returns:
             Loaded OptimizedCache instance
@@ -1423,7 +1440,8 @@ class OptimizedCache:
         writers: dict[str, StreamingFieldWriter] = {}
         for field_name, field_type in field_types.items():
             writers[field_name] = _create_field_writer(
-                field_name, field_type, cache_dir, num_samples
+                field_name, field_type, cache_dir, num_samples,
+                image_format=image_format
             )
 
         if verbose:

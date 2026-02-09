@@ -438,13 +438,20 @@ def load_ffcv(verbose: bool = True) -> Any:
 
 
 def build_or_load_slipcache(
-    reader: Any, name: str, verbose: bool = True, rebuild: bool = False
+    reader: Any, name: str, verbose: bool = True, rebuild: bool = False,
+    image_format: str = "jpeg"
 ) -> Any:
     """Build or load SlipCache for a reader."""
     import shutil
     from slipstream.cache import OptimizedCache
 
-    cache_path = reader.cache_path
+    # Include format in cache path so JPEG and YUV420 caches are separate
+    base_cache_path = reader.cache_path
+    if image_format == "yuv420":
+        cache_path = base_cache_path.parent / f"{base_cache_path.name}-yuv420"
+    else:
+        cache_path = base_cache_path
+
     manifest_path = cache_path / ".slipstream" / "manifest.json"
 
     # Delete existing cache if rebuild requested
@@ -459,8 +466,10 @@ def build_or_load_slipcache(
         return OptimizedCache.load(cache_path, verbose=verbose)
 
     if verbose:
-        print(f"Building SlipCache for {name}: {cache_path}")
-    return OptimizedCache.build(reader, output_dir=cache_path, verbose=verbose)
+        print(f"Building SlipCache for {name} (format={image_format}): {cache_path}")
+    return OptimizedCache.build(
+        reader, output_dir=cache_path, verbose=verbose, image_format=image_format
+    )
 
 
 def main():
@@ -479,6 +488,8 @@ def main():
                         help="Output JSON file for results")
     parser.add_argument("--rebuild-caches", action="store_true",
                         help="Delete and rebuild all SlipCaches (useful if caches are stale)")
+    parser.add_argument("--image-format", choices=["jpeg", "yuv420"], default="jpeg",
+                        help="Image format for SlipCache (default: jpeg, use yuv420 to test YUV path)")
     args = parser.parse_args()
 
     # Device setup
@@ -533,7 +544,7 @@ def main():
     slipcache_datasets = {}
     if not args.skip_cache_build:
         print("\n" + "=" * 60)
-        print("BUILDING/LOADING SLIPCACHES")
+        print(f"BUILDING/LOADING SLIPCACHES (format={args.image_format})")
         print("=" * 60)
 
         for name, reader in [
@@ -541,7 +552,11 @@ def main():
             ("LitData", litdata_reader),
             ("FFCV", ffcv_reader),
         ]:
-            cache = build_or_load_slipcache(reader, name, rebuild=args.rebuild_caches)
+            cache = build_or_load_slipcache(
+                reader, name,
+                rebuild=args.rebuild_caches,
+                image_format=args.image_format
+            )
             slipcache_datasets[f"SlipCache-{name}"] = SlipCacheDataset(cache, transform)
 
     # All datasets to evaluate
