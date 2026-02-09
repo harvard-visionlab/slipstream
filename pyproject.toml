@@ -80,6 +80,10 @@ name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
+# Workaround: litdata's setup.py uses pkg_resources but doesn't declare it
+[tool.uv.extra-build-dependencies]
+litdata = ["setuptools"]
+
 [build-system]
 requires = ["hatchling", "setuptools"]
 build-backend = "hatchling.build"
