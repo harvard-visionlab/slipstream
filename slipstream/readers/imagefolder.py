@@ -463,11 +463,11 @@ class SlipstreamImageFolder(ImageFolder):
 
         self._root_path = Path(root)
 
-        # Set up cache path
+        # Set up base cache path (user-specified or derived from root)
         if cache_dir is not None:
-            self._cache_path = Path(cache_dir)
+            self._base_cache_path = Path(cache_dir)
         else:
-            self._cache_path = self._root_path / ".slipstream-cache"
+            self._base_cache_path = self._root_path / ".slipstream-cache"
 
         # Store field types for compatibility with SlipstreamLoader
         self._field_types = {
@@ -484,9 +484,46 @@ class SlipstreamImageFolder(ImageFolder):
         self.image_fields = ["image"]  # For compatibility with SlipstreamDataset
 
     @property
+    def dataset_hash(self) -> str:
+        """Get content-based hash for this dataset.
+
+        For S3 tar archives: extracts the file hash from the extraction path
+        (e.g., /hashid/abc123def456/val → abc123de).
+
+        For local directories: computes hash from file listing metadata
+        (relative paths, mtimes, sizes), cached in .slipstream-hash sidecar.
+
+        Returns first 8 characters.
+        """
+        from slipstream.utils.hash import (
+            extract_hash_from_path,
+            get_or_compute_directory_hash,
+            IMG_EXTENSIONS,
+        )
+
+        # Check if path contains hash from S3 tar extraction
+        extracted_hash = extract_hash_from_path(self._root_path)
+        if extracted_hash:
+            return extracted_hash[:8]
+
+        # Local directory: compute hash from file listing metadata
+        return get_or_compute_directory_hash(
+            self._root_path,
+            extensions=IMG_EXTENSIONS,
+            length=12,
+            verbose=False,
+        )[:8]
+
+    @property
     def cache_path(self) -> Path:
-        """Path where optimized cache will be stored."""
-        return self._cache_path
+        """Path where optimized SlipCache will be stored.
+
+        Returns a versioned path that includes the dataset hash to prevent
+        stale cache issues when the source changes.
+
+        Path format: {base_cache_path}/slipcache-{hash[:8]}/
+        """
+        return self._base_cache_path / f"slipcache-{self.dataset_hash}"
 
     @property
     def field_types(self) -> dict[str, str]:
@@ -607,7 +644,7 @@ class SlipstreamImageFolder(ImageFolder):
             f"    num_samples={len(self):,},\n"
             f"    num_classes={len(self.classes)},\n"
             f"    fields={{{fields_str}}},\n"
-            f"    cache_path='{self._cache_path}',\n"
+            f"    cache_path='{self.cache_path}',\n"
             f")"
         )
 

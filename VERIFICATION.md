@@ -9,7 +9,9 @@ End-to-end accuracy verification for all supported data formats.
 | FFCV (.ffcv/.beton) | ✅ | ⬜ | ✅ | ⬜ |
 | LitData (streaming) | ✅ | ⬜ | ✅ | ⬜ |
 | ImageFolder | ✅ | ⬜ | ✅ | ⬜ |
-| SlipCache (.slipcache) | n/a | ✅ | ✅ | ⬜ |
+| SlipCache (.slipcache) | n/a | ⚠️ | ✅ | ⬜ |
+
+> ⚠️ **SlipCache Cache column**: Tests pass on synthetic data, but **must test all 50,000 ImageNet samples**. See [Known Issues](#known-issues--future-work) for PNG-in-JPEG problem.
 
 **Column key:**
 | Column | Description | Pass Criterion |
@@ -42,10 +44,10 @@ Tests run twice: once via S3 path (`StreamingReader(remote_dir=...)`), once via 
 - [x] Labels in valid range — `test_all_labels_in_range[s3]`, `[local]`
 - [x] Labels match native — `test_labels_match_native[s3]`, `[local]`
 - [x] Image bytes match native (SHA256) — `test_image_bytes_match_native[s3]`, `[local]`
-- [x] Valid JPEG markers (SOI/EOI) — `test_first_100_samples_valid_jpeg[s3]`, `[local]`
+- [x] Valid image format (JPEG/PNG) — `test_first_100_samples_valid_images[s3]`, `[local]`
 - [x] Decoded pixels match native — `test_decoded_images_match[s3]`, `[local]`
 - [x] Random samples decodable — `test_random_samples_valid[s3]`, `[local]`
-- [x] Index field matches sample index — `test_indices_sequential[s3]`, `[local]`
+- [x] Index field matches native — `test_indices_match_native[s3]`, `[local]`
 - [x] Path field matches native — `test_paths_match_native[s3]`, `[local]`
 - [x] All samples readable (slow) — `test_all_samples_readable[s3]`, `[local]`
 
@@ -92,6 +94,37 @@ Verify cache build → load preserves data correctly.
 - [x] Zero dimensions detected — `test_cache_roundtrip.py::test_verify_detects_dimension_parse_failure`
 - [ ] Manifest corruption detected
 - [ ] Field type validation
+
+### Source → SlipCache Conversion (Full Dataset)
+
+These tests build SlipCache from real ImageNet data and verify ALL 50,000 samples.
+
+#### LitData → SlipCache
+- [ ] Sample count = 50,000 — `test_litdata_to_slipcache.py::test_sample_count_is_50000`
+- [ ] JPEG bytes identical (first 100) — `test_litdata_to_slipcache.py::test_first_100_bytes_comparison`
+- [ ] Labels match (first 100) — `test_litdata_to_slipcache.py::test_first_100_labels_match`
+- [ ] Decodable (first 100) — `test_litdata_to_slipcache.py::test_first_100_decodable`
+- [ ] Format issues detected (all 50k, slow) — `test_litdata_to_slipcache.py::test_all_samples_format_check`
+- [ ] Labels match (all 50k, slow) — `test_litdata_to_slipcache.py::test_all_labels_match`
+- [ ] Decodable (all 50k, slow) — `test_litdata_to_slipcache.py::test_all_decodable`
+
+#### ImageFolder → SlipCache
+- [ ] Sample count = 50,000 — `test_imagefolder_to_slipcache.py::test_sample_count_is_50000`
+- [ ] JPEG bytes identical (first 100) — `test_imagefolder_to_slipcache.py::test_first_100_bytes_comparison`
+- [ ] Labels match (first 100) — `test_imagefolder_to_slipcache.py::test_first_100_labels_match`
+- [ ] Decodable (first 100) — `test_imagefolder_to_slipcache.py::test_first_100_decodable`
+- [ ] Format issues detected (all 50k, slow) — `test_imagefolder_to_slipcache.py::test_all_samples_format_check`
+- [ ] Labels match (all 50k, slow) — `test_imagefolder_to_slipcache.py::test_all_labels_match`
+- [ ] Decodable (all 50k, slow) — `test_imagefolder_to_slipcache.py::test_all_decodable`
+
+#### FFCV → SlipCache
+- [ ] Sample count = 50,000 — `test_ffcv_to_slipcache.py::test_sample_count_is_50000`
+- [ ] JPEG bytes identical (first 100) — `test_ffcv_to_slipcache.py::test_first_100_bytes_identical`
+- [ ] Labels match (first 100) — `test_ffcv_to_slipcache.py::test_first_100_labels_match`
+- [ ] Decodable (first 100) — `test_ffcv_to_slipcache.py::test_first_100_decodable`
+- [ ] JPEG bytes identical (all 50k, slow) — `test_ffcv_to_slipcache.py::test_all_bytes_identical`
+- [ ] Labels match (all 50k, slow) — `test_ffcv_to_slipcache.py::test_all_labels_match`
+- [ ] Decodable (all 50k, slow) — `test_ffcv_to_slipcache.py::test_all_decodable`
 
 ---
 
@@ -145,17 +178,25 @@ Verify model accuracy matches across all formats.
 # Local tests (no special setup, no S3 required)
 uv run pytest tests/test_cache_roundtrip.py tests/test_decode_correctness.py -v
 
-# ImageFolder tests (requires AWS credentials, downloads ~7GB on first run)
-# Use -s to see download/extraction progress
+# Reader verification tests (requires AWS credentials)
 uv run pytest tests/test_imagefolder_verification.py -v -s
-
-# LitData tests (requires AWS credentials, streams from S3)
 uv run pytest tests/test_litdata_verification.py -v -s
+
+# Source → SlipCache tests (requires AWS, builds cache on first run)
+# Quick tests (first 100 samples)
+uv run pytest tests/test_litdata_to_slipcache.py -v -s -m "not slow"
+uv run pytest tests/test_imagefolder_to_slipcache.py -v -s -m "not slow"
+uv run pytest tests/test_ffcv_to_slipcache.py -v -s -m "not slow"
+
+# Full tests (all 50,000 samples - SLOW but catches PNG-in-JPEG issues)
+uv run pytest tests/test_litdata_to_slipcache.py -v -s
+uv run pytest tests/test_imagefolder_to_slipcache.py -v -s
+uv run pytest tests/test_ffcv_to_slipcache.py -v -s
 
 # Human-readable verification
 uv run python scripts/verify_pipeline.py
 
-# FFCV verification (requires docker)
+# FFCV reader verification (requires docker for native ffcv-ssl comparison)
 docker build -t slipstream-ffcv -f .devcontainer/Dockerfile .
 docker run --rm \
   -v "$(pwd)":/workspace \
@@ -178,6 +219,37 @@ docker run --rm \
 | `tests/test_ffcv_verification.py` | FFCV reader vs native ffcv-ssl |
 | `tests/test_litdata_verification.py` | LitData reader vs native litdata |
 | `tests/test_imagefolder_verification.py` | ImageFolder reader vs torchvision |
-| `tests/test_cache_roundtrip.py` | Cache build/load integrity |
+| `tests/test_cache_roundtrip.py` | Cache build/load integrity (synthetic data) |
+| `tests/test_litdata_to_slipcache.py` | LitData → SlipCache (all 50k samples) |
+| `tests/test_imagefolder_to_slipcache.py` | ImageFolder → SlipCache (all 50k samples) |
+| `tests/test_ffcv_to_slipcache.py` | FFCV → SlipCache (all 50k samples) |
 | `tests/test_decode_correctness.py` | Decoder tolerance tests |
 | `scripts/verify_pipeline.py` | Human-readable sanity check |
+
+---
+
+## Known Issues / Future Work
+
+### PNG-in-JPEG Problem (CRITICAL for SlipCache)
+
+**Issue**: ImageNet contains ~1% PNG files with `.JPEG` extension. The source datasets (LitData, ImageFolder, FFCV) correctly return raw bytes regardless of format. However, SlipCache decoders (TurboJPEG/libslipstream) are **JPEG-only**.
+
+**Risk**: If SlipCache stores raw bytes from a PNG source file, the decoder will fail or produce garbage.
+
+**Current test gap**: Cache round-trip tests use synthetic data (100 samples). **Must test all 50,000 ImageNet samples** to catch PNG files.
+
+**Detection**: Check magic bytes:
+- JPEG: `\xff\xd8` (SOI marker)
+- PNG: `\x89PNG\r\n\x1a\n` (8-byte signature)
+
+**Solution options**:
+1. **Transcode PNG→JPEG during cache build** (lossy, but consistent decoder path)
+2. **Store as YUV420** (already transcodes via PIL, handles both formats)
+3. **Add PNG decoder path** (increases complexity, minimal benefit)
+
+**Recommended**: Option 2 (YUV420) is already implemented and handles this transparently. For JPEG-bytes mode, Option 1 should be implemented.
+
+**Action items**:
+- [ ] Add full-dataset SlipCache test (all 50k samples)
+- [ ] Detect PNG files during JPEG-bytes cache build and transcode
+- [ ] Add warning/error for unsupported source formats

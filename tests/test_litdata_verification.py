@@ -95,7 +95,8 @@ def slipstream_reader_local(check_s3_access, native_litdata, litdata_cache_dir):
     This fixture depends on native_litdata to ensure data is cached first.
     """
     # Get the cache path from native dataset
-    cache_path = native_litdata.cache_path
+    # Native litdata uses input_dir.path, not cache_path (that's a slipstream addition)
+    cache_path = native_litdata.input_dir.path
     if cache_path is None:
         pytest.skip("No local cache available")
 
@@ -203,20 +204,24 @@ class TestLitDataBytes:
         if mismatches:
             pytest.fail(f"Bytes mismatch at {len(mismatches)} indices: {mismatches}")
 
-    def test_first_100_samples_valid_jpeg(self, litdata_reader):
-        """First 100 samples should be valid JPEGs."""
-        _print_progress(f"\n  Validating 100 JPEGs...")
+    def test_first_100_samples_valid_images(self, litdata_reader):
+        """First 100 samples should be valid images (JPEG or PNG)."""
+        _print_progress(f"\n  Validating 100 images...")
         errors = []
         for idx in range(100):
             try:
                 sample = litdata_reader[idx]
                 img_bytes = sample['image']
 
-                if img_bytes[:2] != b'\xff\xd8':
-                    errors.append((idx, "missing SOI"))
-                elif img_bytes[-2:] != b'\xff\xd9':
-                    errors.append((idx, "missing EOI"))
+                # Check for valid image header (JPEG SOI or PNG signature)
+                is_jpeg = img_bytes[:2] == b'\xff\xd8'
+                is_png = img_bytes[:8] == b'\x89PNG\r\n\x1a\n'
 
+                if not (is_jpeg or is_png):
+                    errors.append((idx, f"unknown format: {img_bytes[:4].hex()}"))
+                    continue
+
+                # Verify image can be loaded
                 img = PIL.Image.open(io.BytesIO(img_bytes))
                 img.load()
 
@@ -284,17 +289,22 @@ class TestLitDataDecode:
 class TestLitDataPaths:
     """Verify path and index fields are correct."""
 
-    def test_indices_sequential(self, litdata_reader):
-        """Index field should match sample index."""
-        _print_progress(f"\n  Checking index field for 100 samples...")
-        errors = []
+    def test_indices_match_native(self, litdata_reader, native_litdata):
+        """Index field should match native LitData (original dataset index)."""
+        _print_progress(f"\n  Comparing index field for 100 samples...")
+        mismatches = []
         for idx in range(100):
-            sample = litdata_reader[idx]
-            if 'index' in sample and sample['index'] != idx:
-                errors.append((idx, sample['index']))
+            slip_sample = litdata_reader[idx]
+            native_sample = native_litdata[idx]
 
-        if errors:
-            pytest.fail(f"Index mismatch: {errors[:10]}...")
+            slip_index = slip_sample.get('index')
+            native_index = native_sample.get('index')
+
+            if slip_index != native_index:
+                mismatches.append((idx, slip_index, native_index))
+
+        if mismatches:
+            pytest.fail(f"Index mismatch at {len(mismatches)} indices: {mismatches[:5]}...")
 
     def test_paths_match_native(self, litdata_reader, native_litdata):
         """Path field should match native LitData."""

@@ -295,12 +295,12 @@ class FFCVFileReader:
 
         self.num_samples = int(self._header['num_samples'])
 
-        # Set up cache_path
+        # Set up base cache_path
         if cache_dir is not None:
-            self._cache_path = Path(cache_dir)
+            self._base_cache_path = Path(cache_dir)
         else:
             # Store optimized cache next to the local .ffcv file
-            self._cache_path = self._path.parent / f"{self._path.stem}-slipstream"
+            self._base_cache_path = self._path.parent / f"{self._path.stem}-slipstream"
 
         # Build field_types from parsed descriptors
         self._build_field_types()
@@ -309,7 +309,7 @@ class FFCVFileReader:
             print(f"FFCVFileReader: {self._path.name}")
             print(f"  Samples: {self.num_samples:,}")
             print(f"  Fields: {self.field_types}")
-            print(f"  Cache: {self._cache_path}")
+            print(f"  Cache: {self.cache_path}")
 
     @staticmethod
     def _resolve_path(ffcv_path: str, verbose: bool = True) -> Path:
@@ -378,11 +378,32 @@ class FFCVFileReader:
         if verbose:
             print(f"  Download complete: {local_path}")
 
+        # Compute and cache content hash after download
+        from slipstream.utils.hash import get_or_compute_file_hash
+        get_or_compute_file_hash(local_path, verbose=verbose)
+
         return local_path
 
     @property
+    def dataset_hash(self) -> str:
+        """Get content-based hash for this dataset.
+
+        Uses SHA256 hash of the .ffcv file content, cached in a sidecar file
+        with mtime-based invalidation. Returns first 8 characters.
+        """
+        from slipstream.utils.hash import get_or_compute_file_hash
+        return get_or_compute_file_hash(self._path, length=12, verbose=False)[:8]
+
+    @property
     def cache_path(self) -> Path:
-        return self._cache_path
+        """Path where optimized SlipCache will be stored.
+
+        Returns a versioned path that includes the dataset hash to prevent
+        stale cache issues when the source changes.
+
+        Path format: {base_cache_path}/slipcache-{hash[:8]}/
+        """
+        return self._base_cache_path / f"slipcache-{self.dataset_hash}"
 
     @property
     def image_fields(self) -> list[str]:
@@ -643,7 +664,7 @@ class FFCVFileReader:
             f"    path='{self._path}',\n"
             f"    num_samples={self.num_samples:,},\n"
             f"    fields={{{fields_str}}},\n"
-            f"    cache_path='{self._cache_path}',\n"
+            f"    cache_path='{self.cache_path}',\n"
             f")"
         )
 

@@ -96,8 +96,8 @@ class StreamingReader(LitDataStreamingDataset):
         self._set_field_types()
 
     @property
-    def cache_path(self) -> pathlib.Path | None:
-        """Get the local cache directory path."""
+    def litdata_cache_path(self) -> pathlib.Path | None:
+        """Get the LitData cache directory path (where chunks are stored)."""
         parent_cache = getattr(super(), 'cache_dir', None)
         if parent_cache is not None:
             if hasattr(parent_cache, 'path'):
@@ -116,6 +116,53 @@ class StreamingReader(LitDataStreamingDataset):
                 return pathlib.Path(self.input_dir)
 
         return None
+
+    @property
+    def dataset_hash(self) -> str | None:
+        """Get a unique hash for this dataset version.
+
+        LitData stores data at ~/.lightning/chunks/{hash}/{timestamp}.
+        This hash uniquely identifies the dataset content/configuration.
+        Returns the first 8 characters of the hash for brevity.
+        """
+        cache_path = self.litdata_cache_path
+        if cache_path is None:
+            return None
+
+        try:
+            parts = cache_path.parts
+            if 'chunks' in parts:
+                chunks_idx = parts.index('chunks')
+                if chunks_idx + 1 < len(parts):
+                    return parts[chunks_idx + 1][:8]
+        except Exception:
+            pass
+
+        # Fallback: hash the remote_dir if available
+        if self.remote_dir:
+            import hashlib
+            return hashlib.md5(self.remote_dir.encode()).hexdigest()[:8]
+
+        return None
+
+    @property
+    def cache_path(self) -> pathlib.Path | None:
+        """Get the default SlipCache directory path.
+
+        Returns a versioned path that includes the dataset hash to prevent
+        stale cache issues when the source dataset changes.
+
+        Path format: {litdata_cache_path}/slipcache-{hash[:8]}/
+        """
+        base_path = self.litdata_cache_path
+        if base_path is None:
+            return None
+
+        dataset_hash = self.dataset_hash
+        if dataset_hash:
+            return base_path / f"slipcache-{dataset_hash}"
+
+        return base_path / "slipcache"
 
     @property
     def remote_dir(self) -> str | None:
