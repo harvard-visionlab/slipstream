@@ -1601,11 +1601,12 @@ class OptimizedCache:
                             continue
 
                         stored_format = self.get_image_format(field_name)
+                        dataset_bytes = _extract_image_bytes(dataset_value)
+                        source_format = detect_image_format(dataset_bytes)
 
                         if stored_format == "yuv420":
-                            dataset_bytes = _extract_image_bytes(dataset_value)
+                            # YUV420 mode: verify dimensions match (with padding)
                             dataset_w, dataset_h = read_image_dimensions(dataset_bytes)
-                            # cache_h and cache_w already set above
                             padded_h = dataset_h + (dataset_h % 2)
                             padded_w = dataset_w + (dataset_w % 2)
 
@@ -1614,16 +1615,51 @@ class OptimizedCache:
                                     f"Image dim mismatch at {idx}, '{field_name}': "
                                     f"expected {padded_h}x{padded_w}, got {cache_h}x{cache_w}"
                                 )
-                        else:
-                            dataset_bytes = _extract_image_bytes(dataset_value)
-                            dataset_size = find_image_end(dataset_bytes, len(dataset_bytes))
-                            dataset_bytes = dataset_bytes[:dataset_size]
-
-                            if hashlib.md5(dataset_bytes).hexdigest() != \
-                               hashlib.md5(cache_bytes).hexdigest():
+                        elif source_format == "jpeg":
+                            # JPEG source in JPEG mode: must be byte-identical
+                            # Do NOT call find_image_end - readers return complete bytes
+                            if hashlib.sha256(dataset_bytes).hexdigest() != \
+                               hashlib.sha256(cache_bytes).hexdigest():
                                 errors.append(
-                                    f"Image mismatch at {idx}, '{field_name}'"
+                                    f"Image hash mismatch at {idx}, '{field_name}': "
+                                    f"source={len(dataset_bytes)} bytes, "
+                                    f"cache={len(cache_bytes)} bytes"
                                 )
+                        else:
+                            # PNG/other source in JPEG mode: transcoded, verify pixels
+                            # Cache should be JPEG format after transcoding
+                            if detect_image_format(cache_bytes) != "jpeg":
+                                errors.append(
+                                    f"Transcoding failed at {idx}, '{field_name}': "
+                                    f"source={source_format}, cache not JPEG"
+                                )
+                            else:
+                                # Compare decoded pixels with tolerance
+                                try:
+                                    source_rgb = decode_image_to_rgb(dataset_bytes)
+                                    cache_rgb = decode_image_to_rgb(cache_bytes)
+
+                                    if source_rgb.shape != cache_rgb.shape:
+                                        errors.append(
+                                            f"Dimension mismatch at {idx}, '{field_name}': "
+                                            f"source={source_rgb.shape}, cache={cache_rgb.shape}"
+                                        )
+                                    else:
+                                        diff = np.abs(
+                                            source_rgb.astype(np.int16) -
+                                            cache_rgb.astype(np.int16)
+                                        )
+                                        max_diff = int(np.max(diff))
+                                        # JPEG quality 100 should be very close
+                                        if max_diff > 5:
+                                            errors.append(
+                                                f"Pixel mismatch at {idx}, '{field_name}': "
+                                                f"max_diff={max_diff}"
+                                            )
+                                except Exception as e:
+                                    errors.append(
+                                        f"Decode error at {idx}, '{field_name}': {e}"
+                                    )
                     else:
                         # bytes field
                         if isinstance(dataset_value, np.ndarray):
