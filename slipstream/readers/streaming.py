@@ -27,6 +27,7 @@ from slipstream.dataset import (
     is_hf_image_dict,
     is_image_bytes,
 )
+from slipstream.utils.cache_dir import get_cache_base
 
 __all__ = ["StreamingReader"]
 
@@ -152,17 +153,16 @@ class StreamingReader(LitDataStreamingDataset):
         Returns a versioned path that includes the dataset hash to prevent
         stale cache issues when the source dataset changes.
 
-        Path format: {litdata_cache_path}/slipcache-{hash[:8]}/
+        Path format: ~/.slipstream/slipcache-{hash[:8]}/
+
+        The base directory can be configured via SLIPSTREAM_CACHE_DIR
+        environment variable.
         """
-        base_path = self.litdata_cache_path
-        if base_path is None:
+        dataset_hash = self.dataset_hash
+        if dataset_hash is None:
             return None
 
-        dataset_hash = self.dataset_hash
-        if dataset_hash:
-            return base_path / f"slipcache-{dataset_hash}"
-
-        return base_path / "slipcache"
+        return get_cache_base() / f"slipcache-{dataset_hash}"
 
     @property
     def remote_dir(self) -> str | None:

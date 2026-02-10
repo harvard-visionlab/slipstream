@@ -21,13 +21,12 @@ dependencies = [
     "boto3",
     "fsspec[s3]",
     "s3fs>=2024.0.0",
-    "s5cmd",
     # HuggingFace support (hf:// URIs)
     "datasets",
     "huggingface_hub",
     "hf_transfer",
-    "polars",   # Required by litdata for parquet indexing
-    "pyarrow",  # Required by litdata for parquet file reading
+    "polars", # Required by litdata for parquet indexing
+    "pyarrow", # Required by litdata for parquet file reading
 ]
 
 [dependency-groups]
@@ -39,6 +38,7 @@ dev = [
     "ruff>=0.1.0",
     "ipykernel",
     "jupyterlab",
+    "ipywidgets",
     "pandas",
     "matplotlib",
     "seaborn",

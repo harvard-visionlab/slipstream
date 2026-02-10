@@ -68,6 +68,7 @@ slipstream/
 │   │   ├── lejepa.py           # lejepa (2 global + 4 local)
 │   │   └── multicrop_preset.py # multicrop (flexible global+local)
 │   ├── utils/
+│   │   ├── cache_dir.py        # Unified cache directory utilities
 │   │   └── image_header.py     # Fast JPEG/PNG dimension parsing
 │   └── transforms/             # GPU batch augmentations (fastaugs port)
 ├── libslipstream/              # C++ extension (TurboJPEG + stb_image_resize2)
@@ -118,6 +119,8 @@ All presets accept: `size`, `seed`, `device`, `dtype`, `normalize`
    - ✅ **Notebook cleanup**: Fixed visualization code in notebooks 03, 04, 06, 08 to handle numpy HWC output from decoders. Fixed interpolation mode mismatch in transform verification (slipstream uses bilinear, torchvision defaults to nearest).
 7. ⬜ **Documentation**: README, API docs, performance guide
 8. ✅ **Remove `transform` parameter**: Removed global `transform` in favor of `pipelines` for consistency
+9. ✅ **Remote cache storage**: `remote_cache` parameter for S3-based cache sharing. Auto-discovers, downloads, and uploads caches using hash-based paths for consistency
+10. ✅ **Unified cache directory**: All readers use `~/.slipstream/` as default cache base. Configurable via `SLIPSTREAM_CACHE_DIR` env var for easy cluster deployment (symlink to shared storage)
 
 ---
 
@@ -197,6 +200,19 @@ loader = SlipstreamLoader(dataset, batch_size=256, pipelines=lejepa(seed=42, dev
 for batch in loader:
     global_views = [batch['global_0'], batch['global_1']]  # 224×224
     local_views = [batch[f'local_{i}'] for i in range(4)]  # 98×98
+
+# Remote cache: auto-download from S3 if available, upload after build
+loader = SlipstreamLoader(
+    dataset,
+    batch_size=256,
+    remote_cache="s3://my-bucket/slipstream-caches/",  # Auto-discovers by hash
+    pipelines=supervised_train(224),
+)
+
+# After adding indexes or stats, sync manually
+from slipstream import write_index
+write_index(loader.cache, fields=['label'])
+loader.sync_remote_cache()  # Uploads new files to S3
 ```
 
 ---

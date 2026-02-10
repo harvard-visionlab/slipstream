@@ -114,6 +114,13 @@ from slipstream.utils.crop import (
     generate_random_crop_params,
 )
 
+# Cache directory utilities
+from slipstream.utils.cache_dir import (
+    CACHE_DIR_ENV_VAR,
+    get_cache_base,
+    get_cache_path,
+)
+
 __all__ = [
     "__version__",
     # Core dataset
@@ -188,4 +195,8 @@ __all__ = [
     # Utilities
     "sync_s3_dataset",
     "compute_normalization_stats",
+    # Cache directory utilities
+    "CACHE_DIR_ENV_VAR",
+    "get_cache_base",
+    "get_cache_path",
 ]

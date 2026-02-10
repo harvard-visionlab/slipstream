@@ -31,6 +31,8 @@ from typing import Any
 
 from torchvision.datasets import ImageFolder
 
+from slipstream.utils.cache_dir import get_cache_base
+
 __all__ = ["SlipstreamImageFolder", "open_imagefolder"]
 
 
@@ -470,11 +472,13 @@ class SlipstreamImageFolder(ImageFolder):
 
         self._root_path = Path(root)
 
-        # Set up base cache path (user-specified or derived from root)
+        # Set up base cache path (user-specified or unified default)
         if cache_dir is not None:
             self._base_cache_path = Path(cache_dir)
         else:
-            self._base_cache_path = self._root_path / ".slipstream-cache"
+            # Use unified cache directory (~/.slipstream/ by default)
+            # Can be configured via SLIPSTREAM_CACHE_DIR environment variable
+            self._base_cache_path = get_cache_base()
 
         # Store field types for compatibility with SlipstreamLoader
         self._field_types = {

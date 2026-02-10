@@ -38,6 +38,7 @@ from slipstream.backends.ffcv_file import (
     FFCV_TYPE_RGB_IMAGE,
     FFCV_VARIABLE_TYPES,
 )
+from slipstream.utils.cache_dir import get_cache_base
 
 
 # Map FFCV type IDs to slipstream field type strings
@@ -299,8 +300,9 @@ class FFCVFileReader:
         if cache_dir is not None:
             self._base_cache_path = Path(cache_dir)
         else:
-            # Store optimized cache next to the local .ffcv file
-            self._base_cache_path = self._path.parent / f"{self._path.stem}-slipstream"
+            # Use unified cache directory (~/.slipstream/ by default)
+            # Can be configured via SLIPSTREAM_CACHE_DIR environment variable
+            self._base_cache_path = get_cache_base()
 
         # Build field_types from parsed descriptors
         self._build_field_types()

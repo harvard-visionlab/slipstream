@@ -61,6 +61,12 @@ class TestTopLevelImports:
     def test_utilities(self):
         from slipstream import sync_s3_dataset, compute_normalization_stats
 
+    def test_s3_sync_functions(self):
+        from slipstream.s3_sync import sync_s3_dataset
+        from slipstream.s3_sync import s3_path_exists
+        from slipstream.s3_sync import download_s3_cache
+        from slipstream.s3_sync import upload_s3_cache
+
 
 class TestCanonicalImports:
     """Import from canonical module locations."""

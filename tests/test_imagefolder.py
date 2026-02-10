@@ -124,22 +124,28 @@ class TestSlipstreamImageFolder:
         }
 
     def test_cache_path_default(self, temp_imagefolder):
-        """Test default cache_path location."""
+        """Test default cache_path uses unified ~/.slipstream/ base."""
         from slipstream.readers import SlipstreamImageFolder
+        from slipstream.utils.cache_dir import get_cache_base
 
         dataset = SlipstreamImageFolder(temp_imagefolder)
 
-        expected = temp_imagefolder / ".slipstream-cache"
-        assert dataset.cache_path == expected
+        # Default cache base is ~/.slipstream/ (or SLIPSTREAM_CACHE_DIR env var)
+        expected_base = get_cache_base()
+        # cache_path should be versioned: {base}/slipcache-{hash}/
+        assert dataset.cache_path.parent == expected_base
+        assert dataset.cache_path.name.startswith("slipcache-")
 
     def test_cache_path_custom(self, temp_imagefolder, tmp_path):
-        """Test custom cache_path."""
+        """Test custom cache_path uses versioned subdir."""
         from slipstream.readers import SlipstreamImageFolder
 
         custom_cache = tmp_path / "my-cache"
         dataset = SlipstreamImageFolder(temp_imagefolder, cache_dir=custom_cache)
 
-        assert dataset.cache_path == custom_cache
+        # cache_path should be versioned: {custom}/slipcache-{hash}/
+        assert dataset.cache_path.parent == custom_cache
+        assert dataset.cache_path.name.startswith("slipcache-")
 
     def test_image_bytes_valid(self, temp_imagefolder):
         """Test that image bytes are valid JPEG/PNG."""

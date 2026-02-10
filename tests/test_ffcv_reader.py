@@ -470,10 +470,13 @@ class TestFFCVFileReader:
             assert img_bytes == images[i][0]
 
     def test_cache_path(self, synthetic_ffcv, tmp_path):
+        """Test cache_path includes versioned subdir: {base}/slipcache-{hash}/"""
         ffcv_path, _, _ = synthetic_ffcv
         cache_dir = tmp_path / "my_cache"
         reader = FFCVFileReader(str(ffcv_path), cache_dir=str(cache_dir), verbose=False)
-        assert reader.cache_path == cache_dir
+        # cache_path should be versioned: {cache_dir}/slipcache-{hash}/
+        assert reader.cache_path.parent == cache_dir
+        assert reader.cache_path.name.startswith("slipcache-")
 
     def test_repr(self, synthetic_ffcv):
         ffcv_path, _, _ = synthetic_ffcv

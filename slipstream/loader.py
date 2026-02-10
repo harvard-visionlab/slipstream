@@ -124,6 +124,8 @@ class SlipstreamLoader:
         presync_s3: bool = False,
         presync_s3_workers: int = 32,
         presync_s3_endpoint_url: str | None = None,
+        remote_cache: str | None = None,
+        remote_cache_endpoint_url: str | None = None,
         verbose: bool = True,
         use_threading: bool = True,
     ) -> None:
@@ -160,6 +162,14 @@ class SlipstreamLoader:
             presync_s3_workers: Number of parallel s5cmd workers for presync.
             presync_s3_endpoint_url: S3-compatible endpoint URL for presync
                 (e.g. for Wasabi).
+            remote_cache: S3 base path for cache discovery and sharing. When set,
+                the loader will check for a pre-built cache at
+                ``{remote_cache}/slipcache-{dataset_hash}/`` and download it if
+                found. If not found, the cache is built locally and uploaded
+                to S3 for future use. This enables sharing caches across machines.
+                Example: ``"s3://my-bucket/slipstream-caches/"``.
+            remote_cache_endpoint_url: S3-compatible endpoint URL for remote_cache
+                (e.g., for Wasabi, MinIO).
             verbose: Print progress messages
             use_threading: Use background thread for prefetching (default True).
                 Set to False for debugging to isolate threading overhead.
@@ -192,6 +202,11 @@ class SlipstreamLoader:
         self.exclude_fields = set(exclude_fields or [])
         self.verbose = verbose
         self.use_threading = use_threading
+
+        # Remote cache settings (stored for potential re-sync)
+        self._remote_cache = remote_cache
+        self._remote_cache_endpoint_url = remote_cache_endpoint_url
+        self._remote_cache_full: str | None = None  # Set later when hash is computed
 
         # Parse device for non-pipelined fields
         if isinstance(device, str):
@@ -238,12 +253,87 @@ class SlipstreamLoader:
                 "Ensure the dataset has a valid cache_dir."
             )
 
-        if force_rebuild or not OptimizedCache.exists(cache_dir):
+        # Remote cache discovery and download
+        cache_downloaded = False
+        remote_cache_full: str | None = None
+        if remote_cache is not None:
+            from slipstream.s3_sync import (
+                download_s3_cache,
+                s3_path_exists,
+                upload_s3_cache,
+            )
+
+            dataset_hash = dataset.dataset_hash
+            remote_cache_full = f"{remote_cache.rstrip('/')}/slipcache-{dataset_hash}"
+            self._remote_cache_full = remote_cache_full
+            remote_manifest = f"{remote_cache_full}/.slipstream/manifest.json"
+
+            if s3_path_exists(remote_manifest, endpoint_url=remote_cache_endpoint_url):
+                if verbose:
+                    print(f"Found remote cache: {remote_cache_full}")
+
+                # Download if local cache doesn't exist or force_rebuild
+                if force_rebuild or not OptimizedCache.exists(cache_dir):
+                    success = download_s3_cache(
+                        remote_cache_full,
+                        cache_dir,
+                        endpoint_url=remote_cache_endpoint_url,
+                        verbose=verbose,
+                    )
+                    if success:
+                        cache_downloaded = True
+                    elif verbose:
+                        print("  Download failed, will build locally")
+                else:
+                    if verbose:
+                        print("  Local cache exists, skipping download")
+            elif verbose:
+                print(f"Remote cache not found, will build and upload: {remote_cache_full}")
+
+        # Determine whether to build or load
+        needs_build = (force_rebuild or not OptimizedCache.exists(cache_dir)) and not cache_downloaded
+
+        if needs_build:
             if verbose:
                 print("Building optimized cache (this only happens once)...")
             self.cache = OptimizedCache.build(dataset, cache_dir, verbose=verbose)
+
+            # Upload to remote if requested and we just built it
+            if remote_cache is not None:
+                from slipstream.s3_sync import upload_s3_cache
+                try:
+                    upload_s3_cache(
+                        cache_dir,
+                        remote_cache_full,
+                        endpoint_url=remote_cache_endpoint_url,
+                        verbose=verbose,
+                    )
+                except Exception as e:
+                    if verbose:
+                        print(f"  Warning: Failed to upload cache to S3: {e}")
+                        print("  Continuing with local cache")
         else:
             self.cache = OptimizedCache.load(cache_dir, verbose=verbose)
+
+        # Bidirectional sync: ensure local and remote have same derived files
+        # (indexes, stats, YUV420 cache, etc.)
+        if remote_cache is not None:
+            from slipstream.s3_sync import sync_s3_cache
+            try:
+                downloaded, uploaded = sync_s3_cache(
+                    cache_dir,
+                    remote_cache_full,
+                    endpoint_url=remote_cache_endpoint_url,
+                    verbose=verbose,
+                )
+                # If files were downloaded, reload indexes to pick them up
+                if downloaded > 0:
+                    self.cache._discover_indexes()
+                    if verbose and self.cache._indexes:
+                        print(f"  Loaded indexes: {list(self.cache._indexes.keys())}")
+            except Exception as e:
+                if verbose:
+                    print(f"  Warning: Bidirectional sync failed: {e}")
 
         # Auto-detect image fields from cache field types
         # TODO: Future enhancement - generalize prefetch banks to handle multiple
@@ -701,6 +791,33 @@ class SlipstreamLoader:
                 for transform in pipeline:
                     if hasattr(transform, 'shutdown'):
                         transform.shutdown()
+
+    def sync_remote_cache(self) -> tuple[int, int]:
+        """Manually sync local cache with remote S3 cache.
+
+        Call this after adding indexes, stats, or other derived files to ensure
+        they are uploaded to the remote cache and available on other machines.
+
+        Returns:
+            Tuple of (downloaded_count, uploaded_count) indicating files transferred.
+            Returns (0, 0) if remote_cache was not configured.
+
+        Raises:
+            RuntimeError: If s5cmd is not installed
+        """
+        if self._remote_cache is None or self._remote_cache_full is None:
+            if self.verbose:
+                print("No remote_cache configured, skipping sync")
+            return (0, 0)
+
+        from slipstream.s3_sync import sync_s3_cache
+
+        return sync_s3_cache(
+            self.cache.cache_dir.parent,  # .slipstream is inside cache_dir
+            self._remote_cache_full,
+            endpoint_url=self._remote_cache_endpoint_url,
+            verbose=self.verbose,
+        )
 
     def __del__(self) -> None:
         """Cleanup on deletion."""

@@ -167,6 +167,35 @@ Fixed visualization and comparison code in tutorial notebooks to work correctly 
 
 5. ✅ **load_test_batch() fix** — Updated helper in notebook 06 to convert numpy HWC to torch CHW: `torch.from_numpy(batch['image']).permute(0, 3, 1, 2).float() / 255.0`
 
+### Phase 9: Remote Cache Storage ✅
+
+Added `remote_cache` parameter to `SlipstreamLoader` enabling automatic discovery, download, and upload of SlipCache to/from S3.
+
+1. ✅ **Unified cache directory** — All readers use `~/.slipstream/` as default cache base (configurable via `SLIPSTREAM_CACHE_DIR` env var)
+2. ✅ **Hash-based cache paths** — Cache paths use `slipcache-{dataset_hash}/` format for automatic version alignment
+3. ✅ **Auto-discovery** — `s3_path_exists()` checks for remote cache manifest before building
+4. ✅ **Download/upload** — `download_s3_cache()` and `upload_s3_cache()` use s5cmd for fast parallel S3 operations
+5. ✅ **Bidirectional sync** — `sync_s3_cache()` syncs derived files (indexes, stats, YUV420 cache) in both directions
+6. ✅ **Manual sync** — `loader.sync_remote_cache()` method for on-demand sync after adding files
+7. ✅ **Graceful fallback** — Download/upload failures are non-fatal; continues with local cache
+8. ✅ **Endpoint URL support** — Works with S3-compatible services (Wasabi, MinIO, etc.)
+9. ✅ **PTY-based progress** — Real-time s5cmd progress display in both Jupyter notebooks and terminal scripts
+
+```python
+# Auto-download from S3 if available, upload after build
+loader = SlipstreamLoader(
+    dataset,
+    batch_size=256,
+    remote_cache="s3://my-bucket/slipstream-caches/",
+    pipelines=supervised_train(224),
+)
+
+# Cluster deployment: symlink ~/.slipstream to shared storage
+# ln -s /mnt/fast-storage/slipstream-cache ~/.slipstream
+# Or use environment variable:
+# export SLIPSTREAM_CACHE_DIR=/mnt/fast-storage/slipstream-cache
+```
+
 ---
 
 ## Benchmark Results Summary
