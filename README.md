@@ -16,17 +16,17 @@ Fast, frictionless PyTorch dataloading for vision. [FFCV](https://github.com/lib
 
 ## Performance Comparable to FFCV (Random Resized Crop)
 
-| Benchmark (warm cache)   | Device | FFCV   | Slipstream | Speedup   |
-| ------------------------ | ------ | ------ | ---------- | --------- |
-| Raw I/O (JPEG Bytes)     | CPU    | 413k   | 939k       | **2.3x**  |
-| RRC 224px (JPEG Decoded) | CPU    | 13,250 | 13,851     | **1.05x** |
+| Benchmark (warm cache)   | Device | FFCV          | Slipstream    | Speedup   |
+| ------------------------ | ------ | ------------- | ------------- | --------- |
+| Raw I/O (JPEG Bytes)     | CPU    | 413k imgs/s   | 939k imgs/s   | **2.3x**  |
+| RRC 224px (JPEG Decoded) | CPU    | 13,250 imgs/s | 13,851 imgs/s | **1.05x** |
 
 ## Support for YUV420 format for greater speed (vs. jpeg format)
 
-| Benchmark (warm cache)     | Device | Slipstream JPEG | Slipstream YUV420 | Speedup  |
-| -------------------------- | ------ | --------------- | ----------------- | -------- |
-| RRC 224px                  | H100   | 16,715          | 44,987            | **2.7x** |
-| Multi-RRC (2 views, 224px) | H100   | 15,328          | 28,475            | **1.9x** |
+| Benchmark (warm cache)     | Device | Slipstream JPEG  | Slipstream YUV420 | Speedup  |
+| -------------------------- | ------ | ---------------- | ----------------- | -------- |
+| RRC 224px                  | H100   | 16,715 imgs/s    | 44,987 imgs/s     | **2.7x** |
+| Multi-RRC (2 views, 224px) | H100   | 15,328 x2 imgs/s | 28,475 x2 imgs/s  | **1.9x** |
 
 _Full benchmarks: [BENCHMARKS.md](BENCHMARKS.md)_
 
