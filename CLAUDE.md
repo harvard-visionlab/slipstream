@@ -115,7 +115,7 @@ All presets accept: `size`, `seed`, `device`, `dtype`, `normalize`
 4. ✅ **FFCV reader fixes**: Data pointer bug, image end trimming, text field auto-decode (bytes→str)
 5. ✅ **Composition refactor**: `SlipstreamDataset` wraps pluggable readers (StreamingReader, ImageFolder, FFCV)
 6. ✅ **End-to-end verification tests**: Comprehensive verification test suite added. Includes: FFCV reader byte-for-byte verification against native ffcv-ssl (devcontainer required), cache round-trip tests (JPEG byte-identical, PNG→YUV420 ±2 tolerance), decode correctness tests (vs PIL ±5 tolerance, BT.601 YUV coefficients), and functional model accuracy tests (ResNet50 cross-format). Also added dimension validation in cache verify() to catch silent parse failures.
-   - ⬜ **Notebook cleanup**: Update tutorial notebooks (00–13) to reflect composition refactor and new reader APIs. Many are outdated.
+   - ✅ **Notebook cleanup**: Fixed visualization code in notebooks 03, 04, 06, 08 to handle numpy HWC output from decoders. Fixed interpolation mode mismatch in transform verification (slipstream uses bilinear, torchvision defaults to nearest).
 7. ⬜ **Documentation**: README, API docs, performance guide
 8. ✅ **Remove `transform` parameter**: Removed global `transform` in favor of `pipelines` for consistency
 

@@ -153,6 +153,20 @@ alongside FFCV and LitData streaming sources.
     | SlipstreamDataset(FFCV) → Loader (RRC, simple)    | 15,446      |
     | SlipstreamDataset(FFCV) → Loader (RRC, threaded)  | 15,502      |
 
+### Phase 8: Notebook Verification & Cleanup ✅
+
+Fixed visualization and comparison code in tutorial notebooks to work correctly with the decoder output format changes.
+
+1. ✅ **Numpy HWC visualization fix** — Decoders return numpy arrays in HWC format `(B, H, W, C)`, but visualization code expected PyTorch CHW tensors. Fixed `show_batch()` helper in notebooks 03, 04, 06, 08 to handle both formats.
+
+2. ✅ **Array comparison fix** — Changed `torch.equal()` to `np.array_equal()` for comparing numpy image arrays in seed reproducibility tests.
+
+3. ✅ **YUV420 cache build progress** — Added `verbose=True` to YUV420 loader in notebook 04 so users see progress during one-time cache build (was hanging silently).
+
+4. ✅ **Transform interpolation mode fix** — Slipstream geometric transforms (`RandomRotate`, `RandomZoom`) use bilinear interpolation by default, while torchvision defaults to nearest. Fixed notebook 06 to use `InterpolationMode.BILINEAR` for fair comparison. With matching modes, outputs are **identical** (max diff = 0.0).
+
+5. ✅ **load_test_batch() fix** — Updated helper in notebook 06 to convert numpy HWC to torch CHW: `torch.from_numpy(batch['image']).permute(0, 3, 1, 2).float() / 255.0`
+
 ---
 
 ## Benchmark Results Summary
