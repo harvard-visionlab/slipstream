@@ -1,162 +1,92 @@
 # slipstream
 
-Slipstream: Frictionless streaming and mmap-accelerated PyTorch dataloading
+Fast, frictionless PyTorch dataloading for vision. FFCV-level performance, zero hassle.
 
-## Overview
+> **Beta software** — API may change. Use at your own risk.
 
-Slipstream provides FFCV-like performance for PyTorch vision workloads without the FFCV dependency hassle. It combines:
+## Why Slipstream?
 
-- **LitData's streaming** for fast cold starts (parallel chunk downloads from S3)
-- **Memory-mapped cache** for fast warm epochs (OS page cache, zero-copy reads)
-- **Composable pipelines** for decode/crop/normalize transforms
+- **FFCV speeds** without FFCV's installation pain (no custom compilers, no CUDA build)
+- **Any source**: S3, HuggingFace, ImageFolder, FFCV files — all work seamlessly
+- **One-time cache build**, then blazing fast epochs via memory-mapped I/O
+- **Built-in SSL pipelines**: SimCLR, IPCL, L-JEPA, flexible multi-crop
+- **Remote cache sharing**: Build once, share via S3 across your team
+
+## Performance
+
+| Benchmark | Slipstream | vs FFCV |
+|-----------|------------|---------|
+| Raw I/O | 939k img/s | **2.3x faster** |
+| CPU RRC (224px) | 13,851 img/s | **105%** |
+| YUV420 RRC | 27,955 img/s | **2x JPEG** |
+
+*Benchmarks on Linux server with NVMe storage. Your mileage may vary.*
 
 ## Installation
 
 ```bash
-uv pip install -e .
+pip install visionlab-slipstream
+
+# Required: libturbojpeg
+brew install libjpeg-turbo  # macOS
+# apt install libturbojpeg  # Ubuntu/Debian
+
+# Optional: S3 remote cache support
+uv tool install s5cmd
 ```
 
 ## Quick Start
 
 ```python
 from slipstream import SlipstreamDataset, SlipstreamLoader
-from slipstream import RandomResizedCrop, Normalize
+from slipstream.pipelines import supervised_train
 
-# Create dataset
-dataset = SlipstreamDataset(
-    remote_dir="s3://bucket/dataset/train/",
-    decode_images=False,  # Let loader handle decoding
-)
+# Any source: S3, local, HuggingFace, FFCV
+dataset = SlipstreamDataset("s3://bucket/imagenet/train/")
 
-# Create high-performance loader with pipelines
+# One line: auto-cache + decode + augment
 loader = SlipstreamLoader(
     dataset,
     batch_size=256,
-    pipelines={
-        'image': [
-            RandomResizedCrop(224, device='cuda'),
-            Normalize(),
-        ],
-    },
+    pipelines=supervised_train(224),
 )
 
 for batch in loader:
-    images = batch['image']  # [B, 3, 224, 224] normalized tensor
-    labels = batch['label']  # [B] tensor
-    # Training...
+    images, labels = batch['image'], batch['label']
+    # images: [B, 3, 224, 224] normalized GPU tensor
 ```
 
----
+First epoch builds the cache. Subsequent epochs run at full speed.
 
-## Development Status
+## More Examples
 
-### Phase 1: Core Infrastructure ✅
+See **[Advanced Usage](docs/ADVANCED.md)** for:
+- Remote cache sharing (S3)
+- SSL multi-crop pipelines (SimCLR, L-JEPA, IPCL)
+- YUV420 format (2x faster decode)
+- Different dataset sources
+- Cluster deployment
 
-- [x] `SlipstreamDataset` - Wrapper for LitData StreamingDataset
-- [x] `OptimizedCache` - Memory-mapped cache with O(1) batch loading
-- [x] Numba JIT batch loaders with `nogil=True` for true parallelism
-- [x] Fast path for building cache directly from LitData chunks
+## Requirements
 
-### Phase 2: SlipstreamLoader 🚧 **IN PROGRESS**
+- Python 3.10+
+- PyTorch 2.0+
+- libturbojpeg (`brew install libjpeg-turbo` or system package)
 
-- [x] Basic loader with async prefetching
-- [x] Composable pipeline system (`RandomResizedCrop`, `CenterCrop`, `Normalize`, `Decoder`)
-- [x] CPU decoder (TurboJPEG) and GPU decoder (nvImageCodec)
-- [ ] **Performance issue: 18x overhead vs direct cache access** (see below)
-
-### Phase 3: Testing & Benchmarks 🚧 **IN PROGRESS**
-
-- [x] Benchmark scripts with machine info collection
-- [ ] Match reference performance (480k+ samples/sec raw I/O)
-- [ ] Multi-machine benchmark tracking
-
-### Phase 4: Documentation
-
-- [ ] API documentation
-- [ ] Performance tuning guide
-
----
-
-## Known Issues
-
-### SlipstreamLoader Performance Gap
-
-**Status**: Under investigation
-
-Current benchmarks show a significant performance gap:
-
-| Benchmark | Samples/sec | Notes |
-|-----------|-------------|-------|
-| OptimizedCache.load_batch (direct) | ~950k | Reference target |
-| SlipstreamLoader (raw, no pipelines) | ~53k | **18x slower** |
-| StreamingDataLoader (8 workers) | ~2.8k | Baseline |
-
-**Root cause identified**: The loader has an unnecessary data copy:
-
-```python
-# Current (slow): JIT writes to storage buffer, then copy to loader buffer
-batch_data = image_storage.load_batch(batch_indices)
-dest[:actual_batch_size] = batch_data['data'][:actual_batch_size]  # EXTRA COPY
-
-# litdata-mmap (fast): JIT writes directly to loader buffer
-_load_batch_ffcv_style(batch_indices, metadata, data_region, dest, sizes)
-```
-
-**Fix planned**: Modify loader to call JIT functions directly with pre-allocated buffers, bypassing the intermediate copy.
-
----
-
-## Performance Targets
-
-Reference numbers from litdata-mmap (Linux server with NVMe):
-
-| Metric | Target | Notes |
-|--------|--------|-------|
-| Raw I/O | 480k+ samples/sec | Memory-mapped with OS page cache |
-| CPU Decode + RRC | ~5.7k samples/sec | TurboJPEG |
-| GPU Decode + RRC | ~10-11k samples/sec | nvImageCodec |
-| vs StreamingDataLoader | 50-100x faster | After warmup epoch |
-
----
-
-## Benchmarks
-
-Run benchmarks with machine info tracking:
+## Development
 
 ```bash
-# Individual benchmarks
-uv run python benchmarks/benchmark_raw_io.py
-uv run python benchmarks/benchmark_decode.py
-uv run python benchmarks/benchmark_loader.py
+git clone https://github.com/visionlab/slipstream
+cd slipstream
+uv sync --group dev
 
-# All benchmarks
-uv run python benchmarks/run_all.py
+# Build C extension
+uv run python libslipstream/setup.py build_ext --inplace
 
-# With custom cache directory (for testing different drives)
-uv run python benchmarks/benchmark_raw_io.py --cache-dir /path/to/fast/nvme
+# Run tests
+uv run pytest tests/ -v
 ```
 
-Results are saved to `benchmarks/results/` as JSON files by hostname.
+## License
 
----
-
-## Future Enhancements
-
-### Faster S3 chunk downloads with s5cmd
-
-Currently `OptimizedCache.build()` downloads LitData chunks via LitData's internal mechanisms, which can be slow (~2 min for 160 chunks). A potential optimization is to use [s5cmd](https://github.com/peak/s5cmd) for bulk parallel downloads before building the cache.
-
-```bash
-# s5cmd can download many files in parallel with high throughput
-s5cmd cp "s3://bucket/dataset/chunks/*" /local/cache/chunks/
-
-# Sync only downloads missing/changed files
-s5cmd sync --size-only 's3://bucket/dataset/chunks/*' /local/cache/chunks/
-```
-
-Benefits:
-- s5cmd is **32x faster than s3cmd** and **12x faster than aws-cli**
-- `sync` only downloads missing files, making subsequent runs fast
-- Chunks are fully local before processing, avoiding cache eviction issues
-
-See: [s5cmd GitHub](https://github.com/peak/s5cmd) | [AWS Blog: Parallelizing S3 Workloads with s5cmd](https://aws.amazon.com/blogs/opensource/parallelizing-s3-workloads-s5cmd/)
+MIT
