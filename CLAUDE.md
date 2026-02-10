@@ -30,6 +30,14 @@ Requires system libturbojpeg:
 - Linux: `/usr/libjpeg-turbo/include` and `/usr/libjpeg-turbo/lib64`
 - macOS: `brew install libjpeg-turbo`
 
+### s5cmd (for S3 remote cache)
+```bash
+uv tool install s5cmd    # Recommended (cross-platform)
+brew install peak/tap/s5cmd  # macOS alternative
+```
+
+**Important**: Do NOT use `pip install s5cmd` - that installs a broken 2018 Python wrapper, not the modern Go binary. Version 2.0.0+ is required for progress display.
+
 ### Development Commands
 ```bash
 uv sync --group dev              # Install dependencies

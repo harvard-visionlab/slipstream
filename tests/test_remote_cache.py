@@ -22,8 +22,8 @@ class TestS3PathExists:
         mock_result.returncode = 0
         mock_result.stdout = "2024-01-01 12:00:00  12345 manifest.json\n"
 
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
-            with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+        with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
+            with patch("subprocess.run", return_value=mock_result) as mock_run:
                 result = s3_path_exists("s3://bucket/path/manifest.json")
 
         assert result is True
@@ -42,8 +42,8 @@ class TestS3PathExists:
         mock_result.returncode = 0
         mock_result.stdout = ""
 
-        with patch("subprocess.run", return_value=mock_result):
-            with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+        with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
+            with patch("subprocess.run", return_value=mock_result):
                 result = s3_path_exists("s3://bucket/nonexistent/")
 
         assert result is False
@@ -56,8 +56,8 @@ class TestS3PathExists:
         mock_result.returncode = 1
         mock_result.stdout = ""
 
-        with patch("subprocess.run", return_value=mock_result):
-            with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+        with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
+            with patch("subprocess.run", return_value=mock_result):
                 result = s3_path_exists("s3://bucket/error/")
 
         assert result is False
@@ -70,8 +70,8 @@ class TestS3PathExists:
         mock_result.returncode = 0
         mock_result.stdout = "file.txt\n"
 
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
-            with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+        with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
+            with patch("subprocess.run", return_value=mock_result) as mock_run:
                 s3_path_exists(
                     "s3://bucket/path/",
                     endpoint_url="https://s3.wasabisys.com"
@@ -89,6 +89,30 @@ class TestS3PathExists:
             with pytest.raises(RuntimeError, match="s5cmd is required"):
                 s3_path_exists("s3://bucket/path/")
 
+    def test_old_s5cmd_version_raises_error(self):
+        """s3_path_exists raises RuntimeError when s5cmd version is too old."""
+        from slipstream.s3_sync import _check_s5cmd
+
+        mock_result = MagicMock()
+        mock_result.stdout = "v1.4.0"  # Old version
+
+        with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+            with patch("subprocess.run", return_value=mock_result):
+                with pytest.raises(RuntimeError, match="too old"):
+                    _check_s5cmd()
+
+    def test_new_s5cmd_version_passes(self):
+        """_check_s5cmd passes for version 2.0.0+."""
+        from slipstream.s3_sync import _check_s5cmd
+
+        mock_result = MagicMock()
+        mock_result.stdout = "v2.2.2"
+
+        with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+            with patch("subprocess.run", return_value=mock_result):
+                result = _check_s5cmd()
+                assert result == "/usr/bin/s5cmd"
+
 
 class TestDownloadS3Cache:
     """Tests for download_s3_cache function."""
@@ -105,7 +129,7 @@ class TestDownloadS3Cache:
             return 0  # Success
 
         with patch("slipstream.s3_sync.run_s5cmd_with_progress", side_effect=mock_progress):
-            with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+            with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
                 result = download_s3_cache(
                     "s3://bucket/caches/slipcache-abc123/",
                     tmp_path,
@@ -130,7 +154,7 @@ class TestDownloadS3Cache:
             return 1  # Failure
 
         with patch("slipstream.s3_sync.run_s5cmd_with_progress", side_effect=mock_progress):
-            with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+            with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
                 result = download_s3_cache(
                     "s3://bucket/caches/slipcache-abc123/",
                     tmp_path,
@@ -151,7 +175,7 @@ class TestDownloadS3Cache:
             return 0
 
         with patch("slipstream.s3_sync.run_s5cmd_with_progress", side_effect=mock_progress):
-            with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+            with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
                 download_s3_cache(
                     "s3://bucket/caches/slipcache-abc123/",
                     tmp_path,
@@ -184,7 +208,7 @@ class TestUploadS3Cache:
             return 0  # Success
 
         with patch("slipstream.s3_sync.run_s5cmd_with_progress", side_effect=mock_progress):
-            with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+            with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
                 result = upload_s3_cache(
                     tmp_path,
                     "s3://bucket/caches/slipcache-abc123/",
@@ -201,7 +225,7 @@ class TestUploadS3Cache:
         """upload_s3_cache returns False if .slipstream doesn't exist."""
         from slipstream.s3_sync import upload_s3_cache
 
-        with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+        with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
             result = upload_s3_cache(
                 tmp_path,
                 "s3://bucket/caches/slipcache-abc123/",
@@ -223,7 +247,7 @@ class TestUploadS3Cache:
             return 1  # Failure
 
         with patch("slipstream.s3_sync.run_s5cmd_with_progress", side_effect=mock_progress):
-            with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+            with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
                 result = upload_s3_cache(
                     tmp_path,
                     "s3://bucket/caches/slipcache-abc123/",
@@ -315,7 +339,7 @@ class TestSyncS3Cache:
             return result
 
         with patch("subprocess.run", side_effect=mock_run):
-            with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+            with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
                 downloaded, uploaded = sync_s3_cache(
                     tmp_path,
                     "s3://bucket/cache/",
@@ -329,7 +353,7 @@ class TestSyncS3Cache:
         """sync_s3_cache returns (0,0) if no .slipstream dir."""
         from slipstream.s3_sync import sync_s3_cache
 
-        with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+        with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
             downloaded, uploaded = sync_s3_cache(
                 tmp_path,
                 "s3://bucket/cache/",
@@ -355,7 +379,7 @@ class TestCommandGeneration:
             return 0
 
         with patch("slipstream.s3_sync.run_s5cmd_with_progress", side_effect=capture_cmd):
-            with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+            with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
                 download_s3_cache(
                     "s3://my-bucket/caches/slipcache-abc123",
                     tmp_path,
@@ -389,7 +413,7 @@ class TestCommandGeneration:
             return 0
 
         with patch("slipstream.s3_sync.run_s5cmd_with_progress", side_effect=capture_cmd):
-            with patch("shutil.which", return_value="/usr/bin/s5cmd"):
+            with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
                 upload_s3_cache(
                     tmp_path,
                     "s3://my-bucket/caches/slipcache-abc123",

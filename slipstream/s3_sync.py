@@ -31,6 +31,69 @@ def _is_jupyter() -> bool:
         return False
 
 
+# Minimum required s5cmd version for --show-progress support
+_S5CMD_MIN_VERSION = (2, 0, 0)
+
+_S5CMD_INSTALL_INSTRUCTIONS = """
+Install the s5cmd Go binary (NOT the PyPI package):
+  uv:     uv tool install s5cmd
+  macOS:  brew install peak/tap/s5cmd
+  Linux:  Download from https://github.com/peak/s5cmd/releases
+
+Note: 'pip install s5cmd' installs a broken 2018 wrapper. Use the methods above.
+""".strip()
+
+
+def _check_s5cmd() -> str:
+    """Check if s5cmd is installed and return path, or raise RuntimeError.
+
+    Also validates version >= 2.0.0 for --show-progress support.
+
+    Returns:
+        Path to s5cmd binary.
+
+    Raises:
+        RuntimeError: If s5cmd is not installed or version is too old.
+    """
+    s5cmd_path = shutil.which("s5cmd")
+    if s5cmd_path is None:
+        raise RuntimeError(
+            f"s5cmd is required for S3 operations but was not found.\n\n"
+            f"{_S5CMD_INSTALL_INSTRUCTIONS}"
+        )
+
+    # Check version
+    try:
+        result = subprocess.run(
+            [s5cmd_path, "version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        version_str = result.stdout.strip()
+
+        # Parse version like "v2.2.2" or "v2.3.0-991c9fb"
+        import re
+        match = re.search(r'v?(\d+)\.(\d+)\.(\d+)', version_str)
+        if match:
+            version = tuple(int(x) for x in match.groups())
+            if version < _S5CMD_MIN_VERSION:
+                min_ver = ".".join(str(x) for x in _S5CMD_MIN_VERSION)
+                raise RuntimeError(
+                    f"s5cmd version {version_str} is too old. "
+                    f"Version {min_ver}+ is required for progress display.\n\n"
+                    f"{_S5CMD_INSTALL_INSTRUCTIONS}"
+                )
+    except subprocess.TimeoutExpired:
+        pass  # Can't check version, proceed anyway
+    except RuntimeError:
+        raise  # Re-raise our version error
+    except Exception:
+        pass  # Other errors, proceed anyway
+
+    return s5cmd_path
+
+
 def run_s5cmd_with_progress(cmd: list[str], verbose: bool = True) -> int:
     """Run s5cmd with real-time progress display.
 
@@ -240,14 +303,7 @@ def sync_s3_dataset(
     Raises:
         RuntimeError: If s5cmd is not installed.
     """
-    if shutil.which("s5cmd") is None:
-        raise RuntimeError(
-            "s5cmd is required for fast S3 sync but was not found.\n"
-            "Install it:\n"
-            "  macOS:  brew install peak/tap/s5cmd\n"
-            "  Linux:  https://github.com/peak/s5cmd#installation\n"
-            "  pip:    pip install s5cmd"
-        )
+    _check_s5cmd()
 
     if cache_dir is None:
         from slipstream.dataset import get_default_cache_dir
@@ -313,14 +369,7 @@ def s3_path_exists(
     Raises:
         RuntimeError: If s5cmd is not installed
     """
-    if shutil.which("s5cmd") is None:
-        raise RuntimeError(
-            "s5cmd is required for S3 operations but was not found.\n"
-            "Install it:\n"
-            "  macOS:  brew install peak/tap/s5cmd\n"
-            "  Linux:  https://github.com/peak/s5cmd#installation\n"
-            "  pip:    pip install s5cmd"
-        )
+    _check_s5cmd()
 
     cmd = ["s5cmd"]
     if endpoint_url:
@@ -366,14 +415,7 @@ def download_s3_cache(
     Raises:
         RuntimeError: If s5cmd is not installed
     """
-    if shutil.which("s5cmd") is None:
-        raise RuntimeError(
-            "s5cmd is required for S3 operations but was not found.\n"
-            "Install it:\n"
-            "  macOS:  brew install peak/tap/s5cmd\n"
-            "  Linux:  https://github.com/peak/s5cmd#installation\n"
-            "  pip:    pip install s5cmd"
-        )
+    _check_s5cmd()
 
     local_cache_path = Path(local_cache_path)
     local_slipstream = local_cache_path / ".slipstream"
@@ -435,14 +477,7 @@ def upload_s3_cache(
     Raises:
         RuntimeError: If s5cmd is not installed
     """
-    if shutil.which("s5cmd") is None:
-        raise RuntimeError(
-            "s5cmd is required for S3 operations but was not found.\n"
-            "Install it:\n"
-            "  macOS:  brew install peak/tap/s5cmd\n"
-            "  Linux:  https://github.com/peak/s5cmd#installation\n"
-            "  pip:    pip install s5cmd"
-        )
+    _check_s5cmd()
 
     local_cache_path = Path(local_cache_path)
     local_slipstream = local_cache_path / ".slipstream"
@@ -516,14 +551,7 @@ def sync_s3_cache(
     Raises:
         RuntimeError: If s5cmd is not installed
     """
-    if shutil.which("s5cmd") is None:
-        raise RuntimeError(
-            "s5cmd is required for S3 operations but was not found.\n"
-            "Install it:\n"
-            "  macOS:  brew install peak/tap/s5cmd\n"
-            "  Linux:  https://github.com/peak/s5cmd#installation\n"
-            "  pip:    pip install s5cmd"
-        )
+    _check_s5cmd()
 
     local_cache_path = Path(local_cache_path)
     local_slipstream = local_cache_path / ".slipstream"
