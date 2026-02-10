@@ -25,7 +25,7 @@ Fast, frictionless PyTorch dataloading for vision. FFCV-level performance, zero 
 ## Installation
 
 ```bash
-pip install visionlab-slipstream
+uv add git+https://github.com/harvard-visionlab/slipstream
 
 # Required: libturbojpeg
 brew install libjpeg-turbo  # macOS
@@ -76,7 +76,7 @@ See **[Advanced Usage](docs/ADVANCED.md)** for:
 ## Development
 
 ```bash
-git clone https://github.com/visionlab/slipstream
+git clone https://github.com/harvard-visionlab/slipstream
 cd slipstream
 uv sync --group dev
 
