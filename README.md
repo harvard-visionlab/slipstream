@@ -1,28 +1,32 @@
 # slipstream
 
-Fast, frictionless PyTorch dataloading for vision. FFCV-level performance, zero hassle.
+Fast, frictionless PyTorch dataloading for vision. [FFCV](https://github.com/libffcv/ffcv)-level performance, zero hassle.
 
 > **Beta software** — API may change. Use at your own risk.
 
 ## Why Slipstream?
 
-- **[FFCV](https://github.com/facebookresearch/FFCV-SSL) speeds** without FFCV's installation pain (no custom compilers, no CUDA build)
-- **Any source**: LitData, HuggingFace, ImageFolder, FFCV files — all work seamlessly via remote or local storage
+- **[FFCV](https://github.com/facebookresearch/FFCV-SSL) speeds** without FFCV's installation pain (no custom compilers, no CUDA build, no outdated dependencies - yet anyway)
+- **Any source**: LitData, HuggingFace, ImageFolder, FFCV files — all work seamlessly
+- **Local or remote source**: "s3://bucket/imagenet/train/" or "/mnt/data/imagenet/train/" both work
 - **One-time cache build**, then blazing fast epochs via memory-mapped I/O
 - **Fast transforms**: batch transforms on CUDA tensors with per-sample random params
 - **Built-in SSL pipelines**: SimCLR, IPCL, L-JEPA, flexible multi-crop
 - **Remote cache sharing**: Build once, share via S3 across your team
 
-## Performance
+## Performance Comparable to FFCV (Random Resized Crop)
 
-| Benchmark              | Device | FFCV   | Slipstream | Speedup  |
-| ---------------------- | ------ | ------ | ---------- | -------- |
-| Raw I/O                | CPU    | 413k   | 939k       | **2.3x** |
-| RRC 224px (JPEG)       | CPU    | 13,250 | 13,851     | **1.05x** |
-| RRC 224px (YUV420)     | H100   | —      | 44,987     | **2.7x** ¹ |
-| 2x Multi-crop (YUV420) | H100   | —      | 28,475     | **1.9x** ¹ |
+| Benchmark (warm cache)   | Device | FFCV   | Slipstream | Speedup   |
+| ------------------------ | ------ | ------ | ---------- | --------- |
+| Raw I/O (JPEG Bytes)     | CPU    | 413k   | 939k       | **2.3x**  |
+| RRC 224px (JPEG Decoded) | CPU    | 13,250 | 13,851     | **1.05x** |
 
-¹ vs JPEG. YUV420 pre-decodes images, bypassing entropy decode at load time.
+## Support for YUV420 format for greater speed (vs. jpeg format)
+
+| Benchmark (warm cache)     | Device | Slipstream JPEG | Slipstream YUV420 | Speedup  |
+| -------------------------- | ------ | --------------- | ----------------- | -------- |
+| RRC 224px                  | H100   | 16,715          | 44,987            | **2.7x** |
+| Multi-RRC (2 views, 224px) | H100   | 15,328          | 28,475            | **1.9x** |
 
 _Full benchmarks: [BENCHMARKS.md](BENCHMARKS.md)_
 
