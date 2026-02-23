@@ -87,6 +87,10 @@ build-backend = "hatchling.build"
 [tool.hatch.metadata]
 allow-direct-references = true
 
+[tool.hatch.build]
+# Include compiled C extensions even though *.so is in .gitignore
+artifacts = ["libslipstream/_libslipstream*"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["slipstream", "libslipstream"]
 
