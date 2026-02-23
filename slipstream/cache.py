@@ -1028,6 +1028,24 @@ def get_storage_class(field_type: str) -> type[FieldStorage]:
         return NumpyStorage
 
 
+def _get_expected_files(field_name: str, field_type: str) -> list[str]:
+    """Return the list of storage filenames expected for a given field.
+
+    Args:
+        field_name: Name of the field
+        field_type: Type string (e.g., "ImageBytes", "int", "str")
+
+    Returns:
+        List of expected filenames relative to the cache directory.
+    """
+    if field_type in ("ImageBytes", "HFImageDict", "bytes"):
+        return [f"{field_name}.bin", f"{field_name}.meta.npy"]
+    elif field_type == "str":
+        return [f"{field_name}.bin", f"{field_name}.offsets.npy"]
+    else:
+        return [f"{field_name}.npy"]
+
+
 # =============================================================================
 # Streaming Field Writers (O(1) memory per sample)
 # =============================================================================
@@ -1377,6 +1395,80 @@ class OptimizedCache:
         return manifest_path.exists()
 
     @classmethod
+    def check_integrity(cls, parent_dir: Path) -> tuple[bool, list[str]]:
+        """Check whether an existing cache has all expected files intact.
+
+        Reads the manifest and verifies that every storage file exists and
+        (when ``file_sizes`` was recorded at build time) matches its expected
+        size.  This catches partial deletions caused by cluster garbage
+        collection or interrupted downloads.
+
+        Args:
+            parent_dir: Directory containing the ``.slipstream/`` cache.
+
+        Returns:
+            ``(is_valid, problems)`` where *is_valid* is True when the cache
+            is complete, and *problems* lists human-readable descriptions of
+            any missing or size-mismatched files.
+        """
+        import os
+
+        cache_dir = parent_dir / CACHE_SUBDIR
+        manifest_path = cache_dir / MANIFEST_FILE
+
+        if not manifest_path.exists():
+            return False, ["manifest.json missing"]
+
+        try:
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            return False, [f"corrupt manifest: {exc}"]
+
+        field_metadata = manifest.get("fields", {})
+        file_sizes: dict[str, int] = manifest.get("file_sizes", {})
+        problems: list[str] = []
+
+        for field_name, meta in field_metadata.items():
+            field_type = meta.get("type", "")
+            expected_files = _get_expected_files(field_name, field_type)
+
+            for fname in expected_files:
+                fpath = cache_dir / fname
+                if not fpath.exists():
+                    problems.append(f"missing: {fname}")
+                elif fname in file_sizes:
+                    actual = os.path.getsize(fpath)
+                    expected = file_sizes[fname]
+                    if actual != expected:
+                        problems.append(
+                            f"size mismatch: {fname} "
+                            f"(expected {expected}, got {actual})"
+                        )
+
+        return (len(problems) == 0, problems)
+
+    @classmethod
+    def _wipe_cache(cls, parent_dir: Path, reason: str) -> None:
+        """Remove the ``.slipstream/`` cache subdirectory.
+
+        Emits a warning so the user knows why a rebuild is happening.
+
+        Args:
+            parent_dir: Directory containing the ``.slipstream/`` cache.
+            reason: Human-readable explanation (included in the warning).
+        """
+        import shutil
+        import warnings
+
+        cache_dir = parent_dir / CACHE_SUBDIR
+        warnings.warn(
+            f"Wiping incomplete cache at {cache_dir}: {reason}",
+            stacklevel=2,
+        )
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+    @classmethod
     def build(
         cls,
         dataset: Any,
@@ -1474,11 +1566,22 @@ class OptimizedCache:
                 if image_format == "yuv420":
                     print(f"  {field_name}: Non-JPEG images → converted to YUV420 format")
 
+        # Record actual file sizes for integrity checking
+        import os
+        file_sizes: dict[str, int] = {}
+        for field_name, meta in field_metadata.items():
+            field_type = meta.get('type', '')
+            for fname in _get_expected_files(field_name, field_type):
+                fpath = cache_dir / fname
+                if fpath.exists():
+                    file_sizes[fname] = os.path.getsize(fpath)
+
         # Write manifest
         manifest = {
             'version': CACHE_VERSION,
             'num_samples': num_samples,
             'fields': field_metadata,
+            'file_sizes': file_sizes,
         }
         manifest_path = cache_dir / MANIFEST_FILE
         with open(manifest_path, 'w') as f:
@@ -2144,4 +2247,5 @@ __all__ = [
     "detect_image_format",
     "rgb_to_yuv420",
     "decode_image_to_rgb",
+    "_get_expected_files",
 ]

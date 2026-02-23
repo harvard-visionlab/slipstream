@@ -282,6 +282,13 @@ class SlipstreamLoader:
                     )
                     if success:
                         cache_downloaded = True
+                        # Verify downloaded cache integrity
+                        is_valid, problems = OptimizedCache.check_integrity(cache_dir)
+                        if not is_valid:
+                            if verbose:
+                                print(f"  Downloaded cache is incomplete: {problems}")
+                            OptimizedCache._wipe_cache(cache_dir, "; ".join(problems))
+                            cache_downloaded = False
                     elif verbose:
                         print("  Download failed, will build locally")
                 else:
@@ -290,8 +297,20 @@ class SlipstreamLoader:
             elif verbose:
                 print(f"Remote cache not found, will build and upload: {remote_cache_full}")
 
-        # Determine whether to build or load
-        needs_build = (force_rebuild or not OptimizedCache.exists(cache_dir)) and not cache_downloaded
+        # Check integrity of existing local cache
+        needs_build = force_rebuild and not cache_downloaded
+        if not needs_build and not cache_downloaded:
+            if OptimizedCache.exists(cache_dir):
+                is_valid, problems = OptimizedCache.check_integrity(cache_dir)
+                if not is_valid:
+                    if verbose:
+                        print(f"Cache integrity check failed: {problems}")
+                    OptimizedCache._wipe_cache(cache_dir, "; ".join(problems))
+                    needs_build = True
+                else:
+                    needs_build = False
+            else:
+                needs_build = True
 
         if needs_build:
             if verbose:
@@ -313,7 +332,15 @@ class SlipstreamLoader:
                         print(f"  Warning: Failed to upload cache to S3: {e}")
                         print("  Continuing with local cache")
         else:
-            self.cache = OptimizedCache.load(cache_dir, verbose=verbose)
+            try:
+                self.cache = OptimizedCache.load(cache_dir, verbose=verbose)
+            except Exception as e:
+                # Safety net: if load fails despite integrity check passing
+                # (e.g., race condition, corrupt mmap), wipe and rebuild
+                if verbose:
+                    print(f"Cache load failed ({e}), rebuilding...")
+                OptimizedCache._wipe_cache(cache_dir, str(e))
+                self.cache = OptimizedCache.build(dataset, cache_dir, verbose=verbose)
 
         # Bidirectional sync: ensure local and remote have same derived files
         # (indexes, stats, YUV420 cache, etc.)

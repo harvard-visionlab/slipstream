@@ -33,7 +33,7 @@ from torchvision.datasets import ImageFolder
 
 from slipstream.utils.cache_dir import get_cache_base
 
-__all__ = ["SlipstreamImageFolder", "open_imagefolder"]
+__all__ = ["SlipstreamImageFolder", "open_imagefolder", "_check_extraction_integrity"]
 
 
 # Supported image extensions (matching torchvision.datasets.folder.IMG_EXTENSIONS)
@@ -271,10 +271,46 @@ def _download_fsspec(
         fs.get(resolved_path, str(local_path))
 
 
+def _count_files(directory: Path) -> int:
+    """Count all files under a directory using os.walk (fast)."""
+    count = 0
+    for _root, _dirs, files in os.walk(directory):
+        count += len(files)
+    return count
+
+
+def _check_extraction_integrity(extract_path: Path) -> bool:
+    """Check whether a tar extraction completed successfully.
+
+    Looks for an ``.extraction_complete`` marker file written after
+    extraction.  The marker contains the expected file count; a
+    recount is performed and compared.
+
+    Returns:
+        True if the marker exists and the file count matches.
+    """
+    marker = extract_path / ".extraction_complete"
+    if not marker.exists():
+        return False
+
+    try:
+        expected_count = int(marker.read_text().strip())
+    except (ValueError, OSError):
+        return False
+
+    actual_count = _count_files(extract_path)
+    # Subtract 1 for the marker file itself
+    actual_count_excl_marker = actual_count - 1
+
+    return actual_count_excl_marker == expected_count
+
+
 def _extract_tar(tar_path: Path, output_dir: Path, verbose: bool = True) -> Path:
     """Extract tar archive, return path to extracted folder.
 
     Handles .tar, .tar.gz, .tgz, .tar.bz2, .tbz2 formats.
+    Writes an ``.extraction_complete`` marker with the file count
+    after successful extraction.
 
     Returns:
         Path to the extracted top-level directory.
@@ -316,6 +352,11 @@ def _extract_tar(tar_path: Path, output_dir: Path, verbose: bool = True) -> Path
                     tar.extract(member, output_dir, filter="data")
                 else:
                     tar.extract(member, output_dir)
+
+    # Write extraction complete marker with file count
+    file_count = _count_files(extract_path)
+    marker = extract_path / ".extraction_complete"
+    marker.write_text(f"{file_count}\n")
 
     if verbose:
         print(f"  Extracted to {extract_path}")
@@ -415,12 +456,23 @@ def _download_and_extract_s3_tar(
     extract_base.mkdir(parents=True, exist_ok=True)
 
     # Look for existing extracted directory
-    existing = list(extract_base.iterdir())
+    existing = [p for p in extract_base.iterdir() if p.is_dir()]
     if existing:
         extract_path = existing[0]
-        if verbose:
-            print(f"Using cached extraction: {extract_path}")
-        return extract_path
+        if _check_extraction_integrity(extract_path):
+            if verbose:
+                print(f"Using cached extraction: {extract_path}")
+            return extract_path
+        else:
+            # Extraction is incomplete — GC or interruption deleted files
+            import warnings
+            warnings.warn(
+                f"Incomplete extraction at {extract_path} "
+                f"(files may have been deleted by garbage collection). "
+                f"Re-extracting...",
+                stacklevel=2,
+            )
+            shutil.rmtree(extract_path, ignore_errors=True)
 
     # Extract tar
     extract_path = _extract_tar(tar_path, extract_base, verbose=verbose)
@@ -553,8 +605,17 @@ class SlipstreamImageFolder(ImageFolder):
         path, label = self.samples[index]
 
         # Read raw image bytes
-        with open(path, "rb") as f:
-            image_data = f.read()
+        try:
+            with open(path, "rb") as f:
+                image_data = f.read()
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"Image file missing: {path}\n"
+                f"This may be caused by cluster garbage collection deleting "
+                f"extracted files. Delete the extraction directory and re-run "
+                f"to trigger re-extraction:\n"
+                f"  rm -rf {self._root_path}"
+            ) from None
 
         # Compute relative path (last 3 parts: split/class/filename or class/filename)
         path_obj = Path(path)
