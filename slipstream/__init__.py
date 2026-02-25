@@ -23,7 +23,7 @@ Example:
         labels = batch['label']  # [B] tensor
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 # Core dataset
 from slipstream.backends.ffcv_file import (

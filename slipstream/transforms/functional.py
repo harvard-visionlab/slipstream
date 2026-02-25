@@ -536,6 +536,9 @@ def affine_transform(x: torch.Tensor, mat, sz=None, align_corners=False, mode="b
         rescale = torch.tensor([0.5 * w, 0.5 * h], dtype=dtype, device=device)
         # mat is [B, 2, 3], transpose to [B, 3, 2], divide by rescale
         rescaled_theta = mat.transpose(1, 2) / rescale
+        # Translation row (index 2) must stay in normalized [-1,1] space —
+        # it multiplies with the homogeneous coordinate (1), not pixel coords.
+        rescaled_theta[:, 2, :] = mat[:, :, 2]
         # bmm: [1, h*w, 3] x [B, 3, 2] -> [B, h*w, 2]  (broadcast on batch dim)
         if mat.shape[0] == 1:
             coords = base_grid.bmm(rescaled_theta).view(1, oh, ow, 2)
