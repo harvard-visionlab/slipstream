@@ -3,11 +3,14 @@
 - DecodeUniformMultiRandomResizedCrop: decode-once + N uniform random crops (legacy)
 - DecodeMultiRandomResizedCrop: decode-once + N named crops with per-crop params
 - MultiCropPipeline: apply per-crop transform chains to named crop dict
+- NamedCopies: duplicate a single array/tensor into a named dict for MultiCropPipeline
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+import copy
 
 import numpy as np
 import torch
@@ -340,6 +343,54 @@ class MultiCropPipeline(BatchTransform):
             transforms = [type(t).__name__ for t in pipeline]
             pipe_strs.append(f"'{name}': [{', '.join(transforms)}]")
         return f"MultiCropPipeline({{{', '.join(pipe_strs)}}})"
+
+
+class NamedCopies(BatchTransform):
+    """Duplicate a single value into a named dict for MultiCropPipeline.
+
+    Takes a single array or tensor (e.g., from DecodeCenterCrop or
+    DecodeResizeCrop) and produces a dict of deep copies keyed by name.
+    This bridges single-output decoders with MultiCropPipeline, which
+    expects a dict input.
+
+    Each copy is independent (deep-copied) so that downstream transforms
+    can safely mutate them in-place.
+
+    Args:
+        names: List of names for the copies (e.g., ``['view1', 'view2']``).
+
+    Returns:
+        Dict mapping each name to a deep copy of the input.
+
+    Example:
+        Decode once, create two named views, apply different transforms::
+
+            pipelines = {'image': [
+                DecodeResizeCrop(resize_size=256, crop_size=224),
+                NamedCopies(['view1', 'view2']),
+                MultiCropPipeline({
+                    'view1': [ToTorchImage(device='cuda'), RandomZoom(zoom=(1.0, 1.0))],
+                    'view2': [ToTorchImage(device='cuda'), RandomZoom(zoom=(0.5, 0.5))],
+                }),
+            ]}
+    """
+
+    def __init__(self, names: list[str]) -> None:
+        if len(names) < 1:
+            raise ValueError("names must contain at least one entry")
+        if len(names) != len(set(names)):
+            raise ValueError(f"Duplicate names: {names}")
+        self.names = list(names)
+
+    def __call__(self, data: Any) -> dict[str, Any]:
+        if isinstance(data, np.ndarray):
+            return {name: data.copy() for name in self.names}
+        if isinstance(data, torch.Tensor):
+            return {name: data.clone() for name in self.names}
+        return {name: copy.deepcopy(data) for name in self.names}
+
+    def __repr__(self) -> str:
+        return f"NamedCopies({self.names})"
 
 
 # Backward-compatible aliases (deprecated)

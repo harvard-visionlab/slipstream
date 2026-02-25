@@ -71,6 +71,7 @@ from slipstream.decoders.multicrop import (
     DecodeMultiRandomResizedCrop,
     DecodeUniformMultiRandomResizedCrop,
     MultiCropPipeline,
+    NamedCopies,
     # Backward-compatible aliases
     MultiCropRandomResizedCrop,
     MultiRandomResizedCrop,
@@ -113,6 +114,7 @@ __all__ = [
     "DecodeMultiRandomResizedCrop",
     "DecodeUniformMultiRandomResizedCrop",
     "MultiCropPipeline",
+    "NamedCopies",
     # Backward-compatible aliases (deprecated)
     "CenterCrop",
     "RandomResizedCrop",

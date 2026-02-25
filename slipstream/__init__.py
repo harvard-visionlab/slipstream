@@ -23,7 +23,7 @@ Example:
         labels = batch['label']  # [B] tensor
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 # Core dataset
 from slipstream.backends.ffcv_file import (
@@ -64,6 +64,7 @@ from slipstream.decoders import (
     DecodeMultiRandomResizedCrop,
     DecodeUniformMultiRandomResizedCrop,
     MultiCropPipeline,
+    NamedCopies,
     estimate_rejection_fallback_rate,
     # Backward-compatible aliases (deprecated)
     CenterCrop,
@@ -145,6 +146,7 @@ __all__ = [
     "DecodeMultiRandomResizedCrop",
     "DecodeUniformMultiRandomResizedCrop",
     "MultiCropPipeline",
+    "NamedCopies",
     "estimate_rejection_fallback_rate",
     # Backward-compatible aliases (deprecated)
     "CenterCrop",

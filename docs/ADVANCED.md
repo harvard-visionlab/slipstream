@@ -150,6 +150,52 @@ loader = SlipstreamLoader(
 )
 ```
 
+## Named Copies (Multi-View from Single Decode)
+
+`NamedCopies` duplicates a single decoded batch into a named dict, letting you
+apply different transforms per view via `MultiCropPipeline` — without decoding
+more than once.
+
+```python
+from slipstream import (
+    SlipstreamLoader, DecodeResizeCrop,
+    NamedCopies, MultiCropPipeline, ToTorchImage, Normalize,
+    IMAGENET_MEAN, IMAGENET_STD,
+)
+from slipstream.transforms import RandomZoom, RandomHorizontalFlip
+
+# Two views with different zoom levels
+loader = SlipstreamLoader(
+    dataset,
+    batch_size=256,
+    pipelines={'image': [
+        DecodeResizeCrop(resize_size=256, crop_size=224),
+        NamedCopies(['view1', 'view2']),
+        MultiCropPipeline({
+            'view1': [
+                ToTorchImage(device='cuda'),
+                RandomZoom(p=1.0, zoom=(1.0, 1.0), x=0.5, y=0.5, device='cuda'),
+                Normalize(IMAGENET_MEAN, IMAGENET_STD, device='cuda'),
+            ],
+            'view2': [
+                ToTorchImage(device='cuda'),
+                RandomZoom(p=1.0, zoom=(0.5, 0.5), x=0.5, y=0.5, device='cuda'),
+                Normalize(IMAGENET_MEAN, IMAGENET_STD, device='cuda'),
+            ],
+        }),
+    ]},
+)
+
+for batch in loader:
+    v1 = batch['view1']  # [B, 3, 224, 224] — full zoom
+    v2 = batch['view2']  # [B, 3, 224, 224] — 50% zoom
+```
+
+Works with any single-output decoder (`DecodeCenterCrop`, `DecodeResizeCrop`,
+`DecodeRandomResizedCrop`) and any number of named copies.
+Use `DecodeMultiRandomResizedCrop` instead when you need different
+*random crops* per view (e.g., global/local crops for DINO).
+
 ## Custom Pipelines
 
 Build your own decode/transform pipelines:
