@@ -301,16 +301,24 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
     Args:
         crops: Dict mapping crop names to parameter dicts.
             Required key: ``size`` (int or tuple ``(min, max)`` for random
-            per-image sampling).
+            size sampling).
             Optional keys: ``x_range`` (float or tuple), ``y_range``
-            (float or tuple), ``seed`` (int).
+            (float or tuple), ``seed`` (int), ``size_mode`` (str).
+        size_mode: Default size mode for all crops. ``"per_batch"`` samples
+            one size shared by all images (output is a stacked array).
+            ``"per_image"`` samples independently per image (output is a
+            list of arrays). Can be overridden per crop. Ignored when
+            ``size`` is a fixed int. Default: ``"per_batch"``.
         num_threads: Parallel decode threads. 0 = auto.
         to_tensor: If True, return torch.Tensor; if False, return numpy array.
         permute: If True, permute HWC->CHW. If False, keep HWC layout.
 
     Returns:
-        Dict[str, np.ndarray] or Dict[str, torch.Tensor] — named crops,
-        each [B, size, size, 3] uint8 (HWC, default) or [B, 3, size, size] (CHW).
+        Fixed size or per_batch mode:
+            Dict[str, np.ndarray] or Dict[str, torch.Tensor] — named crops,
+            each [B, size, size, 3] uint8 (HWC, default) or [B, 3, size, size] (CHW).
+        Per_image mode:
+            Dict[str, list] — named crops, each a list of per-image arrays.
 
     Note:
         Default output (numpy HWC) is optimal for GPU pipelines when followed
@@ -338,10 +346,14 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
     def __init__(
         self,
         crops: dict[str, dict],
+        size_mode: str = "per_batch",
         num_threads: int = 0,
         to_tensor: bool = False,
         permute: bool = False,
     ) -> None:
+        if size_mode not in ("per_batch", "per_image"):
+            raise ValueError(f"size_mode must be 'per_batch' or 'per_image', got '{size_mode}'")
+        self.size_mode = size_mode
         self.num_threads = num_threads
         self.to_tensor = to_tensor
         self.permute = permute
@@ -350,6 +362,7 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
 
         self._crop_names: list[str] = []
         self._crop_size_ranges: list[tuple[int, int]] = []
+        self._crop_size_modes: list[str] = []
         self._crop_x_ranges: list[tuple[float, float]] = []
         self._crop_y_ranges: list[tuple[float, float]] = []
         self._crop_seeds: list[int | None] = []
@@ -360,6 +373,10 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
             self._crop_names.append(name)
             s = params['size']
             self._crop_size_ranges.append((s, s) if isinstance(s, int) else tuple(s))
+            sm = params.get('size_mode', size_mode)
+            if sm not in ("per_batch", "per_image"):
+                raise ValueError(f"Crop '{name}': size_mode must be 'per_batch' or 'per_image', got '{sm}'")
+            self._crop_size_modes.append(sm)
             xr = params.get('x_range', (0.5, 0.5))
             yr = params.get('y_range', (0.5, 0.5))
             self._crop_x_ranges.append(
@@ -412,10 +429,20 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                 x_pos[i] = rng_i.uniform(x_range[0], x_range[1])
                 y_pos[i] = rng_i.uniform(y_range[0], y_range[1])
 
-            # Sample target sizes (per-image when range is given)
+            # Sample target sizes
+            crop_size_mode = self._crop_size_modes[c]
             if size_range[0] == size_range[1]:
+                # Fixed size
                 target_sizes_arr = np.full(batch_size, size_range[0], dtype=np.int32)
+            elif crop_size_mode == "per_batch":
+                # One random size for the whole batch
+                rng = np.random.RandomState(
+                    (batch_seed + batch_size) % 2147483647
+                )
+                s = int(rng.randint(size_range[0], size_range[1] + 1))
+                target_sizes_arr = np.full(batch_size, s, dtype=np.int32)
             else:
+                # Per-image random sizes
                 target_sizes_arr = np.empty(batch_size, dtype=np.int32)
                 for i in range(batch_size):
                     rng_i = np.random.RandomState(
@@ -450,7 +477,8 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
 
         # Check if any crop has variable per-image sizes
         has_variable_sizes = any(
-            sr[0] != sr[1] for sr in self._crop_size_ranges
+            sr[0] != sr[1] and sm == "per_image"
+            for sr, sm in zip(self._crop_size_ranges, self._crop_size_modes)
         )
 
         if has_variable_sizes:
@@ -460,8 +488,9 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                 target_sizes_list, x_pos_list, y_pos_list,
             )
         else:
-            # All fixed sizes: use existing multi-crop-varied infrastructure
-            fixed_sizes = [sr[0] for sr in self._crop_size_ranges]
+            # All crops have uniform size within each batch (fixed or per_batch)
+            # Use the actual sampled size (first element, since all are equal)
+            fixed_sizes = [int(ts[0]) for ts in target_sizes_list]
             all_same_size_flag = len(set(fixed_sizes)) == 1
 
             crops_hwc = self._decoder.decode_batch_multi_crop_varied(
@@ -546,6 +575,8 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
             sr = self._crop_size_ranges[c]
             size_str = sr[0] if sr[0] == sr[1] else sr
             parts = [f"size={size_str}"]
+            if sr[0] != sr[1]:
+                parts.append(f"size_mode='{self._crop_size_modes[c]}'")
             if self._crop_x_ranges[c] != (0.5, 0.5):
                 parts.append(f"x_range={self._crop_x_ranges[c]}")
             if self._crop_y_ranges[c] != (0.5, 0.5):
