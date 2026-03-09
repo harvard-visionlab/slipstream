@@ -70,6 +70,10 @@ class RandomEmbed(BatchAugment):
             ``outer`` are fully transparent (showing only background); the
             region between fades via a Gaussian falloff.  ``None`` (default)
             disables the fade and uses a hard rectangular boundary.
+        p_fade: Probability of applying the circular fade **per image**.
+            1.0 (default) always applies it; 0.5 applies to ~half the
+            images in a batch, leaving the rest with a hard rectangular
+            boundary.  Ignored when ``fade_radius`` is ``None``.
         seed: Random seed for reproducible positions and noise.
         device: Device for the RNG (must match input tensor device when
             using a seed).
@@ -113,6 +117,7 @@ class RandomEmbed(BatchAugment):
         alpha_range=2.0,
         color_noise=True,
         fade_radius=None,
+        p_fade=1.0,
         # Common ─────────────────────────────────────────────
         seed=None,
         device=None,
@@ -161,6 +166,7 @@ class RandomEmbed(BatchAugment):
                     f"got {fade_radius}"
                 )
         self.fade_radius = fade_radius
+        self.p_fade = p_fade
         self.alpha_range = (
             (alpha_range, alpha_range) if isinstance(alpha_range, (int, float))
             else tuple(alpha_range)
@@ -180,6 +186,7 @@ class RandomEmbed(BatchAugment):
         self._y_frac = None
         self._img_h = None
         self._img_w = None
+        self._do_fade = None
 
     # ------------------------------------------------------------------ #
     #  BatchAugment interface                                              #
@@ -192,6 +199,16 @@ class RandomEmbed(BatchAugment):
 
         self._img_h = h
         self._img_w = w
+
+        # Per-image fade decision
+        if self.fade_radius is not None and self.p_fade < 1.0:
+            self._do_fade = torch.bernoulli(
+                torch.full((n,), self.p_fade), generator=self.rng,
+            ).bool()
+        elif self.fade_radius is not None:
+            self._do_fade = torch.ones(n, dtype=torch.bool)
+        else:
+            self._do_fade = torch.zeros(n, dtype=torch.bool)
 
         if self._position_mode == "range":
             x_frac = torch.empty(n, device=b.device, dtype=b.dtype).uniform_(
@@ -244,6 +261,7 @@ class RandomEmbed(BatchAugment):
             "ys": self._ys,
             "img_h": self._img_h,
             "img_w": self._img_w,
+            "do_fade": self._do_fade,
         }
         if self._x_frac is not None:
             params["x_frac"] = self._x_frac
@@ -276,7 +294,7 @@ class RandomEmbed(BatchAugment):
 
             if copy_w > 0 and copy_h > 0:
                 fg = b[i, :, src_y0:src_y0 + copy_h, src_x0:src_x0 + copy_w]
-                if self.fade_radius is not None:
+                if self._do_fade[i]:
                     if fade_mask is None:
                         fade_mask = self._make_fade_mask(h, w, b.device, b.dtype)
                     m = fade_mask[:, :, src_y0:src_y0 + copy_h, src_x0:src_x0 + copy_w]
@@ -413,6 +431,8 @@ class RandomEmbed(BatchAugment):
                 parts.append("color_noise=False")
         if self.fade_radius is not None:
             parts.append(f"fade_radius={self.fade_radius}")
+            if self.p_fade != 1.0:
+                parts.append(f"p_fade={self.p_fade}")
         if self.std is not None:
             parts.append(f"std={self.std}")
 

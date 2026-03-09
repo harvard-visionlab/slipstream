@@ -428,6 +428,54 @@ class TestFadeRadius:
         r = repr(t)
         assert "fade_radius" not in r
 
+    def test_p_fade_default(self):
+        t = RandomEmbed(canvas_size=128, fade_radius=(0.4, 0.5))
+        assert t.p_fade == 1.0
+
+    def test_p_fade_zero_no_fade(self):
+        """p_fade=0 should never apply fade (identical to no fade_radius)."""
+        img = _make_batch(B=4, C=3, H=96, W=96, value=0.7)
+        t_no_fade = RandomEmbed(canvas_size=224, x_range=0.5, y_range=0.5,
+                                background="zeros", seed=42)
+        t_p0 = RandomEmbed(canvas_size=224, x_range=0.5, y_range=0.5,
+                           background="zeros", fade_radius=(0.35, 0.50),
+                           p_fade=0.0, seed=42)
+        out_no_fade = t_no_fade(img)
+        out_p0 = t_p0(img)
+        assert torch.equal(out_no_fade, out_p0)
+
+    def test_p_fade_one_always_fades(self):
+        """p_fade=1 should fade every image."""
+        img = _make_batch(B=4, C=3, H=96, W=96, value=0.7)
+        t = RandomEmbed(canvas_size=224, x_range=0.5, y_range=0.5,
+                        background="zeros", fade_radius=(0.35, 0.50),
+                        p_fade=1.0, seed=42)
+        out = t(img)
+        params = t.last_params()
+        assert params["do_fade"].all()
+
+    def test_p_fade_half_mixed(self):
+        """p_fade=0.5 with large batch should produce a mix of faded and unfaded."""
+        img = _make_batch(B=32, C=3, H=96, W=96, value=0.7)
+        t = RandomEmbed(canvas_size=224, x_range=0.5, y_range=0.5,
+                        background="zeros", fade_radius=(0.35, 0.50),
+                        p_fade=0.5, seed=42)
+        t(img)
+        do_fade = t.last_params()["do_fade"]
+        n_faded = do_fade.sum().item()
+        # With 32 images at p=0.5, expect some faded and some not
+        assert 0 < n_faded < 32, f"Expected a mix, got {n_faded}/32 faded"
+
+    def test_p_fade_repr(self):
+        t = RandomEmbed(canvas_size=224, fade_radius=(0.4, 0.5), p_fade=0.5)
+        r = repr(t)
+        assert "p_fade=0.5" in r
+
+    def test_p_fade_repr_default_omitted(self):
+        t = RandomEmbed(canvas_size=224, fade_radius=(0.4, 0.5))
+        r = repr(t)
+        assert "p_fade" not in r
+
 
 # ── edge cases ───────────────────────────────────────────────────────────
 
