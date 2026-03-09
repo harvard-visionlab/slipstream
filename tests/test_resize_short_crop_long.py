@@ -561,3 +561,144 @@ class TestDecodeMultiRandomResizeShortCropLong:
             assert cp["y_pos"].shape == (B,)
             assert cp["crop_params"].shape == (B, 4)
         multi.shutdown()
+
+
+# ===========================================================================
+# Raw bytes (single sample) support
+# ===========================================================================
+
+class TestSingleDecodeRandomResizeShortCropLong:
+    """DecodeRandomResizeShortCropLong with raw image bytes."""
+
+    @pytest.fixture(autouse=True)
+    def check_decoder(self):
+        _skip_if_no_decoder()
+
+    def test_raw_bytes_landscape(self):
+        from slipstream.decoders import DecodeRandomResizeShortCropLong
+        jpeg = _create_test_jpeg(640, 480)
+        dec = DecodeRandomResizeShortCropLong(size=224, num_threads=1)
+        result = dec(jpeg)
+        assert isinstance(result, np.ndarray)
+        assert result.shape == (224, 224, 3)
+        assert result.dtype == np.uint8
+        dec.shutdown()
+
+    def test_raw_bytes_portrait(self):
+        from slipstream.decoders import DecodeRandomResizeShortCropLong
+        jpeg = _create_test_jpeg(480, 640)
+        dec = DecodeRandomResizeShortCropLong(size=128, num_threads=1)
+        result = dec(jpeg)
+        assert isinstance(result, np.ndarray)
+        assert result.shape == (128, 128, 3)
+        dec.shutdown()
+
+    def test_raw_bytes_to_tensor(self):
+        from slipstream.decoders import DecodeRandomResizeShortCropLong
+        jpeg = _create_test_jpeg(640, 480)
+        dec = DecodeRandomResizeShortCropLong(size=224, to_tensor=True, num_threads=1)
+        result = dec(jpeg)
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == (224, 224, 3)
+        dec.shutdown()
+
+    def test_raw_bytes_permute(self):
+        from slipstream.decoders import DecodeRandomResizeShortCropLong
+        jpeg = _create_test_jpeg(640, 480)
+        dec = DecodeRandomResizeShortCropLong(size=224, permute=True, num_threads=1)
+        result = dec(jpeg)
+        assert isinstance(result, np.ndarray)
+        assert result.shape == (3, 224, 224)
+        dec.shutdown()
+
+    def test_raw_bytearray(self):
+        from slipstream.decoders import DecodeRandomResizeShortCropLong
+        jpeg = _create_test_jpeg(640, 480)
+        dec = DecodeRandomResizeShortCropLong(size=224, num_threads=1)
+        result = dec(bytearray(jpeg))
+        assert result.shape == (224, 224, 3)
+        dec.shutdown()
+
+    def test_raw_memoryview(self):
+        from slipstream.decoders import DecodeRandomResizeShortCropLong
+        jpeg = _create_test_jpeg(640, 480)
+        dec = DecodeRandomResizeShortCropLong(size=224, num_threads=1)
+        result = dec(memoryview(jpeg))
+        assert result.shape == (224, 224, 3)
+        dec.shutdown()
+
+    def test_batch_dict_still_works(self):
+        """Batch dict input is unchanged."""
+        from slipstream.decoders import DecodeRandomResizeShortCropLong
+        jpeg = _create_test_jpeg(640, 480)
+        batch = _make_batch_data([(jpeg, 480, 640)])
+        dec = DecodeRandomResizeShortCropLong(size=224, num_threads=1)
+        result = dec(batch)
+        assert isinstance(result, np.ndarray)
+        assert result.shape == (1, 224, 224, 3)
+        dec.shutdown()
+
+
+class TestSingleDecodeMultiRandomResizeShortCropLong:
+    """DecodeMultiRandomResizeShortCropLong with raw image bytes."""
+
+    @pytest.fixture(autouse=True)
+    def check_decoder(self):
+        _skip_if_no_decoder()
+
+    def test_raw_bytes(self):
+        from slipstream.decoders import DecodeMultiRandomResizeShortCropLong
+        jpeg = _create_test_jpeg(640, 480)
+        dec = DecodeMultiRandomResizeShortCropLong(
+            crops={
+                "large": dict(size=224),
+                "small": dict(size=96),
+            },
+            num_threads=1,
+        )
+        result = dec(jpeg)
+        assert isinstance(result, dict)
+        assert set(result.keys()) == {"large", "small"}
+        assert result["large"].shape == (224, 224, 3)
+        assert result["small"].shape == (96, 96, 3)
+        assert result["large"].dtype == np.uint8
+        dec.shutdown()
+
+    def test_raw_bytes_to_tensor(self):
+        from slipstream.decoders import DecodeMultiRandomResizeShortCropLong
+        jpeg = _create_test_jpeg(640, 480)
+        dec = DecodeMultiRandomResizeShortCropLong(
+            crops={"view": dict(size=224)},
+            to_tensor=True,
+            num_threads=1,
+        )
+        result = dec(jpeg)
+        assert isinstance(result["view"], torch.Tensor)
+        assert result["view"].shape == (224, 224, 3)
+        dec.shutdown()
+
+    def test_raw_bytes_permute(self):
+        from slipstream.decoders import DecodeMultiRandomResizeShortCropLong
+        jpeg = _create_test_jpeg(640, 480)
+        dec = DecodeMultiRandomResizeShortCropLong(
+            crops={"view": dict(size=224)},
+            permute=True,
+            num_threads=1,
+        )
+        result = dec(jpeg)
+        assert result["view"].shape == (3, 224, 224)
+        dec.shutdown()
+
+    def test_batch_dict_still_works(self):
+        """Batch dict input is unchanged."""
+        from slipstream.decoders import DecodeMultiRandomResizeShortCropLong
+        jpeg = _create_test_jpeg(640, 480)
+        batch = _make_batch_data([(jpeg, 480, 640)])
+        dec = DecodeMultiRandomResizeShortCropLong(
+            crops={"view": dict(size=224)},
+            num_threads=1,
+        )
+        result = dec(batch)
+        assert isinstance(result, dict)
+        assert result["view"].shape == (1, 224, 224, 3)
+        dec.shutdown()

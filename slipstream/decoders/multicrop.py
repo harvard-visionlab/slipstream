@@ -390,7 +390,11 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
     def set_image_format(self, image_format: str) -> None:
         self._decoder = _swap_yuv420_if_needed(self._decoder, image_format)
 
-    def __call__(self, batch_data: dict[str, Any]) -> dict[str, torch.Tensor | np.ndarray]:
+    def __call__(self, batch_data: dict[str, Any] | bytes | bytearray | memoryview) -> dict[str, torch.Tensor | np.ndarray]:
+        if isinstance(batch_data, (bytes, bytearray, memoryview)):
+            from slipstream.decoders.base import _bytes_to_batch_dict, _unwrap_single_result
+            return _unwrap_single_result(self(_bytes_to_batch_dict(batch_data)))
+
         from slipstream.decoders.numba_decoder import (
             _compute_resize_short_crop_long_params,
         )
