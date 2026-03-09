@@ -365,6 +365,70 @@ class TestReplay:
             assert torch.equal(region2, view2[i])
 
 
+# ── circular fade ─────────────────────────────────────────────────────────
+
+class TestFadeRadius:
+    def test_fade_default_none(self):
+        t = RandomEmbed(canvas_size=128)
+        assert t.fade_radius is None
+
+    def test_fade_center_opaque(self):
+        """Pixels at image center (well inside inner) should equal the input."""
+        img = _make_batch(B=1, C=3, H=96, W=96, value=0.7)
+        t = RandomEmbed(canvas_size=224, x_range=0.5, y_range=0.5,
+                        fade_radius=(0.40, 0.50))
+        out = t(img)
+        # Center of canvas = center of image
+        cy, cx = 112, 112  # center of 224
+        assert torch.allclose(out[0, :, cy, cx], torch.tensor(0.7), atol=1e-6)
+
+    def test_fade_corner_transparent(self):
+        """Pixels at image corners (beyond outer radius) should equal background."""
+        img = _make_batch(B=1, C=3, H=96, W=96, value=0.7)
+        t = RandomEmbed(canvas_size=224, x_range=0.5, y_range=0.5,
+                        background="zeros", fade_radius=(0.40, 0.50))
+        out = t(img)
+        # Image placed at (64, 64). Corner of image at (64, 64) on canvas.
+        # Distance from image center = sqrt(48^2 + 48^2) ≈ 67.9
+        # outer = 0.50 * 96 = 48, so 67.9 >> 48 → fully transparent
+        # That pixel should be background (zeros)
+        assert torch.allclose(out[0, :, 64, 64], torch.tensor(0.0), atol=1e-4)
+
+    def test_fade_creates_blend(self):
+        """Pixels in the fade band differ from both pure image and background."""
+        bg_val = 0.3
+        img_val = 0.9
+        img = _make_batch(B=1, C=3, H=96, W=96, value=img_val)
+        t = RandomEmbed(canvas_size=224, x_range=0.5, y_range=0.5,
+                        background="mean", mean=bg_val,
+                        fade_radius=(0.30, 0.50))
+        out = t(img)
+        # Pick a pixel in the fade band: ~40 pixels from image center
+        # inner = 0.30 * 96 = 28.8, outer = 0.50 * 96 = 48
+        # 40 pixels from center is in the fade band
+        cy, cx = 112, 112  # canvas center = image center
+        pixel = out[0, 0, cy, cx + 40].item()
+        assert bg_val < pixel < img_val, f"Expected blend, got {pixel}"
+
+    def test_fade_validation_inner_ge_outer(self):
+        with pytest.raises(ValueError, match="inner < outer"):
+            RandomEmbed(canvas_size=128, fade_radius=(0.5, 0.3))
+
+    def test_fade_validation_equal(self):
+        with pytest.raises(ValueError, match="inner < outer"):
+            RandomEmbed(canvas_size=128, fade_radius=(0.5, 0.5))
+
+    def test_fade_repr(self):
+        t = RandomEmbed(canvas_size=224, fade_radius=(0.45, 0.50))
+        r = repr(t)
+        assert "fade_radius=(0.45, 0.5)" in r
+
+    def test_fade_repr_none_omitted(self):
+        t = RandomEmbed(canvas_size=224)
+        r = repr(t)
+        assert "fade_radius" not in r
+
+
 # ── edge cases ───────────────────────────────────────────────────────────
 
 class TestEdgeCases:

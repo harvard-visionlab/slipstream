@@ -64,6 +64,12 @@ class RandomEmbed(BatchAugment):
             channel (colorful backgrounds).  If ``False``, duplicate a
             single noise field across channels (grayscale backgrounds).
             Only affects ``"power_law"`` background.
+        fade_radius: Optional ``(inner, outer)`` tuple controlling circular
+            fade.  Both values are fractions of ``min(H, W)`` of the input
+            image.  Pixels within ``inner`` are fully opaque; pixels beyond
+            ``outer`` are fully transparent (showing only background); the
+            region between fades via a Gaussian falloff.  ``None`` (default)
+            disables the fade and uses a hard rectangular boundary.
         seed: Random seed for reproducible positions and noise.
         device: Device for the RNG (must match input tensor device when
             using a seed).
@@ -106,6 +112,7 @@ class RandomEmbed(BatchAugment):
         std=None,
         alpha_range=2.0,
         color_noise=True,
+        fade_radius=None,
         # Common ─────────────────────────────────────────────
         seed=None,
         device=None,
@@ -146,6 +153,14 @@ class RandomEmbed(BatchAugment):
         self.mean = mean
         self.std = std
         self.color_noise = color_noise
+        if fade_radius is not None:
+            fade_radius = tuple(fade_radius)
+            if len(fade_radius) != 2 or fade_radius[0] >= fade_radius[1]:
+                raise ValueError(
+                    "fade_radius must be (inner, outer) with inner < outer, "
+                    f"got {fade_radius}"
+                )
+        self.fade_radius = fade_radius
         self.alpha_range = (
             (alpha_range, alpha_range) if isinstance(alpha_range, (int, float))
             else tuple(alpha_range)
@@ -246,6 +261,7 @@ class RandomEmbed(BatchAugment):
 
         canvas = self._generate_background(B, C, M, N, b.device, b.dtype)
 
+        fade_mask = None  # lazily built on first use
         for i in range(B):
             x = self._xs[i].item()
             y = self._ys[i].item()
@@ -259,12 +275,47 @@ class RandomEmbed(BatchAugment):
             copy_h = min(h - src_y0, M - dst_y0)
 
             if copy_w > 0 and copy_h > 0:
-                canvas[i, :, dst_y0:dst_y0 + copy_h, dst_x0:dst_x0 + copy_w] = \
-                    b[i, :, src_y0:src_y0 + copy_h, src_x0:src_x0 + copy_w]
+                fg = b[i, :, src_y0:src_y0 + copy_h, src_x0:src_x0 + copy_w]
+                if self.fade_radius is not None:
+                    if fade_mask is None:
+                        fade_mask = self._make_fade_mask(h, w, b.device, b.dtype)
+                    m = fade_mask[:, :, src_y0:src_y0 + copy_h, src_x0:src_x0 + copy_w]
+                    bg = canvas[i, :, dst_y0:dst_y0 + copy_h, dst_x0:dst_x0 + copy_w]
+                    canvas[i, :, dst_y0:dst_y0 + copy_h, dst_x0:dst_x0 + copy_w] = \
+                        m * fg + (1 - m) * bg
+                else:
+                    canvas[i, :, dst_y0:dst_y0 + copy_h, dst_x0:dst_x0 + copy_w] = fg
 
         if expanded:
             canvas = canvas.squeeze(0)
         return canvas
+
+    # ------------------------------------------------------------------ #
+    #  Circular fade mask                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _make_fade_mask(self, h, w, device, dtype):
+        """Build a circular fade mask of shape (1, 1, h, w).
+
+        Pixels within ``r_inner`` are 1.0, beyond ``r_outer`` are 0.0,
+        and the transition uses a Gaussian falloff (3-sigma rule).
+        """
+        dim = min(h, w)
+        r_inner = self.fade_radius[0] * dim
+        r_outer = self.fade_radius[1] * dim
+
+        cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+        y = torch.arange(h, device=device, dtype=dtype) - cy
+        x = torch.arange(w, device=device, dtype=dtype) - cx
+        r = torch.sqrt(y[:, None] ** 2 + x[None, :] ** 2)
+
+        sigma = (r_outer - r_inner) / 3.0
+        t = (r - r_inner).clamp(min=0)
+        mask = torch.exp(-0.5 * (t / sigma) ** 2)
+        mask[r <= r_inner] = 1.0
+        mask[r >= r_outer] = 0.0
+
+        return mask.unsqueeze(0).unsqueeze(0)  # (1, 1, h, w)
 
     # ------------------------------------------------------------------ #
     #  Background generation                                               #
@@ -360,6 +411,8 @@ class RandomEmbed(BatchAugment):
             parts.append(f"alpha_range={self.alpha_range}")
             if not self.color_noise:
                 parts.append("color_noise=False")
+        if self.fade_radius is not None:
+            parts.append(f"fade_radius={self.fade_radius}")
         if self.std is not None:
             parts.append(f"std={self.std}")
 
