@@ -8,9 +8,9 @@ Low-level decoders:
 
 Fused decode+crop stages (for SlipstreamLoader pipelines):
 - DecodeOnly, DecodeYUVFullRes, DecodeYUVPlanes: pure decode
-- DecodeCenterCrop, DecodeRandomResizedCrop, DecodeDirectRandomResizedCrop, DecodeResizeCrop: decode → RGB + crop
+- DecodeCenterCrop, DecodeRandomResizedCrop, DecodeDirectRandomResizedCrop, DecodeResizeCrop, DecodeRandomResizeShortCropLong: decode → RGB + crop
 - DecodeYUVCenterCrop, DecodeYUVRandomResizedCrop, DecodeYUVResizeCrop: decode → YUV + crop (keeps colorspace)
-- DecodeMultiRandomResizedCrop, DecodeUniformMultiRandomResizedCrop, MultiCropPipeline: multi-crop
+- DecodeMultiRandomResizedCrop, DecodeMultiRandomResizeShortCropLong, DecodeUniformMultiRandomResizedCrop, MultiCropPipeline: multi-crop
 
 Usage:
     from slipstream.decoders import CPUDecoder, GPUDecoder, get_decoder
@@ -60,21 +60,25 @@ from slipstream.decoders.crop import (
     DecodeCenterCrop,
     DecodeDirectRandomResizedCrop,
     DecodeRandomResizedCrop,
+    DecodeRandomResizeShortCropLong,
     DecodeResizeCrop,
     # Backward-compatible aliases
     CenterCrop,
     DirectRandomResizedCrop,
     RandomResizedCrop,
+    RandomResizeShortCropLong,
     ResizeCrop,
 )
 from slipstream.decoders.multicrop import (
     DecodeMultiRandomResizedCrop,
+    DecodeMultiRandomResizeShortCropLong,
     DecodeUniformMultiRandomResizedCrop,
     MultiCropPipeline,
     NamedCopies,
     # Backward-compatible aliases
     MultiCropRandomResizedCrop,
     MultiRandomResizedCrop,
+    MultiRandomResizeShortCropLong,
 )
 from slipstream.decoders.utils import estimate_rejection_fallback_rate
 
@@ -110,8 +114,10 @@ __all__ = [
     "DecodeRandomResizedCrop",
     "DecodeDirectRandomResizedCrop",
     "DecodeResizeCrop",
+    "DecodeRandomResizeShortCropLong",
     # Multi-crop stages (new names)
     "DecodeMultiRandomResizedCrop",
+    "DecodeMultiRandomResizeShortCropLong",
     "DecodeUniformMultiRandomResizedCrop",
     "MultiCropPipeline",
     "NamedCopies",
@@ -120,8 +126,10 @@ __all__ = [
     "RandomResizedCrop",
     "DirectRandomResizedCrop",
     "ResizeCrop",
+    "RandomResizeShortCropLong",
     "MultiCropRandomResizedCrop",
     "MultiRandomResizedCrop",
+    "MultiRandomResizeShortCropLong",
     # Utilities
     "estimate_rejection_fallback_rate",
 ]

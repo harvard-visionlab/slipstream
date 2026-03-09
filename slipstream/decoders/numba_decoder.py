@@ -777,6 +777,80 @@ def _generate_center_crop_params_batch(
     return params
 
 
+def _compute_resize_short_crop_long_params(
+    heights: NDArray,
+    widths: NDArray,
+    target_sizes: NDArray[np.int32],
+    x_pos: NDArray[np.float64],
+    y_pos: NDArray[np.float64],
+) -> NDArray[np.int32]:
+    """Compute crop params for resize-short-edge + crop-long-edge.
+
+    For each image: resize so shortest edge = target_size (preserving aspect
+    ratio), then crop the long edge to target_size at the position given by
+    x_pos/y_pos, producing a square output.
+
+    Args:
+        heights: [B] image heights (any uint/int dtype).
+        widths: [B] image widths (any uint/int dtype).
+        target_sizes: [B] int32 per-image target sizes.
+        x_pos: [B] float64 horizontal crop position in [0, 1].
+            0 = left edge, 0.5 = center, 1.0 = right edge.
+        y_pos: [B] float64 vertical crop position in [0, 1].
+            0 = top edge, 0.5 = center, 1.0 = bottom edge.
+
+    Returns:
+        [B, 4] int32: (crop_x, crop_y, crop_w, crop_h) in original image coords.
+    """
+    batch_size = len(heights)
+    crop_params = np.zeros((batch_size, 4), dtype=np.int32)
+
+    for i in range(batch_size):
+        h = int(heights[i])
+        w = int(widths[i])
+        target_size = int(target_sizes[i])
+
+        # Resize so shortest edge = target_size
+        if h < w:
+            # Landscape: short edge is height
+            scale = target_size / h
+            new_h = target_size
+            new_w = int(w * scale + 0.5)
+        else:
+            # Portrait or square: short edge is width
+            scale = target_size / w
+            new_w = target_size
+            new_h = int(h * scale + 0.5)
+
+        # Slack: how many pixels the crop can slide along each axis
+        slack_x = max(0, new_w - target_size)
+        slack_y = max(0, new_h - target_size)
+
+        # Crop start in resized-image coordinates (truncate, not round,
+        # to match integer division used in decode_batch_resize_crop)
+        start_x_resized = int(x_pos[i] * slack_x)
+        start_y_resized = int(y_pos[i] * slack_y)
+
+        # Map crop region back to original image coordinates
+        crop_x = int(start_x_resized / scale + 0.5)
+        crop_y = int(start_y_resized / scale + 0.5)
+        crop_w_orig = int(target_size / scale + 0.5)
+        crop_h_orig = int(target_size / scale + 0.5)
+
+        # Clamp to image bounds
+        crop_x = max(0, min(crop_x, w - 1))
+        crop_y = max(0, min(crop_y, h - 1))
+        crop_w_orig = max(1, min(crop_w_orig, w - crop_x))
+        crop_h_orig = max(1, min(crop_h_orig, h - crop_y))
+
+        crop_params[i, 0] = crop_x
+        crop_params[i, 1] = crop_y
+        crop_params[i, 2] = crop_w_orig
+        crop_params[i, 3] = crop_h_orig
+
+    return crop_params
+
+
 # =============================================================================
 # Main decoder class
 # =============================================================================
@@ -1081,6 +1155,86 @@ class NumbaBatchDecoder:
         )
 
         return dest_buffer[:batch_size]
+
+    def decode_batch_resize_short_crop_long(
+        self,
+        data: NDArray[np.uint8],
+        sizes: NDArray,
+        heights: NDArray,
+        widths: NDArray,
+        target_sizes: NDArray[np.int32],
+        x_pos: NDArray[np.float64] | None = None,
+        y_pos: NDArray[np.float64] | None = None,
+    ) -> NDArray[np.uint8] | list[NDArray[np.uint8]]:
+        """Decode batch with resize shortest edge + crop long edge.
+
+        Resize so shortest edge = target_size, then crop the long edge at
+        position (x_pos, y_pos) to produce a square output.
+
+        Args:
+            data: Padded JPEG data [B, max_size] uint8
+            sizes: Actual JPEG sizes [B]
+            heights: Image heights [B]
+            widths: Image widths [B]
+            target_sizes: [B] int32 per-image target sizes. If all equal,
+                returns a stacked array; if varying, returns a list.
+            x_pos: [B] float64 horizontal crop position [0,1]. None = 0.5.
+            y_pos: [B] float64 vertical crop position [0,1]. None = 0.5.
+
+        Returns:
+            If all target_sizes equal: [B, size, size, 3] uint8 array.
+            If target_sizes vary: list of [size_i, size_i, 3] uint8 arrays.
+        """
+        batch_size = len(sizes)
+        max_h = int(np.max(heights))
+        max_w = int(np.max(widths))
+
+        # Default to center crop
+        if x_pos is None:
+            x_pos = np.full(batch_size, 0.5, dtype=np.float64)
+        if y_pos is None:
+            y_pos = np.full(batch_size, 0.5, dtype=np.float64)
+
+        # Ensure dtypes
+        sizes_u64 = sizes if sizes.dtype == np.uint64 else np.ascontiguousarray(sizes, dtype=np.uint64)
+        heights_u32 = heights if heights.dtype == np.uint32 else np.ascontiguousarray(heights, dtype=np.uint32)
+        widths_u32 = widths if widths.dtype == np.uint32 else np.ascontiguousarray(widths, dtype=np.uint32)
+
+        # Compute crop params
+        crop_params = _compute_resize_short_crop_long_params(
+            heights, widths, target_sizes, x_pos, y_pos,
+        )
+
+        all_same_size = int(np.min(target_sizes)) == int(np.max(target_sizes))
+
+        if all_same_size:
+            # Fast path: all images same target size → stacked output
+            target_size = int(target_sizes[0])
+            temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
+            dest_buffer = self._ensure_dest_buffer(batch_size, target_size, target_size)
+
+            self._decode_crop_fn(
+                data, sizes_u64, heights_u32, widths_u32,
+                crop_params, temp_buffer, dest_buffer,
+                target_size, target_size,
+            )
+            return dest_buffer[:batch_size]
+        else:
+            # Variable sizes: decode each image individually
+            temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
+            results = []
+            for i in range(batch_size):
+                ts = int(target_sizes[i])
+                single_dest = np.zeros((1, ts, ts, 3), dtype=np.uint8)
+                single_crop = crop_params[i:i+1]
+                self._decode_crop_fn(
+                    data[i:i+1], sizes_u64[i:i+1],
+                    heights_u32[i:i+1], widths_u32[i:i+1],
+                    single_crop, temp_buffer[:1, :max_h, :max_w, :],
+                    single_dest, ts, ts,
+                )
+                results.append(single_dest[0])
+            return results
 
     def decode_batch_random_crop(
         self,

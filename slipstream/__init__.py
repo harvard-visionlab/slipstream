@@ -61,7 +61,9 @@ from slipstream.decoders import (
     DecodeRandomResizedCrop,
     DecodeDirectRandomResizedCrop,
     DecodeResizeCrop,
+    DecodeRandomResizeShortCropLong,
     DecodeMultiRandomResizedCrop,
+    DecodeMultiRandomResizeShortCropLong,
     DecodeUniformMultiRandomResizedCrop,
     MultiCropPipeline,
     NamedCopies,
@@ -71,8 +73,10 @@ from slipstream.decoders import (
     RandomResizedCrop,
     DirectRandomResizedCrop,
     ResizeCrop,
+    RandomResizeShortCropLong,
     MultiCropRandomResizedCrop,
     MultiRandomResizedCrop,
+    MultiRandomResizeShortCropLong,
 )
 
 # Transforms (GPU batch augmentations + pipeline-level transforms)
@@ -143,7 +147,9 @@ __all__ = [
     "DecodeRandomResizedCrop",
     "DecodeDirectRandomResizedCrop",
     "DecodeResizeCrop",
+    "DecodeRandomResizeShortCropLong",
     "DecodeMultiRandomResizedCrop",
+    "DecodeMultiRandomResizeShortCropLong",
     "DecodeUniformMultiRandomResizedCrop",
     "MultiCropPipeline",
     "NamedCopies",
@@ -153,8 +159,10 @@ __all__ = [
     "RandomResizedCrop",
     "DirectRandomResizedCrop",
     "ResizeCrop",
+    "RandomResizeShortCropLong",
     "MultiCropRandomResizedCrop",
     "MultiRandomResizedCrop",
+    "MultiRandomResizeShortCropLong",
     # Transforms
     "Compose",
     "Normalize",

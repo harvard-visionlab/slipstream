@@ -291,6 +291,199 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
         return f"DecodeMultiRandomResizedCrop({{{', '.join(crop_strs)}}}{mode}{extra})"
 
 
+class DecodeMultiRandomResizeShortCropLong(BatchTransform):
+    """Decode-once + N named resize-short-crop-long views.
+
+    Each crop resizes the short edge to its target size (preserving aspect
+    ratio) and crops the long edge, with controllable crop position. Decodes
+    each JPEG once, then applies all crops from the same decoded image.
+
+    Args:
+        crops: Dict mapping crop names to parameter dicts.
+            Required key: ``size`` (int).
+            Optional keys: ``x_range`` (float or tuple), ``y_range``
+            (float or tuple), ``seed`` (int).
+        num_threads: Parallel decode threads. 0 = auto.
+        to_tensor: If True, return torch.Tensor; if False, return numpy array.
+        permute: If True, permute HWC->CHW. If False, keep HWC layout.
+
+    Returns:
+        Dict[str, np.ndarray] or Dict[str, torch.Tensor] — named crops,
+        each [B, size, size, 3] uint8 (HWC, default) or [B, 3, size, size] (CHW).
+
+    Note:
+        Default output (numpy HWC) is optimal for GPU pipelines when followed
+        by ToTorchImage, which transfers contiguous HWC to GPU then permutes.
+
+    Yoked crops:
+        Crops with the **same seed** share the same random number sequence,
+        producing crops at the same position. Combined with different sizes,
+        this gives a multi-scale view of the same region::
+
+            DecodeMultiRandomResizeShortCropLong({
+                "large": dict(size=224, x_range=(0, 1), seed=42),
+                "small": dict(size=96, x_range=(0, 1), seed=42),
+            })
+
+    Example::
+
+        multi = DecodeMultiRandomResizeShortCropLong({
+            "view_224": dict(size=224, x_range=(0.0, 1.0), y_range=(0.0, 1.0), seed=42),
+            "view_448": dict(size=448, x_range=0.5, y_range=0.5),
+        })
+        named = multi(batch_data)  # {"view_224": array, "view_448": array}
+    """
+
+    def __init__(
+        self,
+        crops: dict[str, dict],
+        num_threads: int = 0,
+        to_tensor: bool = False,
+        permute: bool = False,
+    ) -> None:
+        self.num_threads = num_threads
+        self.to_tensor = to_tensor
+        self.permute = permute
+        self._decoder = NumbaBatchDecoder(num_threads=num_threads)
+        self._last_params: dict = {}
+
+        self._crop_names: list[str] = []
+        self._crop_sizes: list[int] = []
+        self._crop_x_ranges: list[tuple[float, float]] = []
+        self._crop_y_ranges: list[tuple[float, float]] = []
+        self._crop_seeds: list[int | None] = []
+
+        for name, params in crops.items():
+            if 'size' not in params:
+                raise ValueError(f"Crop '{name}' must specify 'size'")
+            self._crop_names.append(name)
+            self._crop_sizes.append(params['size'])
+            xr = params.get('x_range', (0.5, 0.5))
+            yr = params.get('y_range', (0.5, 0.5))
+            self._crop_x_ranges.append(
+                (xr, xr) if isinstance(xr, (int, float)) else tuple(xr)
+            )
+            self._crop_y_ranges.append(
+                (yr, yr) if isinstance(yr, (int, float)) else tuple(yr)
+            )
+            self._crop_seeds.append(params.get('seed', None))
+
+    def set_image_format(self, image_format: str) -> None:
+        self._decoder = _swap_yuv420_if_needed(self._decoder, image_format)
+
+    def __call__(self, batch_data: dict[str, Any]) -> dict[str, torch.Tensor | np.ndarray]:
+        from slipstream.decoders.numba_decoder import (
+            _compute_resize_short_crop_long_params,
+        )
+
+        data = batch_data['data']
+        sizes = batch_data['sizes']
+        heights = batch_data['heights']
+        widths = batch_data['widths']
+        batch_size = len(sizes)
+        num_crops = len(self._crop_names)
+
+        self._decoder._seed_counter += 1
+        batch_offset = self._decoder._seed_counter
+
+        # Generate crop_params for each named crop
+        crop_params_list = []
+        x_pos_list = []
+        y_pos_list = []
+        for c in range(num_crops):
+            target_size = self._crop_sizes[c]
+            x_range = self._crop_x_ranges[c]
+            y_range = self._crop_y_ranges[c]
+            seed = self._crop_seeds[c]
+
+            # Compute per-image seed (same formula as DecodeMultiRandomResizedCrop)
+            if seed is not None:
+                batch_seed = (seed + batch_size * batch_offset) % 2147483647
+            else:
+                batch_seed = (batch_size * (batch_offset * num_crops + c)) % 2147483647
+
+            x_pos = np.empty(batch_size, dtype=np.float64)
+            y_pos = np.empty(batch_size, dtype=np.float64)
+            for i in range(batch_size):
+                rng_i = np.random.RandomState((batch_seed + i) % 2147483647)
+                x_pos[i] = rng_i.uniform(x_range[0], x_range[1])
+                y_pos[i] = rng_i.uniform(y_range[0], y_range[1])
+
+            target_sizes_arr = np.full(batch_size, target_size, dtype=np.int32)
+            params = _compute_resize_short_crop_long_params(
+                heights, widths, target_sizes_arr, x_pos, y_pos,
+            )
+            crop_params_list.append(params)
+            x_pos_list.append(x_pos)
+            y_pos_list.append(y_pos)
+
+        # Store last_params for inspection
+        self._last_params = {
+            "heights": np.asarray(heights, dtype=np.int32),
+            "widths": np.asarray(widths, dtype=np.int32),
+            "crops": {
+                name: {
+                    "target_size": self._crop_sizes[c],
+                    "x_pos": x_pos_list[c],
+                    "y_pos": y_pos_list[c],
+                    "crop_params": crop_params_list[c],
+                }
+                for c, name in enumerate(self._crop_names)
+            },
+        }
+
+        # Use existing multi-crop-varied infrastructure (decode once)
+        all_same_size = len(set(self._crop_sizes)) == 1
+
+        crops_hwc = self._decoder.decode_batch_multi_crop_varied(
+            data, sizes, heights, widths,
+            crop_params_list=crop_params_list,
+            target_sizes=self._crop_sizes,
+        )
+
+        if self.permute:
+            if all_same_size:
+                crops_out = self._decoder.multi_hwc_to_chw(crops_hwc)
+            else:
+                crops_out = self._decoder.multi_hwc_to_chw_varied(crops_hwc)
+        else:
+            crops_out = crops_hwc
+
+        result = {}
+        for c, name in enumerate(self._crop_names):
+            if self.to_tensor:
+                result[name] = torch.from_numpy(crops_out[c])
+            else:
+                result[name] = crops_out[c]
+        return result
+
+    @property
+    def last_params(self) -> dict:
+        """Parameters from the most recent ``__call__``."""
+        return self._last_params
+
+    def shutdown(self) -> None:
+        self._decoder.shutdown()
+
+    def __repr__(self) -> str:
+        crop_strs = []
+        for c, name in enumerate(self._crop_names):
+            parts = [f"size={self._crop_sizes[c]}"]
+            if self._crop_x_ranges[c] != (0.5, 0.5):
+                parts.append(f"x_range={self._crop_x_ranges[c]}")
+            if self._crop_y_ranges[c] != (0.5, 0.5):
+                parts.append(f"y_range={self._crop_y_ranges[c]}")
+            if self._crop_seeds[c] is not None:
+                parts.append(f"seed={self._crop_seeds[c]}")
+            crop_strs.append(f"'{name}': {', '.join(parts)}")
+        extra = ""
+        if not self.to_tensor:
+            extra += ", to_tensor=False"
+        if not self.permute:
+            extra += ", permute=False"
+        return f"DecodeMultiRandomResizeShortCropLong({{{', '.join(crop_strs)}}}{extra})"
+
+
 class MultiCropPipeline(BatchTransform):
     """Apply per-crop transform pipelines to a dict of named values.
 
@@ -396,3 +589,4 @@ class NamedCopies(BatchTransform):
 # Backward-compatible aliases (deprecated)
 MultiCropRandomResizedCrop = DecodeUniformMultiRandomResizedCrop
 MultiRandomResizedCrop = DecodeMultiRandomResizedCrop
+MultiRandomResizeShortCropLong = DecodeMultiRandomResizeShortCropLong

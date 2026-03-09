@@ -308,8 +308,209 @@ class DecodeResizeCrop(BatchTransform):
         return f"DecodeResizeCrop(resize={self.resize_size}, crop={self.crop_size}{extra})"
 
 
+class DecodeRandomResizeShortCropLong(BatchTransform):
+    """Decode JPEG batch: resize short edge, crop long edge to square.
+
+    Resize the shortest edge of each image to ``size`` (preserving aspect
+    ratio), then crop the longest edge to ``size``, producing a square output.
+    Crop position is controllable via ``x_range`` (horizontal) and ``y_range``
+    (vertical).
+
+    Args:
+        size: Output size. If int, fixed. If tuple ``(min, max)``, a size is
+            sampled uniformly from the inclusive range. See ``size_mode``.
+        size_mode: ``"per_batch"`` samples one size shared by all images in
+            the batch (output is a stacked array). ``"per_image"`` samples
+            independently per image (output is a list of arrays). Ignored
+            when ``size`` is a fixed int.
+        x_range: Horizontal crop position in [0, 1]. Float or ``(min, max)``
+            tuple for uniform random sampling. 0 = left, 0.5 = center,
+            1 = right. Only active when image is wider than tall after resize.
+        y_range: Vertical crop position in [0, 1]. Float or ``(min, max)``
+            tuple. 0 = top, 0.5 = center, 1 = bottom. Only active when image
+            is taller than wide after resize.
+        num_threads: Parallel decode threads. 0 = auto.
+        seed: Seed for reproducible crop positions and size sampling.
+            None = non-reproducible.
+        to_tensor: If True, return torch.Tensor; if False, return numpy array.
+        permute: If True, permute HWC->CHW. If False, keep HWC layout.
+
+    Returns:
+        Fixed size or per_batch mode:
+            numpy [B, size, size, 3] uint8 (HWC) or torch.Tensor.
+        Per_image mode:
+            list of numpy [size_i, size_i, 3] uint8 or torch.Tensor.
+
+    Note:
+        Default output (numpy HWC) is optimal for GPU pipelines when followed
+        by ToTorchImage, which transfers contiguous HWC to GPU then permutes.
+
+    Example::
+
+        # Center crop (default) — equivalent to DecodeResizeCrop(224, 224)
+        dec = DecodeRandomResizeShortCropLong(size=224)
+
+        # Random horizontal jitter for landscape images
+        dec = DecodeRandomResizeShortCropLong(size=224, x_range=(0.0, 1.0))
+
+        # Random size per batch
+        dec = DecodeRandomResizeShortCropLong(size=(192, 256), seed=42)
+
+        # Random size per image (returns list)
+        dec = DecodeRandomResizeShortCropLong(
+            size=(96, 224), size_mode="per_image", seed=42
+        )
+    """
+
+    def __init__(
+        self,
+        size: int | tuple[int, int] = 224,
+        size_mode: str = "per_batch",
+        x_range: float | tuple[float, float] = (0.5, 0.5),
+        y_range: float | tuple[float, float] = (0.5, 0.5),
+        num_threads: int = 0,
+        seed: int | None = None,
+        to_tensor: bool = False,
+        permute: bool = False,
+    ) -> None:
+        if size_mode not in ("per_batch", "per_image"):
+            raise ValueError(f"size_mode must be 'per_batch' or 'per_image', got '{size_mode}'")
+        if isinstance(size, int):
+            self.size_range = (size, size)
+        else:
+            self.size_range = tuple(size)
+        self.size_mode = size_mode
+        self.x_range = (x_range, x_range) if isinstance(x_range, (int, float)) else tuple(x_range)
+        self.y_range = (y_range, y_range) if isinstance(y_range, (int, float)) else tuple(y_range)
+        self.seed = seed
+        self.to_tensor = to_tensor
+        self.permute = permute
+        self._decoder = NumbaBatchDecoder(num_threads=num_threads)
+        self._last_params: dict = {}
+
+    def set_image_format(self, image_format: str) -> None:
+        self._decoder = _swap_yuv420_if_needed(self._decoder, image_format)
+
+    def __call__(self, batch_data: dict[str, Any]) -> torch.Tensor | np.ndarray | list:
+        from slipstream.decoders.numba_decoder import (
+            _compute_resize_short_crop_long_params,
+        )
+
+        batch_size = len(batch_data['sizes'])
+
+        self._decoder._seed_counter += 1
+        batch_offset = self._decoder._seed_counter
+
+        # --- Sample target sizes ---
+        if self.size_range[0] == self.size_range[1]:
+            # Fixed size
+            target_sizes = np.full(batch_size, self.size_range[0], dtype=np.int32)
+        elif self.size_mode == "per_batch":
+            # One random size for the whole batch
+            if self.seed is not None:
+                rng = np.random.RandomState(
+                    (self.seed + batch_offset) % 2147483647
+                )
+            else:
+                rng = np.random.RandomState(
+                    (batch_offset * 7919) % 2147483647
+                )
+            s = int(rng.randint(self.size_range[0], self.size_range[1] + 1))
+            target_sizes = np.full(batch_size, s, dtype=np.int32)
+        else:
+            # Per-image random sizes
+            target_sizes = np.empty(batch_size, dtype=np.int32)
+            for i in range(batch_size):
+                if self.seed is not None:
+                    rng_i = np.random.RandomState(
+                        (self.seed + batch_size * batch_offset + i) % 2147483647
+                    )
+                else:
+                    rng_i = np.random.RandomState(
+                        (batch_size * batch_offset + i) % 2147483647
+                    )
+                target_sizes[i] = int(rng_i.randint(self.size_range[0], self.size_range[1] + 1))
+
+        # --- Sample crop positions [B] ---
+        if self.seed is not None:
+            batch_seed = (self.seed + batch_size * batch_offset) % 2147483647
+        else:
+            batch_seed = (batch_size * batch_offset) % 2147483647
+
+        x_pos = np.empty(batch_size, dtype=np.float64)
+        y_pos = np.empty(batch_size, dtype=np.float64)
+        for i in range(batch_size):
+            rng_i = np.random.RandomState((batch_seed + i) % 2147483647)
+            x_pos[i] = rng_i.uniform(self.x_range[0], self.x_range[1])
+            y_pos[i] = rng_i.uniform(self.y_range[0], self.y_range[1])
+
+        # --- Decode ---
+        result = self._decoder.decode_batch_resize_short_crop_long(
+            batch_data['data'], batch_data['sizes'],
+            batch_data['heights'], batch_data['widths'],
+            target_sizes=target_sizes,
+            x_pos=x_pos,
+            y_pos=y_pos,
+        )
+
+        # --- Store last_params for inspection ---
+        crop_params = _compute_resize_short_crop_long_params(
+            batch_data['heights'], batch_data['widths'],
+            target_sizes, x_pos, y_pos,
+        )
+        self._last_params = {
+            "target_sizes": target_sizes,
+            "x_pos": x_pos,
+            "y_pos": y_pos,
+            "heights": np.asarray(batch_data['heights'], dtype=np.int32),
+            "widths": np.asarray(batch_data['widths'], dtype=np.int32),
+            "crop_params": crop_params,
+        }
+
+        # --- Post-process ---
+        if isinstance(result, list):
+            # Per-image variable sizes
+            if self.permute:
+                result = [np.ascontiguousarray(r.transpose(2, 0, 1)) for r in result]
+            if self.to_tensor:
+                result = [torch.from_numpy(r) for r in result]
+            return result
+        else:
+            if self.permute:
+                result = self._decoder.hwc_to_chw(result)
+            if self.to_tensor:
+                return torch.from_numpy(result)
+            return result
+
+    @property
+    def last_params(self) -> dict:
+        """Parameters from the most recent ``__call__``."""
+        return self._last_params
+
+    def shutdown(self) -> None:
+        self._decoder.shutdown()
+
+    def __repr__(self) -> str:
+        extra = ""
+        if self.size_range[0] != self.size_range[1]:
+            extra += f", size_mode='{self.size_mode}'"
+        if self.x_range != (0.5, 0.5):
+            extra += f", x_range={self.x_range}"
+        if self.y_range != (0.5, 0.5):
+            extra += f", y_range={self.y_range}"
+        if self.seed is not None:
+            extra += f", seed={self.seed}"
+        if not self.to_tensor:
+            extra += ", to_tensor=False"
+        if not self.permute:
+            extra += ", permute=False"
+        size_str = self.size_range[0] if self.size_range[0] == self.size_range[1] else self.size_range
+        return f"DecodeRandomResizeShortCropLong(size={size_str}{extra})"
+
+
 # Backward-compatible aliases (deprecated)
 CenterCrop = DecodeCenterCrop
 RandomResizedCrop = DecodeRandomResizedCrop
 DirectRandomResizedCrop = DecodeDirectRandomResizedCrop
 ResizeCrop = DecodeResizeCrop
+RandomResizeShortCropLong = DecodeRandomResizeShortCropLong
