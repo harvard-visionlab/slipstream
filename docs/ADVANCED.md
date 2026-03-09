@@ -196,6 +196,85 @@ Works with any single-output decoder (`DecodeCenterCrop`, `DecodeResizeCrop`,
 Use `DecodeMultiRandomResizedCrop` instead when you need different
 *random crops* per view (e.g., global/local crops for DINO).
 
+## Resize-Short-Crop-Long Decoder
+
+`DecodeRandomResizeShortCropLong` resizes the short edge and crops the long
+edge — preserving aspect ratio while producing a square output. Useful when
+you want less spatial distortion than `DecodeRandomResizedCrop`.
+
+```python
+from slipstream import SlipstreamLoader, DecodeRandomResizeShortCropLong
+
+# Fixed 96px output, random crop position
+loader = SlipstreamLoader(
+    dataset,
+    batch_size=256,
+    pipelines={'image': [
+        DecodeRandomResizeShortCropLong(
+            size=96,
+            x_range=(0, 1), y_range=(0, 1),  # random crop along long edge
+            seed=42,
+        ),
+    ]},
+)
+
+# Variable-size output (multi-scale training)
+loader = SlipstreamLoader(
+    dataset,
+    batch_size=256,
+    pipelines={'image': [
+        DecodeRandomResizeShortCropLong(
+            size=(64, 160),       # sample size uniformly from [64, 160]
+            size_mode="per_batch", # all images in batch share same size
+        ),
+    ]},
+)
+```
+
+## RandomEmbed (Canvas Embedding)
+
+Embed smaller images onto a larger canvas with configurable backgrounds and
+optional circular fade. Pairs naturally with the resize-short-crop decoder
+for scale-jitter experiments.
+
+```python
+from slipstream import RandomEmbed
+
+# Basic: center-embed on black canvas
+embed = RandomEmbed(canvas_size=224)
+
+# Random position with power-law noise background
+embed = RandomEmbed(
+    canvas_size=224,
+    x_range=(0, 1), y_range=(0, 1),
+    background="power_law", alpha_range=1.5,
+    seed=42,
+)
+
+# Circular fade so the image blends into the background
+embed = RandomEmbed(
+    canvas_size=224,
+    background="power_law", alpha_range=1.5,
+    fade_radius=(0.35, 0.50),  # (inner, outer) as fraction of min(H, W)
+    seed=42,
+)
+
+# For normalised images, pass mean/std so background matches
+from slipstream import IMAGENET_MEAN, IMAGENET_STD
+embed = RandomEmbed(
+    canvas_size=224,
+    background="power_law",
+    mean=IMAGENET_MEAN, std=IMAGENET_STD,
+)
+```
+
+Backgrounds: `"zeros"` (black), `"mean"` (constant fill), `"power_law"` (1/f^α noise).
+`color_noise=True` (default) generates independent noise per channel;
+`color_noise=False` produces grayscale noise.
+
+Supports SSL replay — `embed(view1)` then `embed.apply_last(view2)` places
+both views at the same position.
+
 ## Custom Pipelines
 
 Build your own decode/transform pipelines:
