@@ -24,6 +24,9 @@ from .color_jitter import ColorJitter, RandomColorJitter, RandomColorJitterHSV, 
 # Geometric
 from .geometric import RandomHorizontalFlip, RandomRotate, RandomZoom, RandomRotateObject
 
+# Embed
+from .embed import RandomEmbed
+
 # Effects
 from .effects import (
     RandomGaussianBlur,
@@ -72,6 +75,8 @@ __all__ = [
     "RandomRotate",
     "RandomZoom",
     "RandomRotateObject",
+    # Embed
+    "RandomEmbed",
     # Effects
     "RandomGaussianBlur",
     "RandomSolarization",

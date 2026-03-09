@@ -85,6 +85,7 @@ from slipstream.transforms import (
     IMAGENET_MEAN,
     IMAGENET_STD,
     Normalize,
+    RandomEmbed,
     ToDevice,
     ToTorchImage,
 )
@@ -166,6 +167,7 @@ __all__ = [
     # Transforms
     "Compose",
     "Normalize",
+    "RandomEmbed",
     "ToDevice",
     "ToTorchImage",
     "IMAGENET_MEAN",
