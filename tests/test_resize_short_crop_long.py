@@ -556,7 +556,7 @@ class TestDecodeMultiRandomResizeShortCropLong:
         assert set(p["crops"].keys()) == {"large", "small"}
         for name, expected_size in [("large", 224), ("small", 128)]:
             cp = p["crops"][name]
-            assert cp["target_size"] == expected_size
+            assert np.all(cp["target_sizes"] == expected_size)
             assert cp["x_pos"].shape == (B,)
             assert cp["y_pos"].shape == (B,)
             assert cp["crop_params"].shape == (B, 4)

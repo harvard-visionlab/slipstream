@@ -300,7 +300,8 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
 
     Args:
         crops: Dict mapping crop names to parameter dicts.
-            Required key: ``size`` (int).
+            Required key: ``size`` (int or tuple ``(min, max)`` for random
+            per-image sampling).
             Optional keys: ``x_range`` (float or tuple), ``y_range``
             (float or tuple), ``seed`` (int).
         num_threads: Parallel decode threads. 0 = auto.
@@ -348,7 +349,7 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
         self._last_params: dict = {}
 
         self._crop_names: list[str] = []
-        self._crop_sizes: list[int] = []
+        self._crop_size_ranges: list[tuple[int, int]] = []
         self._crop_x_ranges: list[tuple[float, float]] = []
         self._crop_y_ranges: list[tuple[float, float]] = []
         self._crop_seeds: list[int | None] = []
@@ -357,7 +358,8 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
             if 'size' not in params:
                 raise ValueError(f"Crop '{name}' must specify 'size'")
             self._crop_names.append(name)
-            self._crop_sizes.append(params['size'])
+            s = params['size']
+            self._crop_size_ranges.append((s, s) if isinstance(s, int) else tuple(s))
             xr = params.get('x_range', (0.5, 0.5))
             yr = params.get('y_range', (0.5, 0.5))
             self._crop_x_ranges.append(
@@ -390,8 +392,9 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
         crop_params_list = []
         x_pos_list = []
         y_pos_list = []
+        target_sizes_list = []
         for c in range(num_crops):
-            target_size = self._crop_sizes[c]
+            size_range = self._crop_size_ranges[c]
             x_range = self._crop_x_ranges[c]
             y_range = self._crop_y_ranges[c]
             seed = self._crop_seeds[c]
@@ -409,13 +412,26 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                 x_pos[i] = rng_i.uniform(x_range[0], x_range[1])
                 y_pos[i] = rng_i.uniform(y_range[0], y_range[1])
 
-            target_sizes_arr = np.full(batch_size, target_size, dtype=np.int32)
+            # Sample target sizes (per-image when range is given)
+            if size_range[0] == size_range[1]:
+                target_sizes_arr = np.full(batch_size, size_range[0], dtype=np.int32)
+            else:
+                target_sizes_arr = np.empty(batch_size, dtype=np.int32)
+                for i in range(batch_size):
+                    rng_i = np.random.RandomState(
+                        (batch_seed + batch_size + i) % 2147483647
+                    )
+                    target_sizes_arr[i] = int(
+                        rng_i.randint(size_range[0], size_range[1] + 1)
+                    )
+
             params = _compute_resize_short_crop_long_params(
                 heights, widths, target_sizes_arr, x_pos, y_pos,
             )
             crop_params_list.append(params)
             x_pos_list.append(x_pos)
             y_pos_list.append(y_pos)
+            target_sizes_list.append(target_sizes_arr)
 
         # Store last_params for inspection
         self._last_params = {
@@ -423,7 +439,7 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
             "widths": np.asarray(widths, dtype=np.int32),
             "crops": {
                 name: {
-                    "target_size": self._crop_sizes[c],
+                    "target_sizes": target_sizes_list[c],
                     "x_pos": x_pos_list[c],
                     "y_pos": y_pos_list[c],
                     "crop_params": crop_params_list[c],
@@ -432,29 +448,88 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
             },
         }
 
-        # Use existing multi-crop-varied infrastructure (decode once)
-        all_same_size = len(set(self._crop_sizes)) == 1
-
-        crops_hwc = self._decoder.decode_batch_multi_crop_varied(
-            data, sizes, heights, widths,
-            crop_params_list=crop_params_list,
-            target_sizes=self._crop_sizes,
+        # Check if any crop has variable per-image sizes
+        has_variable_sizes = any(
+            sr[0] != sr[1] for sr in self._crop_size_ranges
         )
 
-        if self.permute:
-            if all_same_size:
-                crops_out = self._decoder.multi_hwc_to_chw(crops_hwc)
-            else:
-                crops_out = self._decoder.multi_hwc_to_chw_varied(crops_hwc)
+        if has_variable_sizes:
+            # Per-image variable sizes: decode each image individually
+            crops_hwc = self._decode_variable_sizes(
+                data, sizes, heights, widths,
+                target_sizes_list, x_pos_list, y_pos_list,
+            )
         else:
-            crops_out = crops_hwc
+            # All fixed sizes: use existing multi-crop-varied infrastructure
+            fixed_sizes = [sr[0] for sr in self._crop_size_ranges]
+            all_same_size_flag = len(set(fixed_sizes)) == 1
 
-        result = {}
-        for c, name in enumerate(self._crop_names):
-            if self.to_tensor:
-                result[name] = torch.from_numpy(crops_out[c])
+            crops_hwc = self._decoder.decode_batch_multi_crop_varied(
+                data, sizes, heights, widths,
+                crop_params_list=crop_params_list,
+                target_sizes=fixed_sizes,
+            )
+
+        if has_variable_sizes:
+            # Variable sizes → each crop is a list of arrays, not a stacked array
+            if self.permute:
+                crops_out = [
+                    [np.ascontiguousarray(img.transpose(2, 0, 1)) for img in crop]
+                    for crop in crops_hwc
+                ]
             else:
-                result[name] = crops_out[c]
+                crops_out = crops_hwc
+
+            result = {}
+            for c, name in enumerate(self._crop_names):
+                if self.to_tensor:
+                    result[name] = [torch.from_numpy(img) for img in crops_out[c]]
+                else:
+                    result[name] = crops_out[c]
+            return result
+        else:
+            if self.permute:
+                if all_same_size_flag:
+                    crops_out = self._decoder.multi_hwc_to_chw(crops_hwc)
+                else:
+                    crops_out = self._decoder.multi_hwc_to_chw_varied(crops_hwc)
+            else:
+                crops_out = crops_hwc
+
+            result = {}
+            for c, name in enumerate(self._crop_names):
+                if self.to_tensor:
+                    result[name] = torch.from_numpy(crops_out[c])
+                else:
+                    result[name] = crops_out[c]
+            return result
+
+    def _decode_variable_sizes(
+        self,
+        data, sizes, heights, widths,
+        target_sizes_list, x_pos_list, y_pos_list,
+    ) -> list[list[np.ndarray]]:
+        """Decode with per-image variable target sizes.
+
+        Returns a list of crops, where each crop is a list of per-image arrays
+        (since images may have different sizes and can't be stacked).
+        """
+        num_crops = len(self._crop_names)
+
+        # Decode each crop using the existing per-image variable-size path
+        result: list[list[np.ndarray]] = []
+        for c in range(num_crops):
+            crop_result = self._decoder.decode_batch_resize_short_crop_long(
+                data, sizes, heights, widths,
+                target_sizes=target_sizes_list[c],
+                x_pos=x_pos_list[c],
+                y_pos=y_pos_list[c],
+            )
+            # If all sizes happened to be equal, it returns a stacked array;
+            # convert to list for uniform handling
+            if isinstance(crop_result, np.ndarray) and crop_result.ndim == 4:
+                crop_result = [crop_result[i] for i in range(crop_result.shape[0])]
+            result.append(crop_result)
         return result
 
     @property
@@ -468,7 +543,9 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
     def __repr__(self) -> str:
         crop_strs = []
         for c, name in enumerate(self._crop_names):
-            parts = [f"size={self._crop_sizes[c]}"]
+            sr = self._crop_size_ranges[c]
+            size_str = sr[0] if sr[0] == sr[1] else sr
+            parts = [f"size={size_str}"]
             if self._crop_x_ranges[c] != (0.5, 0.5):
                 parts.append(f"x_range={self._crop_x_ranges[c]}")
             if self._crop_y_ranges[c] != (0.5, 0.5):
