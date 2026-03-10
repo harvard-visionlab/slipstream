@@ -481,6 +481,10 @@ class RandomBackgroundBlend(BatchAugment):
         inset: For ``"cosine"`` mode: fade width.  Float in (0, 1) is a
             fraction of the crop dimension; int > 1 is pixel count.
         p_fade: Per-image probability of applying fade (default 1.0).
+        p_background: Per-image probability of blending onto a generated
+            background (default 1.0).  Images where the coin flip fails
+            get a zero (black) background instead, which is useful for
+            stochastic augmentation schedules.
         seed: Random seed for reproducible backgrounds and fade decisions.
         device: Device for the RNG.
 
@@ -513,6 +517,7 @@ class RandomBackgroundBlend(BatchAugment):
         fade_radius: tuple[float, float] | None = None,
         inset: float | int | None = None,
         p_fade: float = 1.0,
+        p_background: float = 1.0,
         # Common ──────────────────────────────────────────────
         seed: int | None = None,
         device=None,
@@ -557,6 +562,7 @@ class RandomBackgroundBlend(BatchAugment):
         self.fade_radius = fade_radius
         self.inset = inset
         self.p_fade = p_fade
+        self.p_background = p_background
 
         self.seed = seed
         self.rng = None
@@ -565,6 +571,7 @@ class RandomBackgroundBlend(BatchAugment):
             self.rng.manual_seed(self.seed)
 
         self._do_fade = None
+        self._do_background = None
 
     # ------------------------------------------------------------------ #
     #  BatchAugment interface                                              #
@@ -581,8 +588,15 @@ class RandomBackgroundBlend(BatchAugment):
         else:
             self._do_fade = torch.zeros(n, dtype=torch.bool)
 
+        if self.p_background < 1.0:
+            self._do_background = torch.bernoulli(
+                torch.full((n,), self.p_background), generator=self.rng,
+            ).bool()
+        else:
+            self._do_background = torch.ones(n, dtype=torch.bool)
+
     def last_params(self):
-        return {"do_fade": self._do_fade}
+        return {"do_fade": self._do_fade, "do_background": self._do_background}
 
     def apply_last(self, b):
         expanded = False
@@ -604,8 +618,12 @@ class RandomBackgroundBlend(BatchAugment):
         if self.fade_mode is not None and self._do_fade.any():
             alpha = self._apply_fade(alpha, self._do_fade)
 
-        # Generate background
-        canvas = self._generate_background(B, 3, H, W, b.device, b.dtype)
+        # Generate background (zeros for images where do_background is False)
+        canvas = torch.zeros(B, 3, H, W, device=b.device, dtype=b.dtype)
+        if self._do_background.any():
+            bg_idx = self._do_background.nonzero(as_tuple=True)[0]
+            bg = self._generate_background(len(bg_idx), 3, H, W, b.device, b.dtype)
+            canvas[bg_idx] = bg
 
         # Blend
         out = alpha * rgb + (1.0 - alpha) * canvas
@@ -807,6 +825,8 @@ class RandomBackgroundBlend(BatchAugment):
                 parts.append(f"inset={self.inset}")
             if self.p_fade != 1.0:
                 parts.append(f"p_fade={self.p_fade}")
+        if self.p_background != 1.0:
+            parts.append(f"p_background={self.p_background}")
         if self.std is not None:
             parts.append(f"mean={self.mean}, std={self.std}")
         if self.seed is not None:
