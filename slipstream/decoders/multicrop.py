@@ -797,7 +797,9 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
     Args:
         crops: Dict mapping crop names to parameter dicts.
             Required key: ``size`` (int or tuple ``(min, max)``).
-            Optional keys: ``x_range``, ``y_range``, ``seed``, ``size_mode``.
+            Optional keys: ``x_range``, ``y_range``, ``seed``, ``size_mode``,
+            ``embed_x_range``, ``embed_y_range``, ``embed_seed`` (per-crop
+            overrides for canvas placement; fall back to global defaults).
         canvas_size: Output spatial size (square). Must be >= largest crop size.
         embed_x_range: Horizontal placement on canvas.  Float or ``(min, max)``
             in [0, 1] where 0 = left, 0.5 = center, 1 = right.
@@ -853,6 +855,20 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
             permute=False,
         )
 
+        # Per-crop embed placement (overrides global defaults)
+        self._embed_x_ranges: list[tuple[float, float]] = []
+        self._embed_y_ranges: list[tuple[float, float]] = []
+        self._embed_seeds: list[int | None] = []
+        for name in self._inner._crop_names:
+            params = crops[name]
+            exr = params.get('embed_x_range', embed_x_range)
+            exr = (exr, exr) if isinstance(exr, (int, float)) else tuple(exr)
+            self._embed_x_ranges.append(exr)
+            eyr = params.get('embed_y_range', embed_y_range)
+            eyr = (eyr, eyr) if isinstance(eyr, (int, float)) else tuple(eyr)
+            self._embed_y_ranges.append(eyr)
+            self._embed_seeds.append(params.get('embed_seed', embed_seed))
+
     def set_image_format(self, image_format: str) -> None:
         self._inner.set_image_format(image_format)
 
@@ -880,9 +896,10 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
             rects = np.zeros((batch_size, 4), dtype=np.int32)
 
             # Compute embed seed for this crop
-            if self.embed_seed is not None:
+            crop_embed_seed = self._embed_seeds[c]
+            if crop_embed_seed is not None:
                 embed_batch_seed = (
-                    self.embed_seed + batch_size * self._embed_seed_counter
+                    crop_embed_seed + batch_size * self._embed_seed_counter
                     + c * 7919  # prime offset per crop for independence
                 ) % 2147483647
             else:
@@ -895,8 +912,8 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
                 _embed_batch_rgba(
                     crop_data, canvas, rects,
                     embed_batch_seed,
-                    self.embed_x_range[0], self.embed_x_range[1],
-                    self.embed_y_range[0], self.embed_y_range[1],
+                    self._embed_x_ranges[c][0], self._embed_x_ranges[c][1],
+                    self._embed_y_ranges[c][0], self._embed_y_ranges[c][1],
                 )
             else:
                 # Slow path: per_image variable sizes (list of arrays)
@@ -907,8 +924,8 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
                     rng_i = np.random.RandomState(
                         (embed_batch_seed + i) % 2147483647
                     )
-                    x_frac = rng_i.uniform(self.embed_x_range[0], self.embed_x_range[1])
-                    y_frac = rng_i.uniform(self.embed_y_range[0], self.embed_y_range[1])
+                    x_frac = rng_i.uniform(self._embed_x_ranges[c][0], self._embed_x_ranges[c][1])
+                    y_frac = rng_i.uniform(self._embed_y_ranges[c][0], self._embed_y_ranges[c][1])
 
                     slack_x = max(0, cs - w)
                     slack_y = max(0, cs - h)
@@ -955,6 +972,12 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
                 parts.append(f"y_range={self._inner._crop_y_ranges[c]}")
             if self._inner._crop_seeds[c] is not None:
                 parts.append(f"seed={self._inner._crop_seeds[c]}")
+            if self._embed_x_ranges[c] != self.embed_x_range:
+                parts.append(f"embed_x_range={self._embed_x_ranges[c]}")
+            if self._embed_y_ranges[c] != self.embed_y_range:
+                parts.append(f"embed_y_range={self._embed_y_ranges[c]}")
+            if self._embed_seeds[c] != self.embed_seed:
+                parts.append(f"embed_seed={self._embed_seeds[c]}")
             inner_crops.append(f"'{name}': {', '.join(parts)}")
         extras = [f"canvas_size={self.canvas_size}"]
         if self.embed_x_range != (0.5, 0.5):
