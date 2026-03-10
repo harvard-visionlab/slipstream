@@ -1,8 +1,13 @@
 import torch
 
-def power_law_noise(size, alpha=2.0, out_channels=1, scale=(-1, 1), device='cpu', batch_size=None, generator=None, independent_channels=False):
+
+def power_law_noise_orig(size, alpha=2.0, out_channels=1, scale=(-1, 1), device='cpu', batch_size=None, generator=None, independent_channels=False):
     """
-    Generate power-law (1/f^α) noise.
+    Original power-law (1/f^α) noise implementation.
+
+    Preserved as reference. Requires square, even-sized output.
+    See :func:`power_law_noise` for the current implementation with
+    non-square support and cleaner frequency grid math.
 
     Args:
         size: Size of the square output (must be even)
@@ -72,3 +77,87 @@ def power_law_noise(size, alpha=2.0, out_channels=1, scale=(-1, 1), device='cpu'
             b = b.unsqueeze(0).expand(out_channels, -1, -1)
 
     return b
+
+
+def power_law_noise(
+    h,
+    w=None,
+    alpha=2.0,
+    out_channels=1,
+    scale=(-1, 1),
+    device='cpu',
+    batch_size=None,
+    generator=None,
+    independent_channels=False,
+):
+    """
+    Generate power-law (1/f^α) noise.
+
+    Uses ``torch.fft.fftfreq`` for frequency grid computation and supports
+    non-square output sizes.
+
+    Args:
+        h: Output height (any positive int; even recommended for FFT speed).
+        w: Output width.  Defaults to ``h`` (square).
+        alpha: Exponent controlling frequency emphasis.
+            α=0: white, α=1: pink, α=2: Brownian.
+        out_channels: Number of output channels.
+        scale: ``(min, max)`` for output range, or ``None`` to skip.
+        device: Torch device.
+        batch_size: If provided, generate a batch of independent samples.
+        generator: Optional ``torch.Generator`` for reproducibility.
+        independent_channels: If ``True``, generate independent noise per
+            channel (colorful).  If ``False``, duplicate one field (grayscale).
+
+    Returns:
+        Tensor of shape ``(C, H, W)`` or ``(B, C, H, W)``.
+    """
+    if w is None:
+        w = h
+
+    # Determine generation shape
+    gen_channels = out_channels if independent_channels else 1
+    if batch_size is not None:
+        shape = (batch_size, gen_channels, h, w)
+    else:
+        shape = (gen_channels, h, w)
+
+    # 1. White noise → FFT
+    white = torch.randn(shape, device=device, generator=generator)
+    noise_fft = torch.fft.fftshift(torch.fft.fft2(white, dim=(-2, -1)), dim=(-2, -1))
+
+    # 2. Frequency grid via fftfreq
+    freq_y = torch.fft.fftshift(torch.fft.fftfreq(h, device=device)) * h
+    freq_x = torch.fft.fftshift(torch.fft.fftfreq(w, device=device)) * w
+    yy, xx = torch.meshgrid(freq_y, freq_x, indexing='ij')
+    rho = torch.sqrt(xx ** 2 + yy ** 2)
+
+    # 3. 1/f^alpha filter, DC = 0
+    filt = rho ** (-alpha)
+    filt[rho == 0] = 0.0  # zero DC — removes mean bias before scaling
+
+    # Reshape for broadcasting
+    if batch_size is not None:
+        filt = filt.view(1, 1, h, w)
+    else:
+        filt = filt.view(1, h, w)
+
+    # 4. Apply filter and inverse FFT
+    filtered = noise_fft * filt
+    noise = torch.fft.ifft2(torch.fft.ifftshift(filtered, dim=(-2, -1)), dim=(-2, -1)).real
+
+    # 5. Scale to desired range (per-sample normalization)
+    if scale is not None:
+        n_min = noise.amin(dim=(-2, -1), keepdim=True)
+        n_max = noise.amax(dim=(-2, -1), keepdim=True)
+        noise = (noise - n_min) / (n_max - n_min + 1e-8)
+        noise = noise * (scale[1] - scale[0]) + scale[0]
+
+    # 6. Expand non-independent channels (view, no memory copy)
+    if not independent_channels and out_channels > 1:
+        if batch_size is not None:
+            noise = noise.expand(-1, out_channels, -1, -1)
+        else:
+            noise = noise.expand(out_channels, -1, -1)
+
+    return noise

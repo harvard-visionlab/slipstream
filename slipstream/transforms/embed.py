@@ -470,11 +470,10 @@ class RandomBackgroundBlend(BatchAugment):
             normalised as ``(blended - mean) / std``.
         alpha_range: Power-law exponent.  Float or ``(min, max)``.
         color_noise: Independent noise per channel (default ``True``).
-        noise_size: Resolution at which to generate power-law noise before
-            bilinear upsampling to canvas size.  Lower values are faster;
-            default 64 is ~9x faster than full resolution with minimal
-            visual difference for alpha >= 1.  Set to canvas size to
-            disable downsampling.
+        noise_scale: Generate power-law noise at a fraction of the canvas
+            resolution, then bilinear-upsample.  1.0 (default) generates at
+            full resolution; 0.25 generates at 25% and upsamples (~9x faster
+            but visibly blurrier for low alpha).
         fade_mode: ``None`` (hard rect), ``"circular"``, or ``"cosine"``.
         fade_radius: For ``"circular"`` mode: ``(inner, outer)`` as fractions
             of ``min(crop_h, crop_w)``.  Pixels within ``inner`` are fully
@@ -508,7 +507,7 @@ class RandomBackgroundBlend(BatchAugment):
         std=None,
         alpha_range: float | tuple[float, float] = 2.0,
         color_noise: bool = True,
-        noise_size: int = 64,
+        noise_scale: float = 1.0,
         # Fade ────────────────────────────────────────────────
         fade_mode: str | None = None,
         fade_radius: tuple[float, float] | None = None,
@@ -551,7 +550,9 @@ class RandomBackgroundBlend(BatchAugment):
             else tuple(alpha_range)
         )
         self.color_noise = color_noise
-        self.noise_size = _even_ceil(noise_size)
+        if not 0 < noise_scale <= 1.0:
+            raise ValueError(f"noise_scale must be in (0, 1], got {noise_scale}")
+        self.noise_scale = noise_scale
         self.fade_mode = fade_mode
         self.fade_radius = fade_radius
         self.inset = inset
@@ -736,8 +737,12 @@ class RandomBackgroundBlend(BatchAugment):
         import torch.nn.functional as F
         from slipstream.utils.noise import power_law_noise
 
+        # Compute generation resolution from noise_scale
         canvas_size = max(M, N)
-        gen_size = _even_ceil(min(self.noise_size, canvas_size))
+        if self.noise_scale < 1.0:
+            gen_size = _even_ceil(max(2, int(canvas_size * self.noise_scale)))
+        else:
+            gen_size = _even_ceil(canvas_size)
         needs_upsample = gen_size < canvas_size
         fixed_alpha = self.alpha_range[0] == self.alpha_range[1]
 
@@ -792,8 +797,8 @@ class RandomBackgroundBlend(BatchAugment):
             parts.append(f"alpha_range={self.alpha_range}")
             if not self.color_noise:
                 parts.append("color_noise=False")
-            if self.noise_size != 64:
-                parts.append(f"noise_size={self.noise_size}")
+            if self.noise_scale != 1.0:
+                parts.append(f"noise_scale={self.noise_scale}")
         if self.fade_mode is not None:
             parts.append(f"fade_mode='{self.fade_mode}'")
             if self.fade_mode == "circular":
