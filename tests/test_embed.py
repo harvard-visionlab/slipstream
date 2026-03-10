@@ -1,9 +1,9 @@
-"""Tests for RandomEmbed transform."""
+"""Tests for RandomEmbed and RandomBackgroundBlend transforms."""
 
 import pytest
 import torch
 
-from slipstream.transforms.embed import RandomEmbed
+from slipstream.transforms.embed import RandomEmbed, RandomBackgroundBlend
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -166,13 +166,13 @@ class TestValidation:
         with pytest.raises(ValueError, match="background must be one of"):
             RandomEmbed(canvas_size=224, background="diffusion")
 
-    def test_mean_background_requires_mean(self):
-        with pytest.raises(ValueError, match="mean.*required"):
-            RandomEmbed(canvas_size=224, background="mean")
+    def test_constant_background_requires_fill(self):
+        with pytest.raises(ValueError, match="fill.*required"):
+            RandomEmbed(canvas_size=224, background="constant")
 
-    def test_std_without_mean_raises(self):
-        with pytest.raises(ValueError, match="mean.*required"):
-            RandomEmbed(canvas_size=224, std=[0.229, 0.224, 0.225])
+    def test_mean_background_raises_helpful_error(self):
+        with pytest.raises(TypeError, match="background='mean' has been removed"):
+            RandomEmbed(canvas_size=224, background="mean")
 
 
 # ── background modes ────────────────────────────────────────────────────
@@ -185,21 +185,21 @@ class TestBackgrounds:
         # Outside image region should be zero
         assert out[0, 0, 64:, 64:].sum() == 0.0
 
-    def test_background_mean_scalar(self):
+    def test_background_constant_scalar(self):
         img = _make_batch(B=1, H=64, W=64, value=1.0)
         t = RandomEmbed(canvas_size=128, x_range=0.0, y_range=0.0,
-                        background="mean", mean=0.5)
+                        background="constant", fill=0.5)
         out = t(img)
         assert torch.allclose(out[0, 0, 100, 100], torch.tensor(0.5))
 
-    def test_background_mean_per_channel(self):
+    def test_background_constant_per_channel(self):
         img = _make_batch(B=1, C=3, H=64, W=64, value=1.0)
-        means = [0.485, 0.456, 0.406]
+        fills = [0.485, 0.456, 0.406]
         t = RandomEmbed(canvas_size=128, x_range=0.0, y_range=0.0,
-                        background="mean", mean=means)
+                        background="constant", fill=fills)
         out = t(img)
-        for c, m in enumerate(means):
-            assert torch.allclose(out[0, c, 100, 100], torch.tensor(m), atol=1e-6)
+        for c, f in enumerate(fills):
+            assert torch.allclose(out[0, c, 100, 100], torch.tensor(f), atol=1e-6)
 
     def test_background_power_law(self):
         img = _make_batch(B=2, H=64, W=64, value=0.0)
@@ -250,55 +250,6 @@ class TestBackgrounds:
         assert t.color_noise is True
 
 
-# ── normalisation (mean/std) ─────────────────────────────────────────────
-
-class TestNormalisation:
-    MEAN = [0.485, 0.456, 0.406]
-    STD = [0.229, 0.224, 0.225]
-
-    def test_normalization_zeros(self):
-        """zeros + mean/std → (0 - mean) / std (black in normalised space)."""
-        img = _make_batch(B=1, H=64, W=64, value=0.0)
-        t = RandomEmbed(canvas_size=128, x_range=0.0, y_range=0.0,
-                        background="zeros", mean=self.MEAN, std=self.STD)
-        out = t(img)
-        for c in range(3):
-            expected = (0.0 - self.MEAN[c]) / self.STD[c]
-            assert torch.allclose(out[0, c, 100, 100], torch.tensor(expected), atol=1e-5)
-
-    def test_normalization_mean(self):
-        """mean bg + std → (mean - mean) / std = 0."""
-        img = _make_batch(B=1, H=64, W=64, value=0.0)
-        t = RandomEmbed(canvas_size=128, x_range=0.0, y_range=0.0,
-                        background="mean", mean=self.MEAN, std=self.STD)
-        out = t(img)
-        # Background region should be ~0 (normalised mean)
-        bg_region = out[0, :, 100, 100]
-        assert torch.allclose(bg_region, torch.zeros(3), atol=1e-5)
-
-    def test_normalization_power_law(self):
-        """power_law + mean/std → noise is normalised."""
-        img = _make_batch(B=2, H=64, W=64, value=0.0)
-        t = RandomEmbed(canvas_size=128, x_range=0.0, y_range=0.0,
-                        background="power_law", alpha_range=1.5,
-                        mean=self.MEAN, std=self.STD, seed=42)
-        out = t(img)
-        bg_region = out[:, :, 64:, 64:]
-        # Normalised power_law: raw [0,1] → (raw - mean) / std
-        # For ch0: (0 - 0.485) / 0.229 ≈ -2.12, (1 - 0.485) / 0.229 ≈ 2.25
-        # Values should be in a reasonable normalised range
-        assert bg_region.min() < 0.0  # some values below zero
-        assert bg_region.max() > 0.0  # some values above zero
-
-    def test_no_normalization_without_std(self):
-        """Without std, backgrounds remain in [0, 1] space."""
-        img = _make_batch(B=2, H=64, W=64, value=0.0)
-        t = RandomEmbed(canvas_size=128, x_range=0.0, y_range=0.0,
-                        background="power_law", alpha_range=1.5, seed=42)
-        out = t(img)
-        bg_region = out[:, :, 64:, 64:]
-        assert bg_region.min() >= 0.0 - 1e-6
-        assert bg_region.max() <= 1.0 + 1e-6
 
 
 # ── seed reproducibility ────────────────────────────────────────────────
@@ -400,7 +351,7 @@ class TestFadeRadius:
         img_val = 0.9
         img = _make_batch(B=1, C=3, H=96, W=96, value=img_val)
         t = RandomEmbed(canvas_size=224, x_range=0.5, y_range=0.5,
-                        background="mean", mean=bg_val,
+                        background="constant", fill=bg_val,
                         fade_radius=(0.30, 0.50))
         out = t(img)
         # Pick a pixel in the fade band: ~40 pixels from image center
@@ -530,11 +481,11 @@ class TestRepr:
         assert "power_law" in r
         assert "alpha_range" in r
 
-    def test_repr_with_std(self):
-        t = RandomEmbed(canvas_size=224, background="power_law",
-                        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    def test_repr_with_fill(self):
+        t = RandomEmbed(canvas_size=224, background="constant",
+                        fill=[0.485, 0.456, 0.406])
         r = repr(t)
-        assert "std=" in r
+        assert "fill=" in r
 
     def test_repr_color_noise_false(self):
         t = RandomEmbed(canvas_size=224, background="power_law", color_noise=False)
@@ -546,3 +497,101 @@ class TestRepr:
         t = RandomEmbed(canvas_size=224, background="power_law")
         r = repr(t)
         assert "color_noise" not in r
+
+
+# ── RandomBackgroundBlend ────────────────────────────────────────────────
+
+def _make_rgba(B=4, H=96, W=96, rgb_value=0.5, alpha_value=1.0):
+    """Return a constant-filled (B, 4, H, W) RGBA tensor."""
+    rgba = torch.full((B, 4, H, W), rgb_value, dtype=torch.float32)
+    rgba[:, 3] = alpha_value
+    return rgba
+
+
+class TestRandomBackgroundBlend:
+    MEAN = [0.485, 0.456, 0.406]
+    STD = [0.229, 0.224, 0.225]
+
+    def test_zeros_is_literal_zeros(self):
+        """background='zeros' → background region is literal 0.0."""
+        rgba = _make_rgba(B=1, H=64, W=64, rgb_value=0.5, alpha_value=0.0)
+        blend = RandomBackgroundBlend(background='zeros')
+        out = blend(rgba)
+        assert out.shape == (1, 3, 64, 64)
+        # alpha=0 everywhere → output should be all zeros
+        assert torch.allclose(out, torch.zeros_like(out))
+
+    def test_zeros_with_normalization(self):
+        """background='zeros' with mean/std → background region is still literal 0."""
+        rgba = _make_rgba(B=1, H=64, W=64, rgb_value=0.5, alpha_value=0.0)
+        blend = RandomBackgroundBlend(
+            background='zeros', mean=self.MEAN, std=self.STD,
+        )
+        out = blend(rgba)
+        # alpha=0 → output = (1 - 0) * bg = bg = zeros
+        assert torch.allclose(out, torch.zeros_like(out))
+
+    def test_constant_fill_value(self):
+        """background='constant' → background region equals fill value."""
+        fill = [0.5, 0.5, 0.5]
+        rgba = _make_rgba(B=1, H=64, W=64, rgb_value=0.0, alpha_value=0.0)
+        blend = RandomBackgroundBlend(background='constant', fill=fill)
+        out = blend(rgba)
+        for c in range(3):
+            assert torch.allclose(out[0, c], torch.tensor(fill[c]))
+
+    def test_constant_requires_fill(self):
+        with pytest.raises(ValueError, match="fill.*required"):
+            RandomBackgroundBlend(background='constant')
+
+    def test_mean_background_raises_helpful_error(self):
+        with pytest.raises(TypeError, match="background='mean' has been removed"):
+            RandomBackgroundBlend(background='mean')
+
+    def test_normalization_applied_to_image(self):
+        """mean/std normalizes the image before blending."""
+        rgba = _make_rgba(B=1, H=64, W=64, rgb_value=0.5, alpha_value=1.0)
+        blend = RandomBackgroundBlend(
+            background='zeros', mean=self.MEAN, std=self.STD,
+        )
+        out = blend(rgba)
+        # alpha=1 → output = normalized(rgb)
+        for c in range(3):
+            expected = (0.5 - self.MEAN[c]) / self.STD[c]
+            assert torch.allclose(out[0, c, 0, 0], torch.tensor(expected), atol=1e-5)
+
+    def test_power_law_normalized(self):
+        """power_law with mean/std → noise is normalized."""
+        rgba = _make_rgba(B=2, H=64, W=64, rgb_value=0.0, alpha_value=0.0)
+        blend = RandomBackgroundBlend(
+            background='power_law', alpha_range=1.5,
+            mean=self.MEAN, std=self.STD, seed=42,
+        )
+        out = blend(rgba)
+        # alpha=0 → output is pure background (normalized noise)
+        assert out.min() < 0.0  # some values below zero
+        assert out.max() > 0.0  # some values above zero
+
+    def test_power_law_unnormalized(self):
+        """power_law without mean/std → noise in [0,1]."""
+        rgba = _make_rgba(B=2, H=64, W=64, rgb_value=0.0, alpha_value=0.0)
+        blend = RandomBackgroundBlend(
+            background='power_law', alpha_range=1.5, seed=42,
+        )
+        out = blend(rgba)
+        assert out.min() >= 0.0 - 1e-6
+        assert out.max() <= 1.0 + 1e-6
+
+    def test_repr_constant(self):
+        blend = RandomBackgroundBlend(background='constant', fill=[0.5, 0.5, 0.5])
+        r = repr(blend)
+        assert "constant" in r
+        assert "fill=" in r
+
+    def test_repr_with_mean_std(self):
+        blend = RandomBackgroundBlend(
+            background='zeros', mean=self.MEAN, std=self.STD,
+        )
+        r = repr(blend)
+        assert "mean=" in r
+        assert "std=" in r

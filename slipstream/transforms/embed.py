@@ -30,14 +30,9 @@ class RandomEmbed(BatchAugment):
 
     The canvas background is filled according to ``background``:
 
-    - ``"zeros"``: all-zero canvas.
-    - ``"mean"``: constant per-channel fill (e.g. ImageNet mean).
+    - ``"zeros"``: literal zeros (no normalisation needed).
+    - ``"constant"``: constant per-channel fill value (specified via ``fill``).
     - ``"power_law"``: 1/f^α colored noise in [0, 1].
-
-    All backgrounds are generated in the [0, 1] value range.  When the
-    input images are normalised (e.g. ImageNet normalisation), pass ``std``
-    (and ``mean`` if not already set) so the background is normalised to
-    match: ``(bg - mean) / std``.
 
     All random parameters are sampled **per image**, never per batch.
 
@@ -49,14 +44,9 @@ class RandomEmbed(BatchAugment):
         coords: List of ``(x, y)`` center pixel coordinates.
         coords_dict: Dict mapping ``(H, W)`` image-size tuples to lists of
             ``(x, y)`` center coordinates.
-        background: One of ``"zeros"``, ``"mean"``, ``"power_law"``.
-        mean: Fill value for ``"mean"`` background.  Float (all channels)
-            or list of floats (one per channel).  Also used as the
-            normalisation mean when ``std`` is provided.
-        std: Per-channel standard deviation for normalisation.  When
-            provided (together with ``mean``), the background is
-            normalised as ``(bg - mean) / std`` so it matches images
-            that have been normalised the same way.
+        background: One of ``"zeros"``, ``"constant"``, ``"power_law"``.
+        fill: Fill value for ``"constant"`` background.  Float (all channels)
+            or list of floats (one per channel).
         alpha_range: Power-law exponent for ``"power_law"`` background.
             Float or ``(min, max)`` for per-image sampling.
             α=0 white, α=1 pink, α=2 Brownian.
@@ -91,16 +81,14 @@ class RandomEmbed(BatchAugment):
             seed=42,
         )
 
-        # Same, but for ImageNet-normalised images
-        from slipstream import IMAGENET_MEAN, IMAGENET_STD
+        # Same, with constant fill background
         embed = RandomEmbed(
             canvas_size=224,
-            background="power_law", alpha_range=2.0,
-            mean=IMAGENET_MEAN, std=IMAGENET_STD,
+            background="constant", fill=[0.485, 0.456, 0.406],
         )
     """
 
-    _VALID_BACKGROUNDS = ("zeros", "mean", "power_law")
+    _VALID_BACKGROUNDS = ("zeros", "constant", "power_law")
 
     def __init__(
         self,
@@ -112,8 +100,7 @@ class RandomEmbed(BatchAugment):
         coords_dict=None,
         # Background ─────────────────────────────────────────
         background="zeros",
-        mean=None,
-        std=None,
+        fill=None,
         alpha_range=2.0,
         color_noise=True,
         fade_radius=None,
@@ -143,20 +130,20 @@ class RandomEmbed(BatchAugment):
         self.coords_dict = coords_dict
 
         # ── background ──
+        if background == "mean":
+            raise TypeError(
+                "background='mean' has been removed.  Use background='constant' "
+                "with the fill= parameter instead.  For example:\n"
+                "  RandomEmbed(..., background='constant', fill=[0.485, 0.456, 0.406])"
+            )
         if background not in self._VALID_BACKGROUNDS:
             raise ValueError(
                 f"background must be one of {self._VALID_BACKGROUNDS}, got '{background}'"
             )
-        if background == "mean" and mean is None:
-            raise ValueError("'mean' is required for background='mean'")
-        if std is not None and mean is None:
-            raise ValueError(
-                "'mean' is required when 'std' is provided (needed for "
-                "normalisation: (bg - mean) / std)"
-            )
+        if background == "constant" and fill is None:
+            raise ValueError("'fill' is required for background='constant'")
         self.background = background
-        self.mean = mean
-        self.std = std
+        self.fill = fill
         self.color_noise = color_noise
         if fade_radius is not None:
             fade_radius = tuple(fade_radius)
@@ -343,26 +330,19 @@ class RandomEmbed(BatchAugment):
         if self.background == "zeros":
             canvas = torch.zeros(B, C, M, N, device=device, dtype=dtype)
 
-        elif self.background == "mean":
+        elif self.background == "constant":
             canvas = torch.empty(B, C, M, N, device=device, dtype=dtype)
-            if isinstance(self.mean, (int, float)):
-                canvas.fill_(self.mean)
+            if isinstance(self.fill, (int, float)):
+                canvas.fill_(self.fill)
             else:
-                for c in range(min(C, len(self.mean))):
-                    canvas[:, c].fill_(self.mean[c])
+                for c in range(min(C, len(self.fill))):
+                    canvas[:, c].fill_(self.fill[c])
 
         elif self.background == "power_law":
             canvas = self._generate_power_law(B, C, M, N, device, dtype)
 
         else:
             raise ValueError(f"Unknown background: {self.background}")
-
-        # Apply normalisation if std is provided: (bg - mean) / std
-        if self.std is not None:
-            mean_vals = self.mean if not isinstance(self.mean, (int, float)) else [self.mean] * C
-            mean_t = torch.tensor(mean_vals, device=device, dtype=dtype).view(1, C, 1, 1)
-            std_t = torch.tensor(self.std, device=device, dtype=dtype).view(1, C, 1, 1)
-            canvas = (canvas - mean_t) / std_t
 
         return canvas
 
@@ -423,8 +403,8 @@ class RandomEmbed(BatchAugment):
             parts.append(f"coords_dict={{{', '.join(str(s) for s in sizes)}}}")
 
         parts.append(f"background='{self.background}'")
-        if self.background == "mean":
-            parts.append(f"mean={self.mean}")
+        if self.background == "constant":
+            parts.append(f"fill={self.fill}")
         elif self.background == "power_law":
             parts.append(f"alpha_range={self.alpha_range}")
             if not self.color_noise:
@@ -433,8 +413,6 @@ class RandomEmbed(BatchAugment):
             parts.append(f"fade_radius={self.fade_radius}")
             if self.p_fade != 1.0:
                 parts.append(f"p_fade={self.p_fade}")
-        if self.std is not None:
-            parts.append(f"std={self.std}")
 
         if self.seed is not None:
             parts.append(f"seed={self.seed}")
@@ -450,8 +428,18 @@ class RandomBackgroundBlend(BatchAugment):
     foreground onto a generated background using the alpha channel as opacity.
     Returns 3-channel RGB output, optionally normalized.
 
-    The alpha channel is consumed during blending — downstream transforms
-    receive standard 3-channel tensors.
+    **Normalization semantics:** When ``mean``/``std`` are provided, the RGB
+    image is normalized *before* blending.  Background values are specified
+    in **output (post-normalization) space**:
+
+    - ``"zeros"``: literal zeros in the output — no normalization needed.
+    - ``"constant"``: the ``fill`` value appears as-is in the output.
+    - ``"power_law"``: noise is generated in [0, 1] and then normalized
+      with the same ``mean``/``std``, so it has the same statistical
+      range as the normalized image.
+
+    This means a downstream ``Normalize`` transform is **not** needed when
+    ``mean``/``std`` are passed here.
 
     Edge fading can be applied to the alpha mask before blending to create
     smooth transitions between the foreground and background:
@@ -463,11 +451,14 @@ class RandomBackgroundBlend(BatchAugment):
       C1-continuous transitions.
 
     Args:
-        background: One of ``"zeros"``, ``"mean"``, ``"power_law"``.
-        mean: Fill value for ``"mean"`` background, or normalisation mean
-            when ``std`` is also provided.
-        std: Per-channel std for normalisation.  When provided, output is
-            normalised as ``(blended - mean) / std``.
+        background: One of ``"zeros"``, ``"constant"``, ``"power_law"``.
+        fill: Fill value for ``"constant"`` background.  Float (all channels)
+            or list of floats (one per channel).  Values are in output space
+            (post-normalization).
+        mean: Per-channel mean for normalization.  When provided with ``std``,
+            the RGB image is normalized as ``(rgb - mean) / std`` before
+            blending, and ``"power_law"`` noise is normalized the same way.
+        std: Per-channel std for normalization.  Requires ``mean``.
         alpha_range: Power-law exponent.  Float or ``(min, max)``.
         color_noise: Independent noise per channel (default ``True``).
         noise_scale: Generate power-law noise at a fraction of the canvas
@@ -490,23 +481,31 @@ class RandomBackgroundBlend(BatchAugment):
 
     Example::
 
+        # Normalized image with power-law noise background
         blend = RandomBackgroundBlend(
             background='power_law', alpha_range=1.5,
             fade_mode='cosine', inset=0.05, p_fade=0.5,
             mean=IMAGENET_MEAN, std=IMAGENET_STD, seed=44,
         )
-        # Input: [B, 4, H, W] RGBA float from ToTorchImage
+        # Input: [B, 4, H, W] RGBA float in [0,1] from ToTorchImage
         # Output: [B, 3, H, W] RGB float, normalized
         out = blend(rgba_tensor)
+
+        # Constant fill background (value appears as-is in output)
+        blend = RandomBackgroundBlend(
+            background='constant', fill=[0.5, 0.5, 0.5],
+            mean=IMAGENET_MEAN, std=IMAGENET_STD,
+        )
     """
 
-    _VALID_BACKGROUNDS = ("zeros", "mean", "power_law")
+    _VALID_BACKGROUNDS = ("zeros", "constant", "power_law")
     _VALID_FADE_MODES = (None, "circular", "cosine")
 
     def __init__(
         self,
         # Background ─────────────────────────────────────────
         background: str = "zeros",
+        fill=None,
         mean=None,
         std=None,
         alpha_range: float | tuple[float, float] = 2.0,
@@ -522,12 +521,18 @@ class RandomBackgroundBlend(BatchAugment):
         seed: int | None = None,
         device=None,
     ):
+        if background == "mean":
+            raise TypeError(
+                "background='mean' has been removed.  Use background='constant' "
+                "with the fill= parameter instead.  For example:\n"
+                "  RandomBackgroundBlend(background='constant', fill=[0.485, 0.456, 0.406])"
+            )
         if background not in self._VALID_BACKGROUNDS:
             raise ValueError(
                 f"background must be one of {self._VALID_BACKGROUNDS}, got '{background}'"
             )
-        if background == "mean" and mean is None:
-            raise ValueError("'mean' is required for background='mean'")
+        if background == "constant" and fill is None:
+            raise ValueError("'fill' is required for background='constant'")
         if std is not None and mean is None:
             raise ValueError(
                 "'mean' is required when 'std' is provided"
@@ -548,6 +553,7 @@ class RandomBackgroundBlend(BatchAugment):
             raise ValueError("inset is required for fade_mode='cosine'")
 
         self.background = background
+        self.fill = fill
         self.mean = mean
         self.std = std
         self.alpha_range = (
@@ -618,22 +624,24 @@ class RandomBackgroundBlend(BatchAugment):
         if self.fade_mode is not None and self._do_fade.any():
             alpha = self._apply_fade(alpha, self._do_fade)
 
-        # Generate background (zeros for images where do_background is False)
+        # 1. Normalize RGB if mean/std provided
+        if self.std is not None:
+            mean_vals = self.mean if not isinstance(self.mean, (int, float)) else [self.mean] * 3
+            mean_t = torch.tensor(mean_vals, device=b.device, dtype=b.dtype).view(1, 3, 1, 1)
+            std_t = torch.tensor(self.std, device=b.device, dtype=b.dtype).view(1, 3, 1, 1)
+            rgb = (rgb - mean_t) / std_t
+
+        # 2. Generate background in output (normalized) space
+        #    zeros → literal 0, constant → fill as-is,
+        #    power_law → noise in [0,1] then normalized
         canvas = torch.zeros(B, 3, H, W, device=b.device, dtype=b.dtype)
         if self._do_background.any():
             bg_idx = self._do_background.nonzero(as_tuple=True)[0]
             bg = self._generate_background(len(bg_idx), 3, H, W, b.device, b.dtype)
             canvas[bg_idx] = bg
 
-        # Blend
+        # 3. Blend in output space
         out = alpha * rgb + (1.0 - alpha) * canvas
-
-        # Normalize if requested
-        if self.std is not None:
-            mean_vals = self.mean if not isinstance(self.mean, (int, float)) else [self.mean] * 3
-            mean_t = torch.tensor(mean_vals, device=b.device, dtype=b.dtype).view(1, 3, 1, 1)
-            std_t = torch.tensor(self.std, device=b.device, dtype=b.dtype).view(1, 3, 1, 1)
-            out = (out - mean_t) / std_t
 
         if expanded:
             out = out.squeeze(0)
@@ -735,13 +743,13 @@ class RandomBackgroundBlend(BatchAugment):
         if self.background == "zeros":
             canvas = torch.zeros(B, C, M, N, device=device, dtype=dtype)
 
-        elif self.background == "mean":
+        elif self.background == "constant":
             canvas = torch.empty(B, C, M, N, device=device, dtype=dtype)
-            if isinstance(self.mean, (int, float)):
-                canvas.fill_(self.mean)
+            if isinstance(self.fill, (int, float)):
+                canvas.fill_(self.fill)
             else:
-                for c in range(min(C, len(self.mean))):
-                    canvas[:, c].fill_(self.mean[c])
+                for c in range(min(C, len(self.fill))):
+                    canvas[:, c].fill_(self.fill[c])
 
         elif self.background == "power_law":
             canvas = self._generate_power_law(B, C, M, N, device, dtype)
@@ -799,9 +807,18 @@ class RandomBackgroundBlend(BatchAugment):
             if bg.ndim == 3:
                 bg = bg.unsqueeze(0)
             bg = F.interpolate(bg, size=(M, N), mode='bilinear', align_corners=False)
-            return bg.to(dtype=dtype)
+            canvas = bg.to(dtype=dtype)
+        else:
+            canvas = bg[:, :, :M, :N].contiguous().to(dtype=dtype)
 
-        return bg[:, :, :M, :N].contiguous().to(dtype=dtype)
+        # Normalize noise to match normalized image space
+        if self.std is not None:
+            mean_vals = self.mean if not isinstance(self.mean, (int, float)) else [self.mean] * C
+            mean_t = torch.tensor(mean_vals, device=device, dtype=dtype).view(1, C, 1, 1)
+            std_t = torch.tensor(self.std, device=device, dtype=dtype).view(1, C, 1, 1)
+            canvas = (canvas - mean_t) / std_t
+
+        return canvas
 
     # ------------------------------------------------------------------ #
     #  Repr                                                                #
@@ -809,8 +826,8 @@ class RandomBackgroundBlend(BatchAugment):
 
     def __repr__(self):
         parts = [f"background='{self.background}'"]
-        if self.background == "mean":
-            parts.append(f"mean={self.mean}")
+        if self.background == "constant":
+            parts.append(f"fill={self.fill}")
         elif self.background == "power_law":
             parts.append(f"alpha_range={self.alpha_range}")
             if not self.color_noise:

@@ -259,16 +259,14 @@ embed = RandomEmbed(
     seed=42,
 )
 
-# For normalised images, pass mean/std so background matches
-from slipstream import IMAGENET_MEAN, IMAGENET_STD
+# Constant fill background
 embed = RandomEmbed(
     canvas_size=224,
-    background="power_law",
-    mean=IMAGENET_MEAN, std=IMAGENET_STD,
+    background="constant", fill=[0.485, 0.456, 0.406],
 )
 ```
 
-Backgrounds: `"zeros"` (black), `"mean"` (constant fill), `"power_law"` (1/f^α noise).
+Backgrounds: `"zeros"` (literal zeros), `"constant"` (constant fill via `fill=`), `"power_law"` (1/f^α noise).
 `color_noise=True` (default) generates independent noise per channel;
 `color_noise=False` produces grayscale noise.
 
