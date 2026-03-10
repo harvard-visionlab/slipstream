@@ -110,6 +110,9 @@ from slipstream.pipelines import (
 # Readers (dataset format adapters)
 from slipstream.readers import FFCVFileReader, SlipstreamImageFolder, StreamingReader, open_imagefolder
 
+# Visualization
+from slipstream.vis import show_batch, show_rgba
+
 # Utilities
 from slipstream.s3_sync import sync_s3_dataset
 from slipstream.stats import compute_normalization_stats
@@ -208,6 +211,9 @@ __all__ = [
     "SlipstreamImageFolder",
     "StreamingReader",
     "open_imagefolder",
+    # Visualization
+    "show_batch",
+    "show_rgba",
     # Utilities
     "sync_s3_dataset",
     "compute_normalization_stats",
