@@ -804,6 +804,9 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
         embed_y_range: Vertical placement on canvas.  Float or ``(min, max)``.
         embed_seed: Seed for placement RNG (separate from per-crop seeds).
         size_mode: Default size mode (``"per_batch"`` or ``"per_image"``).
+            Default: ``"per_image"`` — each image gets an independently
+            sampled crop size, which is natural since the canvas guarantees
+            uniform output shape regardless.
         num_threads: Parallel decode threads. 0 = auto.
 
     Returns:
@@ -826,7 +829,7 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
         embed_x_range: float | tuple[float, float] = 0.5,
         embed_y_range: float | tuple[float, float] = 0.5,
         embed_seed: int | None = None,
-        size_mode: str = "per_batch",
+        size_mode: str = "per_image",
         num_threads: int = 0,
     ) -> None:
         self.canvas_size = canvas_size
