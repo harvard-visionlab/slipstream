@@ -777,6 +777,100 @@ def _generate_center_crop_params_batch(
     return params
 
 
+@njit(cache=True, fastmath=True)
+def _generate_resize_short_crop_long_params_batch(
+    widths: NDArray[np.int32],
+    heights: NDArray[np.int32],
+    target_size: int,
+    x_range_min: float,
+    x_range_max: float,
+    y_range_min: float,
+    y_range_max: float,
+    seed: int,
+    x_pos_out: NDArray[np.float64],
+    y_pos_out: NDArray[np.float64],
+) -> NDArray[np.int32]:
+    """Generate resize-short-crop-long params for a batch using Numba.
+
+    Combines RNG (x/y position sampling) and crop parameter computation
+    into a single JIT-compiled loop for performance.
+
+    Args:
+        x_pos_out: [B] pre-allocated output array for sampled x positions.
+        y_pos_out: [B] pre-allocated output array for sampled y positions.
+
+    Returns:
+        Array of shape [B, 4] with (crop_x, crop_y, crop_w, crop_h) for each image.
+    """
+    batch_size = len(widths)
+    params = np.zeros((batch_size, 4), dtype=np.int32)
+
+    for i in range(batch_size):
+        np.random.seed((seed + i) % 2147483647)
+        x_pos_i = np.random.uniform(x_range_min, x_range_max)
+        y_pos_i = np.random.uniform(y_range_min, y_range_max)
+        x_pos_out[i] = x_pos_i
+        y_pos_out[i] = y_pos_i
+
+        h = heights[i]
+        w = widths[i]
+
+        # Resize so shortest edge = target_size
+        if h < w:
+            scale = target_size / h
+            new_h = target_size
+            new_w = int(w * scale + 0.5)
+        else:
+            scale = target_size / w
+            new_w = target_size
+            new_h = int(h * scale + 0.5)
+
+        # Slack: how many pixels the crop can slide along each axis
+        slack_x = new_w - target_size
+        if slack_x < 0:
+            slack_x = 0
+        slack_y = new_h - target_size
+        if slack_y < 0:
+            slack_y = 0
+
+        # Crop start in resized-image coordinates
+        start_x_resized = int(x_pos_i * slack_x)
+        start_y_resized = int(y_pos_i * slack_y)
+
+        # Map crop region back to original image coordinates
+        crop_x = int(start_x_resized / scale + 0.5)
+        crop_y = int(start_y_resized / scale + 0.5)
+        crop_w_orig = int(target_size / scale + 0.5)
+        crop_h_orig = int(target_size / scale + 0.5)
+
+        # Clamp to image bounds
+        if crop_x < 0:
+            crop_x = 0
+        if crop_x > w - 1:
+            crop_x = w - 1
+        if crop_y < 0:
+            crop_y = 0
+        if crop_y > h - 1:
+            crop_y = h - 1
+        cw = w - crop_x
+        if crop_w_orig > cw:
+            crop_w_orig = cw
+        if crop_w_orig < 1:
+            crop_w_orig = 1
+        ch = h - crop_y
+        if crop_h_orig > ch:
+            crop_h_orig = ch
+        if crop_h_orig < 1:
+            crop_h_orig = 1
+
+        params[i, 0] = crop_x
+        params[i, 1] = crop_y
+        params[i, 2] = crop_w_orig
+        params[i, 3] = crop_h_orig
+
+    return params
+
+
 def _compute_resize_short_crop_long_params(
     heights: NDArray,
     widths: NDArray,

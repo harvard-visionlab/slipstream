@@ -397,6 +397,7 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
 
         from slipstream.decoders.numba_decoder import (
             _compute_resize_short_crop_long_params,
+            _generate_resize_short_crop_long_params_batch,
         )
 
         data = batch_data['data']
@@ -406,8 +407,17 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
         batch_size = len(sizes)
         num_crops = len(self._crop_names)
 
+        heights_i32 = heights if heights.dtype == np.int32 else np.ascontiguousarray(heights, dtype=np.int32)
+        widths_i32 = widths if widths.dtype == np.int32 else np.ascontiguousarray(widths, dtype=np.int32)
+
         self._decoder._seed_counter += 1
         batch_offset = self._decoder._seed_counter
+
+        # Check if any crop has variable per-image sizes
+        has_variable_sizes = any(
+            sr[0] != sr[1] and sm == "per_image"
+            for sr, sm in zip(self._crop_size_ranges, self._crop_size_modes)
+        )
 
         # Generate crop_params for each named crop
         crop_params_list = []
@@ -426,42 +436,64 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
             else:
                 batch_seed = (batch_size * (batch_offset * num_crops + c)) % 2147483647
 
-            x_pos = np.empty(batch_size, dtype=np.float64)
-            y_pos = np.empty(batch_size, dtype=np.float64)
-            for i in range(batch_size):
-                rng_i = np.random.RandomState((batch_seed + i) % 2147483647)
-                x_pos[i] = rng_i.uniform(x_range[0], x_range[1])
-                y_pos[i] = rng_i.uniform(y_range[0], y_range[1])
-
-            # Sample target sizes
+            # Determine target size for this crop
             crop_size_mode = self._crop_size_modes[c]
             if size_range[0] == size_range[1]:
                 # Fixed size
-                target_sizes_arr = np.full(batch_size, size_range[0], dtype=np.int32)
+                target_size = size_range[0]
             elif crop_size_mode == "per_batch":
                 # One random size for the whole batch
                 rng = np.random.RandomState(
                     (batch_seed + batch_size) % 2147483647
                 )
-                s = int(rng.randint(size_range[0], size_range[1] + 1))
-                target_sizes_arr = np.full(batch_size, s, dtype=np.int32)
+                target_size = int(rng.randint(size_range[0], size_range[1] + 1))
             else:
-                # Per-image random sizes
-                target_sizes_arr = np.empty(batch_size, dtype=np.int32)
-                for i in range(batch_size):
-                    rng_i = np.random.RandomState(
-                        (batch_seed + batch_size + i) % 2147483647
-                    )
-                    target_sizes_arr[i] = int(
-                        rng_i.randint(size_range[0], size_range[1] + 1)
-                    )
+                target_size = None  # per_image — handled in slow path
 
-            params = _compute_resize_short_crop_long_params(
-                heights, widths, target_sizes_arr, x_pos, y_pos,
-            )
+            if target_size is not None and not has_variable_sizes:
+                # Fast path: JIT-compiled RNG + param computation
+                x_pos = np.empty(batch_size, dtype=np.float64)
+                y_pos = np.empty(batch_size, dtype=np.float64)
+                params = _generate_resize_short_crop_long_params_batch(
+                    widths_i32, heights_i32,
+                    target_size,
+                    x_range[0], x_range[1],
+                    y_range[0], y_range[1],
+                    batch_seed,
+                    x_pos, y_pos,
+                )
+                target_sizes_arr = np.full(batch_size, target_size, dtype=np.int32)
+                x_pos_list.append(x_pos)
+                y_pos_list.append(y_pos)
+            else:
+                # Slow path: per-image variable sizes need Python RNG
+                x_pos = np.empty(batch_size, dtype=np.float64)
+                y_pos = np.empty(batch_size, dtype=np.float64)
+                for i in range(batch_size):
+                    rng_i = np.random.RandomState((batch_seed + i) % 2147483647)
+                    x_pos[i] = rng_i.uniform(x_range[0], x_range[1])
+                    y_pos[i] = rng_i.uniform(y_range[0], y_range[1])
+
+                if target_size is not None:
+                    target_sizes_arr = np.full(batch_size, target_size, dtype=np.int32)
+                else:
+                    # Per-image random sizes
+                    target_sizes_arr = np.empty(batch_size, dtype=np.int32)
+                    for i in range(batch_size):
+                        rng_i = np.random.RandomState(
+                            (batch_seed + batch_size + i) % 2147483647
+                        )
+                        target_sizes_arr[i] = int(
+                            rng_i.randint(size_range[0], size_range[1] + 1)
+                        )
+
+                params = _compute_resize_short_crop_long_params(
+                    heights, widths, target_sizes_arr, x_pos, y_pos,
+                )
+                x_pos_list.append(x_pos)
+                y_pos_list.append(y_pos)
+
             crop_params_list.append(params)
-            x_pos_list.append(x_pos)
-            y_pos_list.append(y_pos)
             target_sizes_list.append(target_sizes_arr)
 
         # Store last_params for inspection
@@ -478,12 +510,6 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                 for c, name in enumerate(self._crop_names)
             },
         }
-
-        # Check if any crop has variable per-image sizes
-        has_variable_sizes = any(
-            sr[0] != sr[1] and sm == "per_image"
-            for sr, sm in zip(self._crop_size_ranges, self._crop_size_modes)
-        )
 
         if has_variable_sizes:
             # Per-image variable sizes: decode each image individually
