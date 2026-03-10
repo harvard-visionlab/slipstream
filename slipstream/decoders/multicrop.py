@@ -15,8 +15,62 @@ import copy
 import numpy as np
 import torch
 
+from numba import njit
+
 from slipstream.decoders.base import BatchTransform
 from slipstream.decoders.numba_decoder import NumbaBatchDecoder
+
+
+@njit(cache=True)
+def _embed_batch_rgba(
+    crop: np.ndarray,       # [B, crop_h, crop_w, 3] uint8
+    canvas: np.ndarray,     # [B, cs, cs, 4] uint8 (zeros, modified in-place)
+    rects: np.ndarray,      # [B, 4] int32 (output: x0, y0, copy_w, copy_h)
+    seed: int,
+    x_range_min: float,
+    x_range_max: float,
+    y_range_min: float,
+    y_range_max: float,
+) -> None:
+    """Embed a uniform-size crop batch onto RGBA canvases (Numba JIT)."""
+    B = crop.shape[0]
+    crop_h = crop.shape[1]
+    crop_w = crop.shape[2]
+    cs = canvas.shape[1]
+
+    for i in range(B):
+        np.random.seed((seed + i) % 2147483647)
+        x_frac = np.random.uniform(x_range_min, x_range_max)
+        y_frac = np.random.uniform(y_range_min, y_range_max)
+
+        slack_x = cs - crop_w
+        if slack_x < 0:
+            slack_x = 0
+        slack_y = cs - crop_h
+        if slack_y < 0:
+            slack_y = 0
+
+        x0 = int(x_frac * slack_x)
+        y0 = int(y_frac * slack_y)
+
+        copy_h = crop_h
+        if y0 + copy_h > cs:
+            copy_h = cs - y0
+        copy_w = crop_w
+        if x0 + copy_w > cs:
+            copy_w = cs - x0
+
+        for row in range(copy_h):
+            for col in range(copy_w):
+                canvas[i, y0 + row, x0 + col, 0] = crop[i, row, col, 0]
+                canvas[i, y0 + row, x0 + col, 1] = crop[i, row, col, 1]
+                canvas[i, y0 + row, x0 + col, 2] = crop[i, row, col, 2]
+                canvas[i, y0 + row, x0 + col, 3] = 255
+
+        rects[i, 0] = x0
+        rects[i, 1] = y0
+        rects[i, 2] = copy_w
+        rects[i, 3] = copy_h
 
 
 def _get_yuv420_decoder_class() -> type:
@@ -722,6 +776,191 @@ class NamedCopies(BatchTransform):
 
     def __repr__(self) -> str:
         return f"NamedCopies({self.names})"
+
+
+class DecodeMultiResizeCropEmbed(BatchTransform):
+    """Decode + resize-short + crop-long + embed onto a fixed-size RGBA canvas.
+
+    Wraps :class:`DecodeMultiRandomResizeShortCropLong` and places each crop
+    onto a zero-filled canvas of ``canvas_size``, adding a binary alpha channel.
+    This guarantees uniform output size regardless of per-image crop size
+    variation, enabling fast batched GPU pipelines even with ``size=(min, max)``.
+
+    The output for each named crop is ``[B, canvas_size, canvas_size, 4]``
+    uint8 HWC (RGBA), where the alpha channel is 255 inside the image
+    region and 0 outside.
+
+    Downstream, use :class:`~slipstream.transforms.RandomBackgroundBlend` to
+    blend the embedded image with a generated background, optionally applying
+    circular or cosine edge fading.
+
+    Args:
+        crops: Dict mapping crop names to parameter dicts.
+            Required key: ``size`` (int or tuple ``(min, max)``).
+            Optional keys: ``x_range``, ``y_range``, ``seed``, ``size_mode``.
+        canvas_size: Output spatial size (square). Must be >= largest crop size.
+        embed_x_range: Horizontal placement on canvas.  Float or ``(min, max)``
+            in [0, 1] where 0 = left, 0.5 = center, 1 = right.
+        embed_y_range: Vertical placement on canvas.  Float or ``(min, max)``.
+        embed_seed: Seed for placement RNG (separate from per-crop seeds).
+        size_mode: Default size mode (``"per_batch"`` or ``"per_image"``).
+        num_threads: Parallel decode threads. 0 = auto.
+
+    Returns:
+        Dict[str, np.ndarray] — named crops, each ``[B, canvas_size, canvas_size, 4]``
+        uint8 HWC (RGBA).
+
+    Example::
+
+        decoder = DecodeMultiResizeCropEmbed({
+            "small": dict(size=(64, 112), x_range=(0, 1), seed=42),
+            "large": dict(size=(112, 224), x_range=(0, 1), seed=43),
+        }, canvas_size=320, embed_x_range=(0, 1), embed_y_range=(0, 1))
+        result = decoder(batch_data)  # {"small": [B,320,320,4], "large": [B,320,320,4]}
+    """
+
+    def __init__(
+        self,
+        crops: dict[str, dict],
+        canvas_size: int = 224,
+        embed_x_range: float | tuple[float, float] = 0.5,
+        embed_y_range: float | tuple[float, float] = 0.5,
+        embed_seed: int | None = None,
+        size_mode: str = "per_batch",
+        num_threads: int = 0,
+    ) -> None:
+        self.canvas_size = canvas_size
+        self.embed_x_range = (
+            (embed_x_range, embed_x_range) if isinstance(embed_x_range, (int, float))
+            else tuple(embed_x_range)
+        )
+        self.embed_y_range = (
+            (embed_y_range, embed_y_range) if isinstance(embed_y_range, (int, float))
+            else tuple(embed_y_range)
+        )
+        self.embed_seed = embed_seed
+        self._embed_seed_counter = 0
+
+        # Inner decoder — always HWC, no permute/tensor (we handle that)
+        self._inner = DecodeMultiRandomResizeShortCropLong(
+            crops,
+            size_mode=size_mode,
+            num_threads=num_threads,
+            to_tensor=False,
+            permute=False,
+        )
+
+    def set_image_format(self, image_format: str) -> None:
+        self._inner.set_image_format(image_format)
+
+    def __call__(
+        self, batch_data: dict[str, Any] | bytes | bytearray | memoryview,
+    ) -> dict[str, np.ndarray]:
+        if isinstance(batch_data, (bytes, bytearray, memoryview)):
+            from slipstream.decoders.base import _bytes_to_batch_dict, _unwrap_single_result
+            return _unwrap_single_result(self(_bytes_to_batch_dict(batch_data)))
+
+        # Decode crops (HWC uint8)
+        crops_rgb = self._inner(batch_data)
+        batch_size = batch_data['sizes'].shape[0]
+
+        # Advance embed RNG
+        self._embed_seed_counter += 1
+
+        result = {}
+        embed_rects = {}
+        for c, (name, crop_data) in enumerate(crops_rgb.items()):
+            is_list = isinstance(crop_data, list)
+
+            cs = self.canvas_size
+            canvas = np.zeros((batch_size, cs, cs, 4), dtype=np.uint8)
+            rects = np.zeros((batch_size, 4), dtype=np.int32)
+
+            # Compute embed seed for this crop
+            if self.embed_seed is not None:
+                embed_batch_seed = (
+                    self.embed_seed + batch_size * self._embed_seed_counter
+                    + c * 7919  # prime offset per crop for independence
+                ) % 2147483647
+            else:
+                embed_batch_seed = (
+                    batch_size * self._embed_seed_counter + c * 7919
+                ) % 2147483647
+
+            if not is_list:
+                # Fast path: stacked [B, h, w, 3] — use Numba JIT
+                _embed_batch_rgba(
+                    crop_data, canvas, rects,
+                    embed_batch_seed,
+                    self.embed_x_range[0], self.embed_x_range[1],
+                    self.embed_y_range[0], self.embed_y_range[1],
+                )
+            else:
+                # Slow path: per_image variable sizes (list of arrays)
+                for i in range(batch_size):
+                    img = crop_data[i]  # [h, w, 3]
+                    h, w = img.shape[0], img.shape[1]
+
+                    rng_i = np.random.RandomState(
+                        (embed_batch_seed + i) % 2147483647
+                    )
+                    x_frac = rng_i.uniform(self.embed_x_range[0], self.embed_x_range[1])
+                    y_frac = rng_i.uniform(self.embed_y_range[0], self.embed_y_range[1])
+
+                    slack_x = max(0, cs - w)
+                    slack_y = max(0, cs - h)
+                    x0 = int(x_frac * slack_x)
+                    y0 = int(y_frac * slack_y)
+
+                    copy_h = min(h, cs - y0)
+                    copy_w = min(w, cs - x0)
+
+                    canvas[i, y0:y0 + copy_h, x0:x0 + copy_w, :3] = img[:copy_h, :copy_w]
+                    canvas[i, y0:y0 + copy_h, x0:x0 + copy_w, 3] = 255
+                    rects[i] = [x0, y0, copy_w, copy_h]
+
+            result[name] = canvas
+            embed_rects[name] = rects
+
+        # Store params for inspection
+        self._last_params = {
+            **self._inner.last_params,
+            "embed_rects": embed_rects,
+        }
+
+        return result
+
+    @property
+    def last_params(self) -> dict:
+        """Parameters from the most recent ``__call__``."""
+        return getattr(self, '_last_params', {})
+
+    def shutdown(self) -> None:
+        self._inner.shutdown()
+
+    def __repr__(self) -> str:
+        inner_crops = []
+        for c, name in enumerate(self._inner._crop_names):
+            sr = self._inner._crop_size_ranges[c]
+            size_str = sr[0] if sr[0] == sr[1] else sr
+            parts = [f"size={size_str}"]
+            if sr[0] != sr[1]:
+                parts.append(f"size_mode='{self._inner._crop_size_modes[c]}'")
+            if self._inner._crop_x_ranges[c] != (0.5, 0.5):
+                parts.append(f"x_range={self._inner._crop_x_ranges[c]}")
+            if self._inner._crop_y_ranges[c] != (0.5, 0.5):
+                parts.append(f"y_range={self._inner._crop_y_ranges[c]}")
+            if self._inner._crop_seeds[c] is not None:
+                parts.append(f"seed={self._inner._crop_seeds[c]}")
+            inner_crops.append(f"'{name}': {', '.join(parts)}")
+        extras = [f"canvas_size={self.canvas_size}"]
+        if self.embed_x_range != (0.5, 0.5):
+            extras.append(f"embed_x_range={self.embed_x_range}")
+        if self.embed_y_range != (0.5, 0.5):
+            extras.append(f"embed_y_range={self.embed_y_range}")
+        if self.embed_seed is not None:
+            extras.append(f"embed_seed={self.embed_seed}")
+        return f"DecodeMultiResizeCropEmbed({{{', '.join(inner_crops)}}}, {', '.join(extras)})"
 
 
 # Backward-compatible aliases (deprecated)

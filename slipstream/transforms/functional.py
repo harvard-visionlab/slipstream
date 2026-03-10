@@ -101,15 +101,15 @@ def _max_value(dtype: torch.dtype) -> int:
 def _is_hwc(b: torch.Tensor) -> bool:
     """Check if tensor is HWC/BHWC format (channels last).
 
-    HWC: [H, W, 3] or [B, H, W, 3] where the last dimension is 3 (RGB channels).
-    CHW: [3, H, W] or [B, 3, H, W] where channels are in dim -3.
+    HWC: [H, W, C] or [B, H, W, C] where C is 3 (RGB) or 4 (RGBA).
+    CHW: [C, H, W] or [B, C, H, W] where channels are in dim -3.
     """
     if b.ndim == 3:
-        # [H, W, 3] vs [3, H, W]
-        return b.shape[-1] == 3 and b.shape[0] != 3
+        # [H, W, C] vs [C, H, W]
+        return b.shape[-1] in (3, 4) and b.shape[0] not in (3, 4)
     elif b.ndim == 4:
-        # [B, H, W, 3] vs [B, 3, H, W]
-        return b.shape[-1] == 3 and b.shape[1] != 3
+        # [B, H, W, C] vs [B, C, H, W]
+        return b.shape[-1] in (3, 4) and b.shape[1] not in (3, 4)
     return False
 
 
@@ -117,8 +117,8 @@ def to_torch_image(b, device="cpu", dtype=torch.float32, **kwargs):
     """Convert numpy array or tensor to torch image (CxHxW or BxCxHxW; 0-1).
 
     Accepts:
-        - numpy array [H, W, 3] or [B, H, W, 3] (HWC)
-        - numpy array [3, H, W] or [B, 3, H, W] (CHW)
+        - numpy array [H, W, C] or [B, H, W, C] (HWC) where C is 3 (RGB) or 4 (RGBA)
+        - numpy array [C, H, W] or [B, C, H, W] (CHW)
         - torch tensor in any of the above formats
 
     Returns:

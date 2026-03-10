@@ -72,6 +72,7 @@ from slipstream.decoders.crop import (
 from slipstream.decoders.multicrop import (
     DecodeMultiRandomResizedCrop,
     DecodeMultiRandomResizeShortCropLong,
+    DecodeMultiResizeCropEmbed,
     DecodeUniformMultiRandomResizedCrop,
     MultiCropPipeline,
     NamedCopies,
@@ -118,6 +119,7 @@ __all__ = [
     # Multi-crop stages (new names)
     "DecodeMultiRandomResizedCrop",
     "DecodeMultiRandomResizeShortCropLong",
+    "DecodeMultiResizeCropEmbed",
     "DecodeUniformMultiRandomResizedCrop",
     "MultiCropPipeline",
     "NamedCopies",
