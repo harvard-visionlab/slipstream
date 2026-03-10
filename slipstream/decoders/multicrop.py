@@ -798,8 +798,13 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
         crops: Dict mapping crop names to parameter dicts.
             Required key: ``size`` (int or tuple ``(min, max)``).
             Optional keys: ``x_range``, ``y_range``, ``seed``, ``size_mode``,
-            ``embed_x_range``, ``embed_y_range``, ``embed_seed`` (per-crop
-            overrides for canvas placement; fall back to global defaults).
+            ``embed_x_range``, ``embed_y_range``, ``embed_seed``, ``coords``
+            (per-crop overrides for canvas placement; fall back to global
+            defaults).  ``coords`` is a list of ``(x, y)`` tuples in [0, 1]
+            specifying explicit fractional placement positions.  When set, it
+            overrides ``embed_x_range``/``embed_y_range`` for that crop.  A
+            single coord gives deterministic placement; multiple coords cause
+            a random choice per image.
         canvas_size: Output spatial size (square). Must be >= largest crop size.
         embed_x_range: Horizontal placement on canvas.  Float or ``(min, max)``
             in [0, 1] where 0 = left, 0.5 = center, 1 = right.
@@ -859,6 +864,7 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
         self._embed_x_ranges: list[tuple[float, float]] = []
         self._embed_y_ranges: list[tuple[float, float]] = []
         self._embed_seeds: list[int | None] = []
+        self._embed_coords: list[list[tuple[float, float]] | None] = []
         for name in self._inner._crop_names:
             params = crops[name]
             exr = params.get('embed_x_range', embed_x_range)
@@ -868,6 +874,10 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
             eyr = (eyr, eyr) if isinstance(eyr, (int, float)) else tuple(eyr)
             self._embed_y_ranges.append(eyr)
             self._embed_seeds.append(params.get('embed_seed', embed_seed))
+            embed_coords = params.get('coords', None)
+            if embed_coords is not None:
+                embed_coords = [(float(x), float(y)) for x, y in embed_coords]
+            self._embed_coords.append(embed_coords)
 
     def set_image_format(self, image_format: str) -> None:
         self._inner.set_image_format(image_format)
@@ -907,7 +917,39 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
                     batch_size * self._embed_seed_counter + c * 7919
                 ) % 2147483647
 
-            if not is_list:
+            embed_coords = self._embed_coords[c]
+
+            if embed_coords is not None:
+                # Coords mode: explicit fractional positions
+                if len(embed_coords) == 1 and not is_list:
+                    # Single coord + uniform size → fast path with fixed range
+                    xf, yf = embed_coords[0]
+                    _embed_batch_rgba(
+                        crop_data, canvas, rects,
+                        embed_batch_seed,
+                        xf, xf, yf, yf,
+                    )
+                else:
+                    # Multi-coord or variable-size: slow path with per-image
+                    rng = np.random.RandomState(embed_batch_seed)
+                    for i in range(batch_size):
+                        idx = rng.randint(0, len(embed_coords))
+                        x_frac, y_frac = embed_coords[idx]
+                        img = crop_data[i]  # [h, w, 3]
+                        h, w = img.shape[0], img.shape[1]
+
+                        slack_x = max(0, cs - w)
+                        slack_y = max(0, cs - h)
+                        x0 = int(x_frac * slack_x)
+                        y0 = int(y_frac * slack_y)
+
+                        copy_h = min(h, cs - y0)
+                        copy_w = min(w, cs - x0)
+
+                        canvas[i, y0:y0 + copy_h, x0:x0 + copy_w, :3] = img[:copy_h, :copy_w]
+                        canvas[i, y0:y0 + copy_h, x0:x0 + copy_w, 3] = 255
+                        rects[i] = [x0, y0, copy_w, copy_h]
+            elif not is_list:
                 # Fast path: stacked [B, h, w, 3] — use Numba JIT
                 _embed_batch_rgba(
                     crop_data, canvas, rects,
@@ -978,6 +1020,8 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
                 parts.append(f"embed_y_range={self._embed_y_ranges[c]}")
             if self._embed_seeds[c] != self.embed_seed:
                 parts.append(f"embed_seed={self._embed_seeds[c]}")
+            if self._embed_coords[c] is not None:
+                parts.append(f"coords={self._embed_coords[c]}")
             inner_crops.append(f"'{name}': {', '.join(parts)}")
         extras = [f"canvas_size={self.canvas_size}"]
         if self.embed_x_range != (0.5, 0.5):
