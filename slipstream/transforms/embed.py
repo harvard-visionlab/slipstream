@@ -470,6 +470,11 @@ class RandomBackgroundBlend(BatchAugment):
             normalised as ``(blended - mean) / std``.
         alpha_range: Power-law exponent.  Float or ``(min, max)``.
         color_noise: Independent noise per channel (default ``True``).
+        noise_size: Resolution at which to generate power-law noise before
+            bilinear upsampling to canvas size.  Lower values are faster;
+            default 64 is ~9x faster than full resolution with minimal
+            visual difference for alpha >= 1.  Set to canvas size to
+            disable downsampling.
         fade_mode: ``None`` (hard rect), ``"circular"``, or ``"cosine"``.
         fade_radius: For ``"circular"`` mode: ``(inner, outer)`` as fractions
             of ``min(crop_h, crop_w)``.  Pixels within ``inner`` are fully
@@ -503,6 +508,7 @@ class RandomBackgroundBlend(BatchAugment):
         std=None,
         alpha_range: float | tuple[float, float] = 2.0,
         color_noise: bool = True,
+        noise_size: int = 64,
         # Fade ────────────────────────────────────────────────
         fade_mode: str | None = None,
         fade_radius: tuple[float, float] | None = None,
@@ -545,6 +551,7 @@ class RandomBackgroundBlend(BatchAugment):
             else tuple(alpha_range)
         )
         self.color_noise = color_noise
+        self.noise_size = _even_ceil(noise_size)
         self.fade_mode = fade_mode
         self.fade_radius = fade_radius
         self.inset = inset
@@ -726,9 +733,12 @@ class RandomBackgroundBlend(BatchAugment):
         return canvas
 
     def _generate_power_law(self, B, C, M, N, device, dtype):
+        import torch.nn.functional as F
         from slipstream.utils.noise import power_law_noise
 
-        gen_size = _even_ceil(max(M, N))
+        canvas_size = max(M, N)
+        gen_size = _even_ceil(min(self.noise_size, canvas_size))
+        needs_upsample = gen_size < canvas_size
         fixed_alpha = self.alpha_range[0] == self.alpha_range[1]
 
         if fixed_alpha:
@@ -761,6 +771,13 @@ class RandomBackgroundBlend(BatchAugment):
                 slices.append(noise)
             bg = torch.stack(slices, dim=0)
 
+        if needs_upsample:
+            # Ensure 4D for interpolate: [B, C, H, W]
+            if bg.ndim == 3:
+                bg = bg.unsqueeze(0)
+            bg = F.interpolate(bg, size=(M, N), mode='bilinear', align_corners=False)
+            return bg.to(dtype=dtype)
+
         return bg[:, :, :M, :N].contiguous().to(dtype=dtype)
 
     # ------------------------------------------------------------------ #
@@ -775,6 +792,8 @@ class RandomBackgroundBlend(BatchAugment):
             parts.append(f"alpha_range={self.alpha_range}")
             if not self.color_noise:
                 parts.append("color_noise=False")
+            if self.noise_size != 64:
+                parts.append(f"noise_size={self.noise_size}")
         if self.fade_mode is not None:
             parts.append(f"fade_mode='{self.fade_mode}'")
             if self.fade_mode == "circular":
