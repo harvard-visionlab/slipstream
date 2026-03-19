@@ -351,7 +351,7 @@ def _iter_litdata_chunk_samples(
     field_types: dict[str, str],
     dataset: Any,
     verbose: bool = True,
-    num_download_workers: int = 8,
+    num_download_workers: int | None = None,
 ):
     """Yield (idx, sample_dict) from LitData binary chunks.
 
@@ -371,6 +371,15 @@ def _iter_litdata_chunk_samples(
     Yields:
         (global_idx, sample_dict) tuples
     """
+    if num_download_workers is None:
+        import os
+        try:
+            ncpu = len(os.sched_getaffinity(0))
+        except AttributeError:
+            # macOS doesn't have sched_getaffinity
+            ncpu = os.cpu_count() or 8
+        num_download_workers = max(ncpu - 1, 1)
+
     index_path = litdata_cache_dir / "index.json"
     with open(index_path) as f:
         index = json.load(f)
@@ -420,14 +429,15 @@ def _iter_litdata_chunk_samples(
     # This bypasses dataset[i] which may have internal locks
     litdata_config = None
     try:
-        # Access the underlying LitData StreamingDataset's reader config
-        inner_dataset = dataset._dataset
-        if hasattr(inner_dataset, '_reader') and inner_dataset._reader is not None:
-            reader = inner_dataset._reader
-            if hasattr(reader, 'config'):
-                litdata_config = reader.config
-            elif hasattr(reader, '_config') and reader._config is not None:
-                litdata_config = reader._config
+        # StreamingReader IS a LitDataStreamingDataset, so cache._reader
+        # is the BinaryReader with a .config (ChunksConfig) that has
+        # download_chunk_from_index()
+        if hasattr(dataset, 'cache') and dataset.cache is not None:
+            reader = getattr(dataset.cache, '_reader', None)
+            if reader is not None:
+                cfg = getattr(reader, 'config', None) or getattr(reader, '_config', None)
+                if cfg is not None and hasattr(cfg, 'download_chunk_from_index'):
+                    litdata_config = cfg
     except Exception:
         pass  # Fall back to dataset[i] approach
 
