@@ -1523,8 +1523,16 @@ class OptimizedCache:
         litdata_obj = getattr(dataset, '_reader', dataset)
 
         # Check for LitData fast path (binary chunks only, not Parquet)
-        litdata_cache_dir = Path(output_dir)
-        use_litdata_fast_path = _has_litdata_binary_cache(litdata_cache_dir)
+        # Must use the LitData source cache dir (where chunks live), NOT the
+        # slipstream output dir. The litdata_cache_path property resolves to
+        # e.g. ~/.lightning/chunks/{hash}/{timestamp}/
+        litdata_cache_dir = getattr(litdata_obj, 'litdata_cache_path', None)
+        if litdata_cache_dir is not None:
+            litdata_cache_dir = Path(litdata_cache_dir)
+            use_litdata_fast_path = _has_litdata_binary_cache(litdata_cache_dir)
+        else:
+            litdata_cache_dir = Path(output_dir)
+            use_litdata_fast_path = False
 
         num_samples = len(dataset)
 
