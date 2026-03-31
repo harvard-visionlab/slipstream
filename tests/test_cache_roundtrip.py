@@ -550,3 +550,125 @@ class TestYUV420Conversion:
         # YUV420 size: Y (h×w) + U (h/2 × w/2) + V (h/2 × w/2)
         expected_size = 16 * 18 + (16 // 2) * (18 // 2) * 2
         assert len(yuv_bytes) == expected_size
+
+
+# =============================================================================
+# Parallel Build Tests
+# =============================================================================
+
+class TestParallelBuild:
+    """Test parallel cache building produces identical results to sequential."""
+
+    def test_parallel_matches_sequential_jpeg(self, tmp_path):
+        """Parallel build with JPEG images produces same cache as sequential."""
+        dataset = MockJPEGDataset(num_samples=20, cache_path=tmp_path / "seq")
+        seq_dir = tmp_path / "sequential"
+        par_dir = tmp_path / "parallel"
+
+        seq_cache = OptimizedCache.build(
+            dataset, output_dir=seq_dir, verbose=False, num_workers=1
+        )
+        dataset_par = MockJPEGDataset(num_samples=20, cache_path=tmp_path / "par")
+        par_cache = OptimizedCache.build(
+            dataset_par, output_dir=par_dir, verbose=False, num_workers=2
+        )
+
+        assert seq_cache.num_samples == par_cache.num_samples
+
+        # Compare all samples
+        indices = np.arange(20, dtype=np.int64)
+        seq_batch = seq_cache.load_batch(indices, fields=['image', 'label'])
+        par_batch = par_cache.load_batch(indices, fields=['image', 'label'])
+
+        for i in range(20):
+            seq_size = seq_batch['image']['sizes'][i]
+            par_size = par_batch['image']['sizes'][i]
+            assert seq_size == par_size, f"Size mismatch at {i}"
+            seq_img = seq_batch['image']['data'][i][:seq_size]
+            par_img = par_batch['image']['data'][i][:par_size]
+            assert seq_img.tobytes() == par_img.tobytes(), f"Image mismatch at {i}"
+
+        np.testing.assert_array_equal(
+            seq_batch['label']['data'], par_batch['label']['data']
+        )
+
+    def test_parallel_mixed_fields(self, tmp_path):
+        """Parallel build handles all field types (ImageBytes, int, str, float)."""
+        dataset = MockMixedDataset(num_samples=20, cache_path=tmp_path / "seq")
+        seq_dir = tmp_path / "sequential"
+        par_dir = tmp_path / "parallel"
+
+        seq_cache = OptimizedCache.build(
+            dataset, output_dir=seq_dir, verbose=False, num_workers=1
+        )
+        dataset_par = MockMixedDataset(num_samples=20, cache_path=tmp_path / "par")
+        par_cache = OptimizedCache.build(
+            dataset_par, output_dir=par_dir, verbose=False, num_workers=3
+        )
+
+        assert seq_cache.num_samples == par_cache.num_samples
+
+        indices = np.arange(20, dtype=np.int64)
+        seq_batch = seq_cache.load_batch(
+            indices, fields=['image', 'label', 'path', 'score']
+        )
+        par_batch = par_cache.load_batch(
+            indices, fields=['image', 'label', 'path', 'score']
+        )
+
+        # Images
+        for i in range(20):
+            seq_size = seq_batch['image']['sizes'][i]
+            par_size = par_batch['image']['sizes'][i]
+            seq_img = seq_batch['image']['data'][i][:seq_size]
+            par_img = par_batch['image']['data'][i][:par_size]
+            assert seq_img.tobytes() == par_img.tobytes(), f"Image mismatch at {i}"
+
+        # Labels and scores
+        np.testing.assert_array_equal(
+            seq_batch['label']['data'], par_batch['label']['data']
+        )
+        np.testing.assert_array_equal(
+            seq_batch['score']['data'], par_batch['score']['data']
+        )
+
+        # Paths (string field)
+        assert seq_batch['path']['data'] == par_batch['path']['data']
+
+    def test_parallel_shard_cleanup(self, tmp_path):
+        """Shard directories are cleaned up after successful build."""
+        dataset = MockJPEGDataset(num_samples=10, cache_path=tmp_path / "cache")
+        OptimizedCache.build(
+            dataset, output_dir=tmp_path / "out", verbose=False, num_workers=2
+        )
+
+        cache_dir = tmp_path / "out" / ".slipstream"
+        shard_dirs = list(cache_dir.glob("_shard_*"))
+        assert len(shard_dirs) == 0, f"Shard dirs not cleaned up: {shard_dirs}"
+
+    def test_parallel_worker_error_propagation(self, tmp_path):
+        """Non-picklable dataset raises TypeError, not RuntimeError."""
+
+        class LocalFailingDataset:
+            cache_path = tmp_path / "fail"
+            field_types = {"image": "ImageBytes", "label": "int"}
+            def __len__(self):
+                return 10
+            def __getitem__(self, idx):
+                return {"image": _create_test_jpeg(32, 32), "label": idx}
+
+        with pytest.raises(TypeError, match="picklable"):
+            OptimizedCache.build(
+                LocalFailingDataset(),
+                output_dir=tmp_path / "out",
+                verbose=False,
+                num_workers=2,
+            )
+
+    def test_parallel_more_workers_than_samples(self, tmp_path):
+        """Handles case where num_workers > num_samples gracefully."""
+        dataset = MockJPEGDataset(num_samples=3, cache_path=tmp_path / "cache")
+        cache = OptimizedCache.build(
+            dataset, output_dir=tmp_path / "out", verbose=False, num_workers=8
+        )
+        assert cache.num_samples == 3

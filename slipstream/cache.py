@@ -55,7 +55,7 @@ DatasetLike = Any  # Using Any since Protocol requires runtime_checkable for isi
 # Constants
 # =============================================================================
 
-CACHE_SUBDIR = ".slipstream"
+CACHE_SUBDIR = "slipcache"
 MANIFEST_FILE = "manifest.json"
 CACHE_VERSION = 1
 
@@ -1363,6 +1363,257 @@ def _is_parquet_dataset(cache_dir: Path) -> bool:
 
 
 # =============================================================================
+# Parallel Cache Build
+# =============================================================================
+
+def _worker_build_shard(
+    worker_id: int,
+    dataset: Any,
+    start_idx: int,
+    end_idx: int,
+    shard_dir: str,
+    field_types: dict[str, str],
+    image_format: str | None,
+    progress_counter: Any,  # multiprocessing.Value
+    error_queue: Any,  # multiprocessing.Queue
+) -> None:
+    """Build a shard of the cache from a contiguous index range.
+
+    This function runs in a worker process. It creates independent writers
+    for the shard, iterates dataset[i] for the assigned range, and writes
+    results to shard-local files.
+
+    The dataset's __getitem__ is responsible for all preprocessing — this
+    function just writes whatever the dataset emits.
+    """
+    shard_dir = Path(shard_dir)
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    num_shard_samples = end_idx - start_idx
+
+    try:
+        # Create writers for this shard
+        writers: dict[str, StreamingFieldWriter] = {}
+        for field_name, field_type in field_types.items():
+            writers[field_name] = _create_field_writer(
+                field_name, field_type, shard_dir, num_shard_samples,
+                image_format=image_format,
+            )
+
+        # Iterate assigned range, write all fields
+        for global_idx in range(start_idx, end_idx):
+            sample = dataset[global_idx]
+            local_idx = global_idx - start_idx
+            for field_name in field_types:
+                writers[field_name].add_sample(local_idx, sample[field_name])
+            progress_counter.value += 1
+
+        # Finalize writers and save shard manifest
+        shard_metadata: dict[str, dict] = {}
+        for field_name, writer in writers.items():
+            shard_metadata[field_name] = writer.finalize()
+
+        # Record shard file sizes for merge
+        import os as _os
+        file_sizes: dict[str, int] = {}
+        for field_name, meta in shard_metadata.items():
+            field_type = meta.get('type', '')
+            for fname in _get_expected_files(field_name, field_type):
+                fpath = shard_dir / fname
+                if fpath.exists():
+                    file_sizes[fname] = _os.path.getsize(fpath)
+
+        manifest = {
+            'worker_id': worker_id,
+            'start_idx': start_idx,
+            'end_idx': end_idx,
+            'num_samples': num_shard_samples,
+            'fields': shard_metadata,
+            'file_sizes': file_sizes,
+        }
+        with open(shard_dir / '_shard_manifest.json', 'w') as f:
+            json.dump(manifest, f, indent=2)
+
+        del writers
+
+    except Exception:
+        import traceback
+        error_queue.put((worker_id, traceback.format_exc()))
+
+
+def _merge_shards(
+    cache_dir: Path,
+    shard_dirs: list[Path],
+    shard_ranges: list[tuple[int, int]],
+    field_types: dict[str, str],
+    num_samples: int,
+    verbose: bool = True,
+) -> dict[str, dict]:
+    """Merge per-worker shard files into the final cache.
+
+    For variable-size fields (ImageBytes, String): concatenates .bin files
+    and adjusts data_ptr/offset values by cumulative byte offsets.
+    For fixed-size fields (Numpy): stacks arrays into a single file.
+
+    Returns:
+        field_metadata dict (same structure as sequential build produces).
+    """
+    import os as _os
+
+    # Load shard manifests
+    shard_manifests = []
+    for shard_dir in shard_dirs:
+        with open(shard_dir / '_shard_manifest.json') as f:
+            shard_manifests.append(json.load(f))
+
+    field_metadata: dict[str, dict] = {}
+
+    for field_name, field_type in field_types.items():
+        if verbose:
+            print(f"  Merging field: {field_name} ({field_type})")
+
+        if field_type in ("ImageBytes", "HFImageDict", "bytes"):
+            field_metadata[field_name] = _merge_image_bytes_field(
+                field_name, cache_dir, shard_dirs, shard_ranges,
+                shard_manifests, num_samples,
+            )
+        elif field_type == "str":
+            field_metadata[field_name] = _merge_string_field(
+                field_name, cache_dir, shard_dirs, shard_ranges,
+                num_samples,
+            )
+        else:
+            field_metadata[field_name] = _merge_numpy_field(
+                field_name, field_type, cache_dir, shard_dirs,
+                shard_ranges, num_samples,
+            )
+
+    return field_metadata
+
+
+_COPY_CHUNK_SIZE = 8 * 1024 * 1024  # 8MB
+
+
+def _concat_bin_files(
+    field_name: str,
+    cache_dir: Path,
+    shard_dirs: list[Path],
+) -> list[int]:
+    """Concatenate shard .bin files into final .bin. Returns per-shard byte sizes."""
+    shard_sizes: list[int] = []
+    with open(cache_dir / f"{field_name}.bin", 'wb') as out:
+        for shard_dir in shard_dirs:
+            shard_bin = shard_dir / f"{field_name}.bin"
+            shard_size = 0
+            with open(shard_bin, 'rb') as inp:
+                while True:
+                    chunk = inp.read(_COPY_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    shard_size += len(chunk)
+            shard_sizes.append(shard_size)
+    return shard_sizes
+
+
+def _merge_image_bytes_field(
+    field_name: str,
+    cache_dir: Path,
+    shard_dirs: list[Path],
+    shard_ranges: list[tuple[int, int]],
+    shard_manifests: list[dict],
+    num_samples: int,
+) -> dict:
+    """Merge ImageBytes shards: concatenate .bin, adjust data_ptr in .meta.npy."""
+    # Concatenate .bin files
+    shard_sizes = _concat_bin_files(field_name, cache_dir, shard_dirs)
+
+    # Merge metadata arrays with ptr offset adjustment
+    final_meta = np.zeros(num_samples, dtype=VARIABLE_METADATA_DTYPE)
+    cumulative_offset = 0
+
+    for i, (shard_dir, (start, end)) in enumerate(zip(shard_dirs, shard_ranges)):
+        shard_meta = np.load(shard_dir / f"{field_name}.meta.npy")
+        shard_meta['data_ptr'] += cumulative_offset
+        final_meta[start:end] = shard_meta
+        cumulative_offset += shard_sizes[i]
+
+    np.save(cache_dir / f"{field_name}.meta.npy", final_meta)
+
+    # Compute max_size across shards
+    max_size = max(
+        m['fields'][field_name].get('max_size', 0)
+        for m in shard_manifests
+    )
+
+    # Get image_format (all shards should agree)
+    image_format = shard_manifests[0]['fields'][field_name].get('image_format', 'jpeg')
+
+    return {
+        'type': shard_manifests[0]['fields'][field_name]['type'],
+        'num_samples': num_samples,
+        'max_size': max_size,
+        'image_format': image_format,
+    }
+
+
+def _merge_numpy_field(
+    field_name: str,
+    field_type: str,
+    cache_dir: Path,
+    shard_dirs: list[Path],
+    shard_ranges: list[tuple[int, int]],
+    num_samples: int,
+) -> dict:
+    """Merge Numpy shards: stack arrays into final .npy."""
+    # Load first shard to determine dtype
+    first_shard = np.load(shard_dirs[0] / f"{field_name}.npy")
+    final_data = np.zeros(num_samples, dtype=first_shard.dtype)
+
+    start_0, end_0 = shard_ranges[0]
+    final_data[start_0:end_0] = first_shard
+
+    for shard_dir, (start, end) in zip(shard_dirs[1:], shard_ranges[1:]):
+        shard_data = np.load(shard_dir / f"{field_name}.npy")
+        final_data[start:end] = shard_data
+
+    np.save(cache_dir / f"{field_name}.npy", final_data)
+
+    return {
+        'type': field_type,
+        'num_samples': num_samples,
+    }
+
+
+def _merge_string_field(
+    field_name: str,
+    cache_dir: Path,
+    shard_dirs: list[Path],
+    shard_ranges: list[tuple[int, int]],
+    num_samples: int,
+) -> dict:
+    """Merge String shards: concatenate .bin, adjust offsets in .offsets.npy."""
+    # Concatenate .bin files
+    shard_sizes = _concat_bin_files(field_name, cache_dir, shard_dirs)
+
+    # Merge offset arrays with cumulative adjustment
+    final_offsets = np.zeros((num_samples, 2), dtype=np.uint64)
+    cumulative_offset = 0
+
+    for i, (shard_dir, (start, end)) in enumerate(zip(shard_dirs, shard_ranges)):
+        shard_offsets = np.load(shard_dir / f"{field_name}.offsets.npy")
+        shard_offsets[:, 0] += cumulative_offset
+        final_offsets[start:end] = shard_offsets
+        cumulative_offset += shard_sizes[i]
+
+    np.save(cache_dir / f"{field_name}.offsets.npy", final_offsets)
+
+    return {
+        'type': 'str',
+        'num_samples': num_samples,
+    }
+
+
+# =============================================================================
 # OptimizedCache
 # =============================================================================
 
@@ -1485,6 +1736,7 @@ class OptimizedCache:
         output_dir: Path | None = None,
         verbose: bool = True,
         image_format: str | None = None,
+        num_workers: int = 1,
     ) -> OptimizedCache:
         """Build optimized cache from a dataset or reader.
 
@@ -1494,6 +1746,11 @@ class OptimizedCache:
         Uses LitData chunk fast path when available (mmap + parallel downloads),
         otherwise iterates reader[i] directly.
 
+        When num_workers > 1, partitions the dataset across worker processes
+        for parallel building. Each worker writes to shard files which are
+        merged after all workers complete. The dataset must be picklable
+        for parallel builds.
+
         Args:
             dataset: Any object with cache_path, field_types, __len__, __getitem__
             output_dir: Where to store cache (defaults to dataset.cache_path)
@@ -1501,6 +1758,7 @@ class OptimizedCache:
             image_format: Force image format ("jpeg" or "yuv420"). None = auto-detect
                 from first sample. Use "yuv420" to force all images to YUV420 format
                 regardless of source format.
+            num_workers: Number of parallel workers. 1 = sequential (default).
 
         Returns:
             Loaded OptimizedCache instance
@@ -1528,6 +1786,21 @@ class OptimizedCache:
         if verbose:
             print(f"Fields: {field_types}")
 
+        num_samples = len(dataset)
+
+        # Parallel build path
+        if num_workers > 1:
+            return cls._build_parallel(
+                dataset=dataset,
+                output_dir=output_dir,
+                cache_dir=cache_dir,
+                field_types=field_types,
+                num_samples=num_samples,
+                num_workers=num_workers,
+                verbose=verbose,
+                image_format=image_format,
+            )
+
         # Get the underlying reader for LitData access
         # After composition refactor, LitData internals live on dataset._reader
         litdata_obj = getattr(dataset, '_reader', dataset)
@@ -1543,8 +1816,6 @@ class OptimizedCache:
         else:
             litdata_cache_dir = Path(output_dir)
             use_litdata_fast_path = False
-
-        num_samples = len(dataset)
 
         # Create streaming writers for all fields
         writers: dict[str, StreamingFieldWriter] = {}
@@ -1624,6 +1895,167 @@ class OptimizedCache:
             print(f"Cache ready: {result.num_samples:,} samples")
 
         # Run sanity check
+        if verbose:
+            print("Running sanity check...")
+            try:
+                result.verify(dataset, num_checks=10, verbose=verbose)
+            except Exception as e:
+                print(f"  Sanity check failed: {e}")
+                print(f"  Cache was built successfully — verify manually if needed")
+
+        return result
+
+    @classmethod
+    def _build_parallel(
+        cls,
+        dataset: Any,
+        output_dir: Path,
+        cache_dir: Path,
+        field_types: dict[str, str],
+        num_samples: int,
+        num_workers: int,
+        verbose: bool,
+        image_format: str | None,
+    ) -> 'OptimizedCache':
+        """Build cache using multiple worker processes.
+
+        Each worker processes a contiguous index range and writes to shard
+        files. The main process merges shards after all workers complete.
+        """
+        import multiprocessing
+        import shutil
+        import time
+
+        # Verify dataset is picklable
+        import pickle
+        try:
+            pickle.dumps(dataset)
+        except (pickle.PicklingError, TypeError, AttributeError) as e:
+            raise TypeError(
+                f"Dataset must be picklable for parallel build (num_workers={num_workers}). "
+                f"Got: {e}"
+            ) from e
+
+        # Partition indices across workers
+        samples_per_worker = (num_samples + num_workers - 1) // num_workers
+        shard_ranges: list[tuple[int, int]] = []
+        for i in range(num_workers):
+            start = i * samples_per_worker
+            end = min(start + samples_per_worker, num_samples)
+            if start < end:
+                shard_ranges.append((start, end))
+
+        actual_workers = len(shard_ranges)
+        shard_dirs = [cache_dir / f"_shard_{i}" for i in range(actual_workers)]
+
+        if verbose:
+            print(f"Parallel build: {actual_workers} workers, {num_samples:,} samples")
+
+        ctx = multiprocessing.get_context('spawn')
+        progress_counter = ctx.Value('Q', 0)  # unsigned 64-bit
+        error_queue = ctx.Queue()
+
+        # Spawn workers
+        workers: list[multiprocessing.Process] = []
+        for i, ((start, end), shard_dir) in enumerate(zip(shard_ranges, shard_dirs)):
+            p = ctx.Process(
+                target=_worker_build_shard,
+                args=(
+                    i, dataset, start, end, str(shard_dir),
+                    field_types, image_format,
+                    progress_counter, error_queue,
+                ),
+            )
+            p.start()
+            workers.append(p)
+
+        # Progress bar in main process
+        try:
+            if verbose:
+                pbar = tqdm(total=num_samples, desc="Building cache")
+                while any(p.is_alive() for p in workers):
+                    pbar.n = progress_counter.value
+                    pbar.refresh()
+                    time.sleep(0.1)
+                pbar.n = num_samples
+                pbar.close()
+
+            # Join all workers
+            for p in workers:
+                p.join(timeout=30)
+
+            # Check for errors
+            errors = []
+            while not error_queue.empty():
+                errors.append(error_queue.get_nowait())
+
+            if errors:
+                # Clean up shard dirs
+                for shard_dir in shard_dirs:
+                    shutil.rmtree(shard_dir, ignore_errors=True)
+                worker_id, tb = errors[0]
+                raise RuntimeError(
+                    f"Cache build failed in worker {worker_id}:\n{tb}"
+                )
+
+        except KeyboardInterrupt:
+            if verbose:
+                print("\nInterrupted — terminating workers...")
+            for p in workers:
+                p.terminate()
+            for p in workers:
+                p.join(timeout=5)
+            for shard_dir in shard_dirs:
+                shutil.rmtree(shard_dir, ignore_errors=True)
+            raise
+
+        # Merge shards
+        if verbose:
+            print("Merging shards...")
+
+        field_metadata = _merge_shards(
+            cache_dir, shard_dirs, shard_ranges, field_types,
+            num_samples, verbose=verbose,
+        )
+
+        # Record file sizes for integrity checking
+        import os
+        file_sizes: dict[str, int] = {}
+        for field_name, meta in field_metadata.items():
+            field_type = meta.get('type', '')
+            for fname in _get_expected_files(field_name, field_type):
+                fpath = cache_dir / fname
+                if fpath.exists():
+                    file_sizes[fname] = os.path.getsize(fpath)
+
+        # Write manifest
+        manifest = {
+            'version': CACHE_VERSION,
+            'num_samples': num_samples,
+            'fields': field_metadata,
+            'file_sizes': file_sizes,
+        }
+        with open(cache_dir / MANIFEST_FILE, 'w') as f:
+            json.dump(manifest, f, indent=2)
+
+        # Clean up shard directories
+        for shard_dir in shard_dirs:
+            shutil.rmtree(shard_dir, ignore_errors=True)
+
+        # Free merge state and load from disk
+        del field_metadata
+        gc.collect()
+
+        if verbose:
+            print(f"Cache written: {num_samples:,} samples")
+            print("Loading cache from disk...")
+
+        result = cls.load(output_dir, verbose=False)
+
+        if verbose:
+            print(f"Cache ready: {result.num_samples:,} samples")
+
+        # Sanity check
         if verbose:
             print("Running sanity check...")
             try:
@@ -2086,6 +2518,39 @@ def rgb_to_yuv420(rgb: np.ndarray) -> tuple[bytes, int, int]:
 
     yuv_bytes = y.tobytes() + u_sub.tobytes() + v_sub.tobytes()
     return yuv_bytes, pad_h, pad_w
+
+
+def yuv420_to_rgb(yuv_bytes: bytes, height: int, width: int) -> np.ndarray:
+    """Convert YUV420P bytes to RGB array.
+
+    Inverse of rgb_to_yuv420(). Uses BT.601 conversion.
+
+    Args:
+        yuv_bytes: Raw YUV420P bytes (Y plane + U plane + V plane).
+        height: Image height (padded to even).
+        width: Image width (padded to even).
+
+    Returns:
+        RGB array, shape (H, W, 3), dtype uint8.
+    """
+    y_size = height * width
+    uv_h, uv_w = height // 2, width // 2
+    uv_size = uv_h * uv_w
+
+    y = np.frombuffer(yuv_bytes[:y_size], dtype=np.uint8).reshape(height, width).astype(np.float32)
+    u = np.frombuffer(yuv_bytes[y_size:y_size + uv_size], dtype=np.uint8).reshape(uv_h, uv_w).astype(np.float32)
+    v = np.frombuffer(yuv_bytes[y_size + uv_size:], dtype=np.uint8).reshape(uv_h, uv_w).astype(np.float32)
+
+    # Upsample U/V to full resolution
+    u_full = np.repeat(np.repeat(u, 2, axis=0), 2, axis=1)
+    v_full = np.repeat(np.repeat(v, 2, axis=0), 2, axis=1)
+
+    # BT.601 inverse
+    r = np.clip(y + 1.402 * (v_full - 128.0), 0, 255).astype(np.uint8)
+    g = np.clip(y - 0.344136 * (u_full - 128.0) - 0.714136 * (v_full - 128.0), 0, 255).astype(np.uint8)
+    b = np.clip(y + 1.772 * (u_full - 128.0), 0, 255).astype(np.uint8)
+
+    return np.stack([r, g, b], axis=-1)
 
 
 def decode_image_to_rgb(image_bytes: bytes) -> np.ndarray:

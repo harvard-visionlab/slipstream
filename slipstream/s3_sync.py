@@ -20,6 +20,37 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from slipstream.cache import CACHE_SUBDIR, MANIFEST_FILE
+
+
+def _resolve_local_cache_path(source) -> Path:
+    """Resolve the parent cache directory from various input types.
+
+    Accepts:
+    - OptimizedCache instance (uses cache_dir.parent)
+    - Path/str to parent dir (contains slipcache/ subdir)
+    - Path/str to slipcache dir itself (detected by manifest.json)
+
+    Returns:
+        The parent directory that contains the slipcache/ subdir.
+    """
+    # OptimizedCache instance
+    if hasattr(source, 'cache_dir'):
+        return Path(source.cache_dir).parent
+
+    path = Path(source)
+
+    # If this IS the slipcache dir (contains manifest.json)
+    if (path / MANIFEST_FILE).exists() and path.name == CACHE_SUBDIR:
+        return path.parent
+
+    # If this is the parent dir (contains slipcache/)
+    if (path / CACHE_SUBDIR / MANIFEST_FILE).exists():
+        return path
+
+    # Fall back to treating it as the parent dir
+    return path
+
 
 def _is_jupyter() -> bool:
     """Detect if running in a Jupyter notebook or Google Colab."""
@@ -392,19 +423,19 @@ def s3_path_exists(
 
 def download_s3_cache(
     remote_cache_path: str,
-    local_cache_path: Path,
+    local_dest,
     endpoint_url: str | None = None,
     numworkers: int = 32,
     verbose: bool = True,
 ) -> bool:
     """Download cache directory from S3 to local path.
 
-    Downloads the .slipstream subdirectory from S3 to the local cache path.
-
     Args:
         remote_cache_path: S3 URL of the cache directory
             (e.g., "s3://bucket/caches/slipcache-abc123/")
-        local_cache_path: Local directory to download to
+        local_dest: An OptimizedCache instance, or a path (str/Path) to
+            download to. Paths can point to either the parent directory
+            or the slipcache/ subdirectory itself.
         endpoint_url: S3-compatible endpoint URL (e.g., for Wasabi)
         numworkers: Number of parallel s5cmd workers
         verbose: Print progress information
@@ -417,12 +448,12 @@ def download_s3_cache(
     """
     _check_s5cmd()
 
-    local_cache_path = Path(local_cache_path)
-    local_slipstream = local_cache_path / ".slipstream"
+    local_cache_path = _resolve_local_cache_path(local_dest)
+    local_slipstream = local_cache_path / CACHE_SUBDIR
     local_slipstream.mkdir(parents=True, exist_ok=True)
 
     # Ensure remote path has proper format
-    remote = remote_cache_path.rstrip("/") + "/.slipstream/*"
+    remote = remote_cache_path.rstrip("/") + f"/{CACHE_SUBDIR}/*"
     local = str(local_slipstream) + "/"
 
     # Use cp with --show-progress for progress display
@@ -453,7 +484,7 @@ def download_s3_cache(
 
 
 def upload_s3_cache(
-    local_cache_path: Path,
+    source,
     remote_cache_path: str,
     endpoint_url: str | None = None,
     numworkers: int = 32,
@@ -461,12 +492,12 @@ def upload_s3_cache(
 ) -> bool:
     """Upload local cache directory to S3.
 
-    Uploads the .slipstream subdirectory from local to S3.
-
     Args:
-        local_cache_path: Local cache directory containing .slipstream/
+        source: An OptimizedCache instance, or a path (str/Path) to the
+            cache directory. Paths can point to either the parent directory
+            or the slipcache/ subdirectory itself.
         remote_cache_path: S3 URL to upload to
-            (e.g., "s3://bucket/caches/slipcache-abc123/")
+            (e.g., "s3://bucket/caches/imagenet1k/")
         endpoint_url: S3-compatible endpoint URL (e.g., for Wasabi)
         numworkers: Number of parallel s5cmd workers
         verbose: Print progress information
@@ -479,17 +510,17 @@ def upload_s3_cache(
     """
     _check_s5cmd()
 
-    local_cache_path = Path(local_cache_path)
-    local_slipstream = local_cache_path / ".slipstream"
+    local_cache_path = _resolve_local_cache_path(source)
+    local_slipstream = local_cache_path / CACHE_SUBDIR
 
     if not local_slipstream.exists():
         if verbose:
-            print(f"  No .slipstream directory found at {local_cache_path}")
+            print(f"  No {CACHE_SUBDIR} directory found at {local_cache_path}")
         return False
 
     # Source and destination paths
     local = str(local_slipstream) + "/*"
-    remote = remote_cache_path.rstrip("/") + "/.slipstream/"
+    remote = remote_cache_path.rstrip("/") + f"/{CACHE_SUBDIR}/"
 
     # Use cp with --show-progress and sync flags for progress display
     cmd = ["s5cmd"]
@@ -522,7 +553,7 @@ def upload_s3_cache(
 
 
 def sync_s3_cache(
-    local_cache_path: Path,
+    source,
     remote_cache_path: str,
     endpoint_url: str | None = None,
     numworkers: int = 32,
@@ -530,7 +561,7 @@ def sync_s3_cache(
 ) -> tuple[int, int]:
     """Bidirectional sync between local and remote cache.
 
-    Syncs the .slipstream subdirectory in both directions:
+    Syncs the slipcache subdirectory in both directions:
     1. Download files from remote that don't exist locally
     2. Upload files from local that don't exist remotely
 
@@ -538,7 +569,8 @@ def sync_s3_cache(
     across machines using the same remote_cache.
 
     Args:
-        local_cache_path: Local cache directory containing .slipstream/
+        source: An OptimizedCache instance, or a path (str/Path) to the
+            cache directory.
         remote_cache_path: S3 URL of the cache directory
             (e.g., "s3://bucket/caches/slipcache-abc123/")
         endpoint_url: S3-compatible endpoint URL (e.g., for Wasabi)
@@ -553,15 +585,15 @@ def sync_s3_cache(
     """
     _check_s5cmd()
 
-    local_cache_path = Path(local_cache_path)
-    local_slipstream = local_cache_path / ".slipstream"
+    local_cache_path = _resolve_local_cache_path(source)
+    local_slipstream = local_cache_path / CACHE_SUBDIR
 
     if not local_slipstream.exists():
         if verbose:
-            print(f"  No .slipstream directory found at {local_cache_path}")
+            print(f"  No {CACHE_SUBDIR} directory found at {local_cache_path}")
         return (0, 0)
 
-    remote = remote_cache_path.rstrip("/") + "/.slipstream/"
+    remote = remote_cache_path.rstrip("/") + f"/{CACHE_SUBDIR}/"
     local = str(local_slipstream) + "/"
 
     # Count files before sync

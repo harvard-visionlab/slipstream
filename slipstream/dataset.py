@@ -289,16 +289,27 @@ def decode_image(image_data: bytes | dict | np.ndarray | torch.Tensor | Image.Im
     Returns:
         RGB image as torch.Tensor in CHW format (uint8 [0-255]) or PIL Image.
     """
-    # Handle HuggingFace image dict format
+    # Handle dict formats
     if isinstance(image_data, dict):
+        # YUV420 format from pre-built cache
+        if image_data.get('_yuv420'):
+            from slipstream.cache import yuv420_to_rgb
+            rgb = yuv420_to_rgb(
+                image_data['bytes'],
+                image_data['height'],
+                image_data['width'],
+            )
+            if to_pil:
+                return Image.fromarray(rgb)
+            return torch.from_numpy(rgb).permute(2, 0, 1)
+        # HuggingFace image dict format
         if 'bytes' in image_data and image_data['bytes']:
             image_data = image_data['bytes']
         elif 'path' in image_data and image_data['path']:
-            # Read from path
             with open(image_data['path'], 'rb') as f:
                 image_data = f.read()
         else:
-            raise ValueError(f"Invalid HuggingFace image dict: {image_data}")
+            raise ValueError(f"Unsupported image dict format: {list(image_data.keys())}")
 
     # Already a tensor - return as-is or convert to PIL
     if isinstance(image_data, torch.Tensor):
@@ -426,6 +437,106 @@ def _is_tar_archive(path: str) -> bool:
         if path_lower.endswith(ext):
             return True
     return False
+
+
+def _is_prebuilt_cache(source: str | None) -> bool:
+    """Check if source points to a pre-built slipcache directory.
+
+    Returns True if the path contains a slipcache/manifest.json, either:
+    - source/slipcache/manifest.json (source is the parent dir)
+    - source/manifest.json where source is named 'slipcache' (source IS the cache dir)
+    """
+    if source is None:
+        return False
+    source_str = str(source)
+    if source_str.startswith(("s3://", "gs://", "http://", "https://", "hf://")):
+        return False
+    from slipstream.cache import CACHE_SUBDIR, MANIFEST_FILE
+    path = pathlib.Path(source_str)
+    if not path.exists() or not path.is_dir():
+        return False
+    # Parent dir containing slipcache/
+    if (path / CACHE_SUBDIR / MANIFEST_FILE).exists():
+        return True
+    # The slipcache dir itself
+    if (path / MANIFEST_FILE).exists() and path.name == CACHE_SUBDIR:
+        return True
+    return False
+
+
+class _PrebuiltCacheReader:
+    """Lightweight reader for pre-built slipcache directories.
+
+    Used when SlipstreamDataset is pointed at an existing cache rather
+    than a raw data source. Provides the minimal interface needed by
+    SlipstreamLoader to find and load the cache.
+    """
+
+    def __init__(self, cache_parent: pathlib.Path):
+        import json
+        from slipstream.cache import CACHE_SUBDIR, MANIFEST_FILE
+        self._cache_parent = cache_parent
+        self._cache = None  # lazy-loaded on first __getitem__
+        manifest_path = cache_parent / CACHE_SUBDIR / MANIFEST_FILE
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        self._num_samples = manifest['num_samples']
+        self._manifest_fields = manifest['fields']
+        self._field_types = {
+            name: meta['type'] for name, meta in self._manifest_fields.items()
+        }
+        self._image_formats = {
+            name: meta.get('image_format', 'jpeg')
+            for name, meta in self._manifest_fields.items()
+            if meta['type'] in ("ImageBytes", "HFImageDict")
+        }
+        self.image_fields = [
+            name for name, typ in self._field_types.items()
+            if typ in ("ImageBytes", "HFImageDict")
+        ]
+
+    @property
+    def cache_path(self) -> pathlib.Path:
+        return self._cache_parent
+
+    @property
+    def field_types(self) -> dict[str, str]:
+        return self._field_types
+
+    def __len__(self) -> int:
+        return self._num_samples
+
+    def __getitem__(self, idx: int) -> dict:
+        """Read a single sample from the pre-built cache."""
+        if self._cache is None:
+            from slipstream.cache import OptimizedCache
+            self._cache = OptimizedCache.load(self._cache_parent, verbose=False)
+
+        import numpy as np
+        indices = np.array([idx], dtype=np.int64)
+        batch = self._cache.load_batch(indices)
+
+        sample = {}
+        for field_name, field_data in batch.items():
+            data = field_data['data']
+            if self._field_types.get(field_name) in ("ImageBytes", "HFImageDict", "bytes"):
+                size = field_data['sizes'][0]
+                raw = bytes(data[0][:size])
+                # For YUV420, wrap with metadata so decode_image can handle it
+                if self._image_formats.get(field_name) == "yuv420":
+                    sample[field_name] = {
+                        '_yuv420': True,
+                        'bytes': raw,
+                        'height': int(field_data['heights'][0]),
+                        'width': int(field_data['widths'][0]),
+                    }
+                else:
+                    sample[field_name] = raw
+            elif isinstance(data, list):
+                sample[field_name] = data[0]
+            else:
+                sample[field_name] = data[0].item() if hasattr(data[0], 'item') else data[0]
+        return sample
 
 
 def _is_ffcv_source(source: str | None) -> bool:
@@ -586,10 +697,22 @@ class SlipstreamDataset(torch.utils.data.Dataset):
         """Create the appropriate reader based on data source.
 
         Returns:
-            A reader instance (StreamingReader or SlipstreamImageFolder).
+            A reader instance (StreamingReader, SlipstreamImageFolder,
+            or PrebuiltCacheReader).
         """
         # Determine the source to check
         source = input_dir or remote_dir or local_dir
+
+        # Check for pre-built slipcache directory
+        if source is not None and _is_prebuilt_cache(str(source)):
+            from slipstream.cache import CACHE_SUBDIR, MANIFEST_FILE
+            source_path = pathlib.Path(source)
+            # Accept either the parent dir or the slipcache dir itself
+            if (source_path / CACHE_SUBDIR / MANIFEST_FILE).exists():
+                cache_parent = source_path
+            else:
+                cache_parent = source_path.parent
+            return _PrebuiltCacheReader(cache_parent)
 
         # Check for FFCV .beton/.ffcv files
         if source is not None and _is_ffcv_source(str(source)):
