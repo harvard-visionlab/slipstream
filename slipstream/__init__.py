@@ -221,4 +221,6 @@ __all__ = [
     "CACHE_DIR_ENV_VAR",
     "get_cache_base",
     "get_cache_path",
+    # Dataset preparation
+    "prep",
 ]
