@@ -66,7 +66,7 @@ def show_batch(batch, view_names=None, n_cols=8, suptitle=None,
             if mean is not None and std is not None:
                 for ch in range(min(3, img.shape[0])):
                     img[ch] = img[ch] * std[ch] + mean[ch]
-            img = img[:3].permute(1, 2, 0).clamp(0, 1).cpu().numpy()
+            img = img[:3].permute(1, 2, 0).clamp(0, 1).float().cpu().numpy()
             axes[r, c].imshow(img)
             axes[r, c].axis('off')
         if row_labels:
