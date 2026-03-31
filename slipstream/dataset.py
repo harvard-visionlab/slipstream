@@ -289,16 +289,27 @@ def decode_image(image_data: bytes | dict | np.ndarray | torch.Tensor | Image.Im
     Returns:
         RGB image as torch.Tensor in CHW format (uint8 [0-255]) or PIL Image.
     """
-    # Handle HuggingFace image dict format
+    # Handle dict formats
     if isinstance(image_data, dict):
+        # YUV420 format from pre-built cache
+        if image_data.get('_yuv420'):
+            from slipstream.cache import yuv420_to_rgb
+            rgb = yuv420_to_rgb(
+                image_data['bytes'],
+                image_data['height'],
+                image_data['width'],
+            )
+            if to_pil:
+                return Image.fromarray(rgb)
+            return torch.from_numpy(rgb).permute(2, 0, 1)
+        # HuggingFace image dict format
         if 'bytes' in image_data and image_data['bytes']:
             image_data = image_data['bytes']
         elif 'path' in image_data and image_data['path']:
-            # Read from path
             with open(image_data['path'], 'rb') as f:
                 image_data = f.read()
         else:
-            raise ValueError(f"Invalid HuggingFace image dict: {image_data}")
+            raise ValueError(f"Unsupported image dict format: {list(image_data.keys())}")
 
     # Already a tensor - return as-is or convert to PIL
     if isinstance(image_data, torch.Tensor):
@@ -465,12 +476,19 @@ class _PrebuiltCacheReader:
         import json
         from slipstream.cache import CACHE_SUBDIR, MANIFEST_FILE
         self._cache_parent = cache_parent
+        self._cache = None  # lazy-loaded on first __getitem__
         manifest_path = cache_parent / CACHE_SUBDIR / MANIFEST_FILE
         with open(manifest_path) as f:
             manifest = json.load(f)
         self._num_samples = manifest['num_samples']
+        self._manifest_fields = manifest['fields']
         self._field_types = {
-            name: meta['type'] for name, meta in manifest['fields'].items()
+            name: meta['type'] for name, meta in self._manifest_fields.items()
+        }
+        self._image_formats = {
+            name: meta.get('image_format', 'jpeg')
+            for name, meta in self._manifest_fields.items()
+            if meta['type'] in ("ImageBytes", "HFImageDict")
         }
         self.image_fields = [
             name for name, typ in self._field_types.items()
@@ -489,10 +507,36 @@ class _PrebuiltCacheReader:
         return self._num_samples
 
     def __getitem__(self, idx: int) -> dict:
-        raise RuntimeError(
-            "Cannot iterate a pre-built cache reader directly. "
-            "Use SlipstreamLoader to load batches from the cache."
-        )
+        """Read a single sample from the pre-built cache."""
+        if self._cache is None:
+            from slipstream.cache import OptimizedCache
+            self._cache = OptimizedCache.load(self._cache_parent, verbose=False)
+
+        import numpy as np
+        indices = np.array([idx], dtype=np.int64)
+        batch = self._cache.load_batch(indices)
+
+        sample = {}
+        for field_name, field_data in batch.items():
+            data = field_data['data']
+            if self._field_types.get(field_name) in ("ImageBytes", "HFImageDict", "bytes"):
+                size = field_data['sizes'][0]
+                raw = bytes(data[0][:size])
+                # For YUV420, wrap with metadata so decode_image can handle it
+                if self._image_formats.get(field_name) == "yuv420":
+                    sample[field_name] = {
+                        '_yuv420': True,
+                        'bytes': raw,
+                        'height': int(field_data['heights'][0]),
+                        'width': int(field_data['widths'][0]),
+                    }
+                else:
+                    sample[field_name] = raw
+            elif isinstance(data, list):
+                sample[field_name] = data[0]
+            else:
+                sample[field_name] = data[0].item() if hasattr(data[0], 'item') else data[0]
+        return sample
 
 
 def _is_ffcv_source(source: str | None) -> bool:

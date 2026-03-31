@@ -2520,6 +2520,39 @@ def rgb_to_yuv420(rgb: np.ndarray) -> tuple[bytes, int, int]:
     return yuv_bytes, pad_h, pad_w
 
 
+def yuv420_to_rgb(yuv_bytes: bytes, height: int, width: int) -> np.ndarray:
+    """Convert YUV420P bytes to RGB array.
+
+    Inverse of rgb_to_yuv420(). Uses BT.601 conversion.
+
+    Args:
+        yuv_bytes: Raw YUV420P bytes (Y plane + U plane + V plane).
+        height: Image height (padded to even).
+        width: Image width (padded to even).
+
+    Returns:
+        RGB array, shape (H, W, 3), dtype uint8.
+    """
+    y_size = height * width
+    uv_h, uv_w = height // 2, width // 2
+    uv_size = uv_h * uv_w
+
+    y = np.frombuffer(yuv_bytes[:y_size], dtype=np.uint8).reshape(height, width).astype(np.float32)
+    u = np.frombuffer(yuv_bytes[y_size:y_size + uv_size], dtype=np.uint8).reshape(uv_h, uv_w).astype(np.float32)
+    v = np.frombuffer(yuv_bytes[y_size + uv_size:], dtype=np.uint8).reshape(uv_h, uv_w).astype(np.float32)
+
+    # Upsample U/V to full resolution
+    u_full = np.repeat(np.repeat(u, 2, axis=0), 2, axis=1)
+    v_full = np.repeat(np.repeat(v, 2, axis=0), 2, axis=1)
+
+    # BT.601 inverse
+    r = np.clip(y + 1.402 * (v_full - 128.0), 0, 255).astype(np.uint8)
+    g = np.clip(y - 0.344136 * (u_full - 128.0) - 0.714136 * (v_full - 128.0), 0, 255).astype(np.uint8)
+    b = np.clip(y + 1.772 * (u_full - 128.0), 0, 255).astype(np.uint8)
+
+    return np.stack([r, g, b], axis=-1)
+
+
 def decode_image_to_rgb(image_bytes: bytes) -> np.ndarray:
     """Decode image bytes to RGB array using PIL.
 
