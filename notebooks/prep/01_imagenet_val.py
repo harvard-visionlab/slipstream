@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.16.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -179,8 +179,11 @@ from slipstream.cache import write_index
 
 # Build label index for both caches
 for name, cache in [("JPEG", jpeg_cache), ("YUV420", yuv_cache)]:
-    write_index(cache.cache_dir.parent, field="label")
+    write_index(cache, fields=["label"])
     print(f"{name}: label index built")
+
+# %%
+jpeg_cache.cache_dir, yuv_cache.cache_dir
 
 # %% [markdown]
 # ## Step 6: (Optional) Sync to remote S3 cache
@@ -188,15 +191,24 @@ for name, cache in [("JPEG", jpeg_cache), ("YUV420", yuv_cache)]:
 # Uncomment to upload the caches to S3 for lab-wide sharing.
 
 # %%
-# from slipstream.s3_sync import upload_s3_cache
-#
-# REMOTE_CACHE = "s3://visionlab-datasets/slipstream-cache/imagenet1k/"
-#
-# upload_s3_cache(
-#     JPEG_OUTPUT_DIR,
-#     REMOTE_CACHE,
-# )
-# print(f"JPEG cache uploaded to {REMOTE_CACHE}")
+from slipstream.s3_sync import upload_s3_cache
+
+REMOTE_CACHE = "s3://visionlab-datasets/slipstream-cache/imagenet1k/imagenet1k-s256_l512-jpeg-val/slipcache"
+
+upload_s3_cache(
+    jpeg_cache.cache_dir.parent,
+    REMOTE_CACHE,
+)
+print(f"JPEG cache uploaded to {REMOTE_CACHE}")
+
+# %%
+REMOTE_CACHE = "s3://visionlab-datasets/slipstream-cache/imagenet1k/imagenet1k-s256_l512-yuv420-val/slipcache"
+
+upload_s3_cache(
+    yuv_cache.cache_dir.parent,
+    REMOTE_CACHE,
+)
+print(f"YUV cache uploaded to {REMOTE_CACHE}")
 
 # %% [markdown]
 # ## Summary
@@ -215,3 +227,48 @@ for name, cache in [("JPEG", jpeg_cache), ("YUV420", yuv_cache)]:
 # dataset = SlipstreamDataset(local_dir=str(JPEG_OUTPUT_DIR))
 # loader = SlipstreamLoader(dataset, batch_size=256, pipelines=supervised_val(224))
 # ```
+
+# %% [markdown]
+# ## Step 7: Load and view samples
+
+# %%
+from slipstream import SlipstreamDataset, SlipstreamLoader
+from slipstream.pipelines import supervised_val
+
+jpeg_dataset = SlipstreamDataset(local_dir=str(JPEG_OUTPUT_DIR))
+jpeg_dataset
+
+# %%
+yuv_dataset = SlipstreamDataset(local_dir=str(YUV_OUTPUT_DIR))
+yuv_dataset
+
+# %%
+# Load a batch from the JPEG cache
+jpeg_loader = SlipstreamLoader(
+    jpeg_dataset,
+    batch_size=16,
+    pipelines=supervised_val(224),
+)
+
+batch = next(iter(jpeg_loader))
+print(f"Images: {batch['image'].shape}, dtype={batch['image'].dtype}")
+print(f"Labels: {batch['label'].shape}")
+
+# %%
+# Visualize the batch
+from slipstream import show_batch
+
+show_batch(batch['image'], batch['label'], nrow=8)
+
+# %%
+# Load a batch from the YUV420 cache
+yuv_loader = SlipstreamLoader(
+    yuv_dataset,
+    batch_size=16,
+    pipelines=supervised_val(224),
+)
+
+batch_yuv = next(iter(yuv_loader))
+print(f"Images: {batch_yuv['image'].shape}, dtype={batch_yuv['image'].dtype}")
+
+show_batch(batch_yuv['image'], batch_yuv['label'], nrow=8)
