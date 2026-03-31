@@ -59,26 +59,8 @@ gpu = [
     "cvcuda-cu12>=0.5.0",
 ]
 
-# Route torch to CUDA (Linux) or CPU (others)
 [tool.uv.sources]
-torch = [
-    { index = "pytorch-cu121", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { index = "pytorch-cpu", marker = "sys_platform != 'linux' or platform_machine != 'x86_64'" },
-]
-torchvision = [
-    { index = "pytorch-cu121", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { index = "pytorch-cpu", marker = "sys_platform != 'linux' or platform_machine != 'x86_64'" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cu121"
-url = "https://download.pytorch.org/whl/cu121"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
+# PyTurboJPEG git source (torch/torchvision resolve via PyPI — CUDA on Linux, CPU on macOS)
 
 [build-system]
 requires = ["hatchling", "setuptools"]
