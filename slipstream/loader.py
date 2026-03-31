@@ -55,7 +55,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
-from slipstream.cache import OptimizedCache
+from slipstream.cache import CACHE_SUBDIR, MANIFEST_FILE, OptimizedCache
 
 if TYPE_CHECKING:
     from slipstream.dataset import SlipstreamDataset
@@ -266,7 +266,7 @@ class SlipstreamLoader:
             dataset_hash = dataset.dataset_hash
             remote_cache_full = f"{remote_cache.rstrip('/')}/slipcache-{dataset_hash}"
             self._remote_cache_full = remote_cache_full
-            remote_manifest = f"{remote_cache_full}/.slipstream/manifest.json"
+            remote_manifest = f"{remote_cache_full}/{CACHE_SUBDIR}/{MANIFEST_FILE}"
 
             if s3_path_exists(remote_manifest, endpoint_url=remote_cache_endpoint_url):
                 if verbose:

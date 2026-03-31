@@ -55,7 +55,7 @@ DatasetLike = Any  # Using Any since Protocol requires runtime_checkable for isi
 # Constants
 # =============================================================================
 
-CACHE_SUBDIR = ".slipstream"
+CACHE_SUBDIR = "slipcache"
 MANIFEST_FILE = "manifest.json"
 CACHE_VERSION = 1
 

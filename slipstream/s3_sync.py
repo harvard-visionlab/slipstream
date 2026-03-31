@@ -20,6 +20,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from slipstream.cache import CACHE_SUBDIR
+
 
 def _is_jupyter() -> bool:
     """Detect if running in a Jupyter notebook or Google Colab."""
@@ -418,11 +420,11 @@ def download_s3_cache(
     _check_s5cmd()
 
     local_cache_path = Path(local_cache_path)
-    local_slipstream = local_cache_path / ".slipstream"
+    local_slipstream = local_cache_path / CACHE_SUBDIR
     local_slipstream.mkdir(parents=True, exist_ok=True)
 
     # Ensure remote path has proper format
-    remote = remote_cache_path.rstrip("/") + "/.slipstream/*"
+    remote = remote_cache_path.rstrip("/") + f"/{CACHE_SUBDIR}/*"
     local = str(local_slipstream) + "/"
 
     # Use cp with --show-progress for progress display
@@ -480,16 +482,16 @@ def upload_s3_cache(
     _check_s5cmd()
 
     local_cache_path = Path(local_cache_path)
-    local_slipstream = local_cache_path / ".slipstream"
+    local_slipstream = local_cache_path / CACHE_SUBDIR
 
     if not local_slipstream.exists():
         if verbose:
-            print(f"  No .slipstream directory found at {local_cache_path}")
+            print(f"  No {CACHE_SUBDIR} directory found at {local_cache_path}")
         return False
 
     # Source and destination paths
     local = str(local_slipstream) + "/*"
-    remote = remote_cache_path.rstrip("/") + "/.slipstream/"
+    remote = remote_cache_path.rstrip("/") + f"/{CACHE_SUBDIR}/"
 
     # Use cp with --show-progress and sync flags for progress display
     cmd = ["s5cmd"]
@@ -554,14 +556,14 @@ def sync_s3_cache(
     _check_s5cmd()
 
     local_cache_path = Path(local_cache_path)
-    local_slipstream = local_cache_path / ".slipstream"
+    local_slipstream = local_cache_path / CACHE_SUBDIR
 
     if not local_slipstream.exists():
         if verbose:
-            print(f"  No .slipstream directory found at {local_cache_path}")
+            print(f"  No {CACHE_SUBDIR} directory found at {local_cache_path}")
         return (0, 0)
 
-    remote = remote_cache_path.rstrip("/") + "/.slipstream/"
+    remote = remote_cache_path.rstrip("/") + f"/{CACHE_SUBDIR}/"
     local = str(local_slipstream) + "/"
 
     # Count files before sync
