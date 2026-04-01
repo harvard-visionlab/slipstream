@@ -62,6 +62,10 @@ gpu = [
 [tool.uv.sources]
 # PyTurboJPEG git source (torch/torchvision resolve via PyPI — CUDA on Linux, CPU on macOS)
 
+[tool.uv.extra-build-dependencies]
+# litdata's setup.py uses pkg_resources without declaring it as a build dep
+litdata = ["setuptools"]
+
 [build-system]
 requires = ["hatchling", "setuptools"]
 build-backend = "hatchling.build"
