@@ -20,36 +20,19 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from slipstream.cache import CACHE_SUBDIR, MANIFEST_FILE
+from slipstream.cache import MANIFEST_FILE
 
 
-def _resolve_local_cache_path(source) -> Path:
-    """Resolve the parent cache directory from various input types.
+def _resolve_cache_dir(source) -> Path:
+    """Resolve the cache directory from various input types.
 
     Accepts:
-    - OptimizedCache instance (uses cache_dir.parent)
-    - Path/str to parent dir (contains slipcache/ subdir)
-    - Path/str to slipcache dir itself (detected by manifest.json)
-
-    Returns:
-        The parent directory that contains the slipcache/ subdir.
+    - OptimizedCache instance (uses cache_dir)
+    - Path/str to cache directory (contains manifest.json)
     """
-    # OptimizedCache instance
     if hasattr(source, 'cache_dir'):
-        return Path(source.cache_dir).parent
-
-    path = Path(source)
-
-    # If this IS the slipcache dir (contains manifest.json)
-    if (path / MANIFEST_FILE).exists() and path.name == CACHE_SUBDIR:
-        return path.parent
-
-    # If this is the parent dir (contains slipcache/)
-    if (path / CACHE_SUBDIR / MANIFEST_FILE).exists():
-        return path
-
-    # Fall back to treating it as the parent dir
-    return path
+        return Path(source.cache_dir)
+    return Path(source)
 
 
 def _is_jupyter() -> bool:
@@ -448,15 +431,12 @@ def download_s3_cache(
     """
     _check_s5cmd()
 
-    local_cache_path = _resolve_local_cache_path(local_dest)
-    local_slipstream = local_cache_path / CACHE_SUBDIR
-    local_slipstream.mkdir(parents=True, exist_ok=True)
+    local_dir = _resolve_cache_dir(local_dest)
+    local_dir.mkdir(parents=True, exist_ok=True)
 
-    # Ensure remote path has proper format
-    remote = remote_cache_path.rstrip("/") + f"/{CACHE_SUBDIR}/*"
-    local = str(local_slipstream) + "/"
+    remote = remote_cache_path.rstrip("/") + "/*"
+    local = str(local_dir) + "/"
 
-    # Use cp with --show-progress for progress display
     cmd = ["s5cmd"]
     if endpoint_url:
         cmd += ["--endpoint-url", endpoint_url]
@@ -469,7 +449,6 @@ def download_s3_cache(
     if verbose:
         print(f"Downloading cache from S3: {remote_cache_path}")
 
-    # Run with PTY-based progress
     returncode = run_s5cmd_with_progress(cmd, verbose=verbose)
     success = returncode == 0
 
@@ -477,7 +456,7 @@ def download_s3_cache(
         print(f"  Download failed (exit code {returncode})")
 
     if success and verbose:
-        num_files = _count_files(local_slipstream)
+        num_files = _count_files(local_dir)
         print(f"  Download complete: {num_files} files")
 
     return success
@@ -510,19 +489,16 @@ def upload_s3_cache(
     """
     _check_s5cmd()
 
-    local_cache_path = _resolve_local_cache_path(source)
-    local_slipstream = local_cache_path / CACHE_SUBDIR
+    local_dir = _resolve_cache_dir(source)
 
-    if not local_slipstream.exists():
+    if not local_dir.exists():
         if verbose:
-            print(f"  No {CACHE_SUBDIR} directory found at {local_cache_path}")
+            print(f"  No cache directory found at {local_dir}")
         return False
 
-    # Source and destination paths
-    local = str(local_slipstream) + "/*"
-    remote = remote_cache_path.rstrip("/") + f"/{CACHE_SUBDIR}/"
+    local = str(local_dir) + "/*"
+    remote = remote_cache_path.rstrip("/") + "/"
 
-    # Use cp with --show-progress and sync flags for progress display
     cmd = ["s5cmd"]
     if endpoint_url:
         cmd += ["--endpoint-url", endpoint_url]
@@ -532,8 +508,8 @@ def upload_s3_cache(
         local, remote
     ]
 
-    num_files = _count_files(local_slipstream)
-    total_size = sum(f.stat().st_size for f in local_slipstream.iterdir() if f.is_file())
+    num_files = _count_files(local_dir)
+    total_size = sum(f.stat().st_size for f in local_dir.iterdir() if f.is_file())
     if verbose:
         print(f"Uploading cache to S3: {remote_cache_path}")
         size_str = f"{total_size / 1e9:.2f} GB" if total_size > 1e9 else f"{total_size / 1e6:.1f} MB"
@@ -585,19 +561,18 @@ def sync_s3_cache(
     """
     _check_s5cmd()
 
-    local_cache_path = _resolve_local_cache_path(source)
-    local_slipstream = local_cache_path / CACHE_SUBDIR
+    local_dir = _resolve_cache_dir(source)
 
-    if not local_slipstream.exists():
+    if not local_dir.exists():
         if verbose:
-            print(f"  No {CACHE_SUBDIR} directory found at {local_cache_path}")
+            print(f"  No cache directory found at {local_dir}")
         return (0, 0)
 
-    remote = remote_cache_path.rstrip("/") + f"/{CACHE_SUBDIR}/"
-    local = str(local_slipstream) + "/"
+    remote = remote_cache_path.rstrip("/") + "/"
+    local = str(local_dir) + "/"
 
     # Count files before sync
-    local_before = set(f.name for f in local_slipstream.iterdir() if f.is_file())
+    local_before = set(f.name for f in local_dir.iterdir() if f.is_file())
 
     # Get remote file list
     cmd_ls = ["s5cmd"]
@@ -653,9 +628,9 @@ def sync_s3_cache(
     if to_upload:
         # Calculate total size of files to upload
         upload_size = sum(
-            (local_slipstream / f).stat().st_size
+            (local_dir / f).stat().st_size
             for f in to_upload
-            if (local_slipstream / f).exists()
+            if (local_dir / f).exists()
         )
         if verbose:
             size_str = f"{upload_size / 1e9:.2f} GB" if upload_size > 1e9 else f"{upload_size / 1e6:.1f} MB"
@@ -664,7 +639,7 @@ def sync_s3_cache(
         # Upload only the specific missing files (not all files with skip flags,
         # which would re-upload if local is newer due to file move/copy)
         for filename in to_upload:
-            local_file = local_slipstream / filename
+            local_file = local_dir / filename
             if not local_file.exists():
                 continue
 

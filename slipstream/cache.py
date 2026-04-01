@@ -55,7 +55,6 @@ DatasetLike = Any  # Using Any since Protocol requires runtime_checkable for isi
 # Constants
 # =============================================================================
 
-CACHE_SUBDIR = "slipcache"
 MANIFEST_FILE = "manifest.json"
 CACHE_VERSION = 1
 
@@ -1649,14 +1648,12 @@ class OptimizedCache:
         self._indexes: dict[str, dict] = {}
 
     @classmethod
-    def exists(cls, parent_dir: Path) -> bool:
+    def exists(cls, cache_dir: Path) -> bool:
         """Check if an optimized cache exists in the given directory."""
-        cache_dir = parent_dir / CACHE_SUBDIR
-        manifest_path = cache_dir / MANIFEST_FILE
-        return manifest_path.exists()
+        return (Path(cache_dir) / MANIFEST_FILE).exists()
 
     @classmethod
-    def check_integrity(cls, parent_dir: Path) -> tuple[bool, list[str]]:
+    def check_integrity(cls, cache_dir: Path) -> tuple[bool, list[str]]:
         """Check whether an existing cache has all expected files intact.
 
         Reads the manifest and verifies that every storage file exists and
@@ -1665,7 +1662,7 @@ class OptimizedCache:
         collection or interrupted downloads.
 
         Args:
-            parent_dir: Directory containing the ``.slipstream/`` cache.
+            cache_dir: Cache directory containing manifest.json and data files.
 
         Returns:
             ``(is_valid, problems)`` where *is_valid* is True when the cache
@@ -1674,7 +1671,7 @@ class OptimizedCache:
         """
         import os
 
-        cache_dir = parent_dir / CACHE_SUBDIR
+        cache_dir = Path(cache_dir)
         manifest_path = cache_dir / MANIFEST_FILE
 
         if not manifest_path.exists():
@@ -1710,19 +1707,19 @@ class OptimizedCache:
         return (len(problems) == 0, problems)
 
     @classmethod
-    def _wipe_cache(cls, parent_dir: Path, reason: str) -> None:
-        """Remove the ``.slipstream/`` cache subdirectory.
+    def _wipe_cache(cls, cache_dir: Path, reason: str) -> None:
+        """Remove the cache directory.
 
         Emits a warning so the user knows why a rebuild is happening.
 
         Args:
-            parent_dir: Directory containing the ``.slipstream/`` cache.
+            cache_dir: Cache directory to remove.
             reason: Human-readable explanation (included in the warning).
         """
         import shutil
         import warnings
 
-        cache_dir = parent_dir / CACHE_SUBDIR
+        cache_dir = Path(cache_dir)
         warnings.warn(
             f"Wiping incomplete cache at {cache_dir}: {reason}",
             stacklevel=2,
@@ -1771,7 +1768,7 @@ class OptimizedCache:
                     "Specify output_dir explicitly."
                 )
 
-        cache_dir = Path(output_dir) / CACHE_SUBDIR
+        cache_dir = Path(output_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         if verbose:
@@ -2067,9 +2064,9 @@ class OptimizedCache:
         return result
 
     @classmethod
-    def load(cls, parent_dir: Path, verbose: bool = True) -> OptimizedCache:
+    def load(cls, cache_dir: Path, verbose: bool = True) -> OptimizedCache:
         """Load existing optimized cache."""
-        cache_dir = Path(parent_dir) / CACHE_SUBDIR
+        cache_dir = Path(cache_dir)
         manifest_path = cache_dir / MANIFEST_FILE
 
         if not manifest_path.exists():
@@ -2363,7 +2360,7 @@ def _resolve_cache_dir(source: Any) -> Path:
         return source.cache_dir
     # Dataset or reader with cache_path attribute
     if hasattr(source, 'cache_path'):
-        cache_dir = Path(source.cache_path) / CACHE_SUBDIR
+        cache_dir = Path(source.cache_path)
         if cache_dir.exists():
             return cache_dir
     raise ValueError(
@@ -2723,7 +2720,6 @@ __all__ = [
     "ImageBytesStorage",
     "NumpyStorage",
     "StringStorage",
-    "CACHE_SUBDIR",
     "write_index",
     "build_yuv420_cache",
     "load_yuv420_cache",
