@@ -22,6 +22,7 @@ def supervised_train(
     device: str | None = None,
     dtype: torch.dtype = torch.float16,
     normalize: bool = True,
+    num_threads: int = 0,
 ) -> dict[str, list]:
     """Standard supervised training pipeline.
 
@@ -36,13 +37,14 @@ def supervised_train(
         device: Target device (None = CPU).
         dtype: Output tensor dtype.
         normalize: Whether to append ImageNet normalization.
+        num_threads: Decoder threads (0 = auto).
 
     Returns:
         Pipelines dict for ``SlipstreamLoader(pipelines=...)``.
     """
     dev = device or "cpu"
     stages: list = [
-        DecodeRandomResizedCrop(size, seed=_seed(seed, CROP_OFFSET)),
+        DecodeRandomResizedCrop(size, seed=_seed(seed, CROP_OFFSET), num_threads=num_threads),
         ToTorchImage(device=dev, dtype=dtype),
     ]
     if normalize:
@@ -55,6 +57,7 @@ def supervised_val(
     device: str | None = None,
     dtype: torch.dtype = torch.float16,
     normalize: bool = True,
+    num_threads: int = 0,
 ) -> dict[str, list]:
     """Standard supervised validation pipeline.
 
@@ -65,13 +68,14 @@ def supervised_val(
         device: Target device (None = CPU).
         dtype: Output tensor dtype.
         normalize: Whether to append ImageNet normalization.
+        num_threads: Decoder threads (0 = auto).
 
     Returns:
         Pipelines dict for ``SlipstreamLoader(pipelines=...)``.
     """
     dev = device or "cpu"
     stages: list = [
-        DecodeResizeCrop(resize_size=256, crop_size=size),
+        DecodeResizeCrop(resize_size=256, crop_size=size, num_threads=num_threads),
         ToTorchImage(device=dev, dtype=dtype),
     ]
     if normalize:
