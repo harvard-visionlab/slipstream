@@ -5,13 +5,13 @@ Uploads pre-built caches to the lab's S3 bucket for sharing.
 
 Usage:
     # Upload val caches (JPEG + YUV420)
-    python dataprep/scripts/upload_imagenet_cache.py --split val
+    uv run python dataprep/scripts/upload_imagenet_cache.py --split val
 
     # Upload train JPEG only
-    python dataprep/scripts/upload_imagenet_cache.py --split train --fmt jpeg
+    uv run python dataprep/scripts/upload_imagenet_cache.py --split train --fmt jpeg
 
     # Custom source and destination
-    python dataprep/scripts/upload_imagenet_cache.py --split val --cache-dir /fast/storage --remote s3://my-bucket/caches/
+    uv run python dataprep/scripts/upload_imagenet_cache.py --split val --cache-dir /fast/storage --remote s3://my-bucket/caches/
 """
 from __future__ import annotations
 

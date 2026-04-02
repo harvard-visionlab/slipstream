@@ -14,13 +14,13 @@ workers for fast processing.
 
 Usage:
     # Build val set (JPEG + YUV420)
-    python dataprep/scripts/build_imagenet_cache.py --root /path/to/imagenet --split val
+    uv run python dataprep/scripts/build_imagenet_cache.py --root /path/to/imagenet --split val
 
     # Build train set (JPEG only)
-    python dataprep/scripts/build_imagenet_cache.py --root /path/to/imagenet --split train --fmt jpeg
+    uv run python dataprep/scripts/build_imagenet_cache.py --root /path/to/imagenet --split train --fmt jpeg
 
     # Custom output dir and workers
-    python dataprep/scripts/build_imagenet_cache.py --root /path/to/imagenet --split val --output-dir /fast/storage --num-workers 24
+    uv run python dataprep/scripts/build_imagenet_cache.py --root /path/to/imagenet --split val --output-dir /fast/storage --num-workers 24
 """
 import argparse
 import os

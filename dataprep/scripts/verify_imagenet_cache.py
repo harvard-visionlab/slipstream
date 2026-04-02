@@ -6,13 +6,13 @@ with the same s256_l512 pipeline, and compares the results byte-for-byte.
 
 Usage:
     # Verify every 1000th image (default)
-    python dataprep/scripts/verify_imagenet_cache.py --root /path/to/imagenet --split train --cache-dir /path/to/cache
+    uv run python dataprep/scripts/verify_imagenet_cache.py --root /path/to/imagenet --split train --cache-dir /path/to/cache
 
     # Verify every 100th image
-    python dataprep/scripts/verify_imagenet_cache.py --root /path/to/imagenet --split train --cache-dir /path/to/cache --stride 100
+    uv run python dataprep/scripts/verify_imagenet_cache.py --root /path/to/imagenet --split train --cache-dir /path/to/cache --stride 100
 
     # Verify all images (slow)
-    python dataprep/scripts/verify_imagenet_cache.py --root /path/to/imagenet --split train --cache-dir /path/to/cache --stride 1
+    uv run python dataprep/scripts/verify_imagenet_cache.py --root /path/to/imagenet --split train --cache-dir /path/to/cache --stride 1
 """
 from __future__ import annotations
 
