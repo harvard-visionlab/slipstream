@@ -92,15 +92,18 @@ def verify_cache(
         expected_bytes = encode_jpeg(img, quality=100).numpy().tobytes()
 
         # Get cached sample
-        batch = cache.load_batch(np.array([idx], dtype=np.int64), fields=['image', 'label', 'path'])
+        batch = cache.load_batch(np.array([idx], dtype=np.int64), fields=['image', 'label', 'index', 'path'])
 
         cached_size = batch['image']['sizes'][0]
         cached_bytes = bytes(batch['image']['data'][0][:cached_size])
         cached_label = batch['label']['data'][0]
+        cached_index = batch['index']['data'][0]
         cached_path = batch['path']['data'][0]
 
-        # Compare
+        # Compare all fields
         errors = []
+        if cached_index != idx:
+            errors.append(f"index: expected {idx}, got {cached_index}")
         if cached_label != label:
             errors.append(f"label: expected {label}, got {cached_label}")
         if cached_path != relpath:
