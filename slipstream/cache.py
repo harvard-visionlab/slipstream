@@ -1928,8 +1928,16 @@ class OptimizedCache:
         files. The main process merges shards after all workers complete.
         """
         import multiprocessing
+        import os
         import shutil
         import time
+
+        # Prevent internal thread pool oversubscription in spawned workers.
+        # Must be set in the main process BEFORE spawning so child processes
+        # inherit the env vars before torch/numpy initialize their thread pools.
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
         # Verify dataset is picklable
         import pickle

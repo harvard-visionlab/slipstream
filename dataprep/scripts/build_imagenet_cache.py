@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 """Build slipstream cache for ImageNet-1K with s256_l512 preprocessing.
+"""
+# Prevent internal thread pool oversubscription in worker processes.
+# Must be set before any torch/numpy import.
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+"""
 
 Builds JPEG and/or YUV420 caches with label indexes, using parallel
 workers for fast processing.
