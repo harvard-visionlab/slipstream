@@ -50,7 +50,7 @@ def get_cache_base() -> Path:
     env_path = os.environ.get(CACHE_DIR_ENV_VAR)
     if env_path:
         return Path(env_path).expanduser().resolve()
-    return DEFAULT_CACHE_DIR
+    return DEFAULT_CACHE_DIR.resolve()
 
 
 def get_cache_path(dataset_hash: str) -> Path:
