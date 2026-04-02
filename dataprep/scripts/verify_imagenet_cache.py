@@ -115,36 +115,29 @@ def verify_cache(
                     f"got {len(cached_bytes)}"
                 )
         else:
-            # YUV420: roundtrip source through rgb_to_yuv420 → yuv420_to_rgb,
-            # then compare decoded pixels against cache's decoded pixels.
-            from slipstream.cache import rgb_to_yuv420, yuv420_to_rgb
+            # YUV420: replicate the exact cache build pipeline.
+            # The builder receives JPEG bytes from ImageNet1k_s256_l512,
+            # then decodes with PIL (decode_image_to_rgb) and converts
+            # to YUV420. We do the same here for exact byte match.
+            from slipstream.cache import decode_image_to_rgb, rgb_to_yuv420
 
-            # Source → YUV420 → RGB (expected)
-            rgb_source = img.permute(1, 2, 0).numpy()  # CHW → HWC
-            yuv_bytes_expected, pad_h, pad_w = rgb_to_yuv420(rgb_source)
-            rgb_expected = yuv420_to_rgb(yuv_bytes_expected, pad_h, pad_w)
+            jpeg_bytes = encode_jpeg(img, quality=100).numpy().tobytes()
+            rgb = decode_image_to_rgb(jpeg_bytes)
+            expected_yuv, expected_h, expected_w = rgb_to_yuv420(rgb)
 
-            # Cache → YUV420 → RGB (actual)
             cached_h = int(batch['image']['heights'][0])
             cached_w = int(batch['image']['widths'][0])
-            rgb_cached = yuv420_to_rgb(cached_bytes, cached_h, cached_w)
 
-            # Compare dimensions
-            if rgb_expected.shape != rgb_cached.shape:
+            if (expected_h, expected_w) != (cached_h, cached_w):
                 errors.append(
-                    f"shape: expected {rgb_expected.shape}, got {rgb_cached.shape}"
+                    f"dimensions: expected {expected_h}x{expected_w}, "
+                    f"got {cached_h}x{cached_w}"
                 )
-            else:
-                # YUV420 tolerance: the cache build path decodes JPEG with PIL
-                # while verification decodes with torchvision. Different JPEG
-                # decoders produce slightly different RGB values (±2-3), which
-                # get amplified through YUV color space conversion. Max diff
-                # of ~30 is normal and visually imperceptible.
-                max_diff = int(np.abs(
-                    rgb_expected.astype(np.int16) - rgb_cached.astype(np.int16)
-                ).max())
-                if max_diff > 30:
-                    errors.append(f"pixel max diff: {max_diff} (expected ≤30)")
+            elif expected_yuv != cached_bytes:
+                errors.append(
+                    f"YUV bytes differ: expected {len(expected_yuv)}, "
+                    f"got {len(cached_bytes)}"
+                )
 
         if errors:
             mismatches.append((idx, relpath, errors))
