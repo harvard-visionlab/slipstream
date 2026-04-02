@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Prevent internal thread pool oversubscription in worker processes.
 # Must be set before any torch/numpy import.
+from __future__ import annotations
 import os as _os
 _os.environ.setdefault("OMP_NUM_THREADS", "1")
 _os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -21,8 +22,6 @@ Usage:
     # Custom output dir and workers
     python dataprep/scripts/build_imagenet_cache.py --root /path/to/imagenet --split val --output-dir /fast/storage --num-workers 24
 """
-from __future__ import annotations
-
 import argparse
 import os
 import time
