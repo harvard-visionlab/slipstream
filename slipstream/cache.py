@@ -1385,6 +1385,14 @@ def _worker_build_shard(
     The dataset's __getitem__ is responsible for all preprocessing — this
     function just writes whatever the dataset emits.
     """
+    # Prevent internal thread pools (OpenMP, MKL) from oversubscribing CPUs.
+    # Each worker should use exactly 1 thread — parallelism comes from the
+    # worker count, not from per-worker threading.
+    import os
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
     shard_dir = Path(shard_dir)
     shard_dir.mkdir(parents=True, exist_ok=True)
     num_shard_samples = end_idx - start_idx
