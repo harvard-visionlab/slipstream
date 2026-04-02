@@ -1,7 +1,23 @@
 {
   "permissions": {
     "allow": [
-      "Bash(nvidia-smi)"
+      "Bash(tree:*)",
+      "Bash(wc:*)",
+      "Bash(uv run python:*)",
+      "Bash(ls:*)",
+      "Bash(uv run ruff check:*)",
+      "Bash(curl:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(find:*)",
+      "Bash(xargs:*)",
+      "Bash(uv run python3:*)",
+      "Bash(uv run pytest:*)",
+      "Bash(grep:*)",
+      "Bash(NUMBA_THREADING_LAYER=tbb uv run python:*)",
+      "Bash(git add:*)",
+      "Bash(uv run:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)"
     ]
   }
 }
