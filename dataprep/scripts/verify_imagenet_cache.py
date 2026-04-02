@@ -89,8 +89,6 @@ def verify_cache(
         if crop_h < h or crop_w < w:
             img = center_crop(img, [crop_h, crop_w])
 
-        expected_bytes = encode_jpeg(img, quality=100).numpy().tobytes()
-
         # Get cached sample
         batch = cache.load_batch(np.array([idx], dtype=np.int64), fields=['image', 'label', 'index', 'path'])
 
@@ -110,22 +108,39 @@ def verify_cache(
             errors.append(f"path: expected {relpath}, got {cached_path}")
 
         if fmt == "jpeg":
+            expected_bytes = encode_jpeg(img, quality=100).numpy().tobytes()
             if cached_bytes != expected_bytes:
                 errors.append(
                     f"image bytes differ: expected {len(expected_bytes)}, "
                     f"got {len(cached_bytes)}"
                 )
         else:
-            # YUV420: can't compare bytes directly, check dimensions match
-            cached_h = batch['image']['heights'][0]
-            cached_w = batch['image']['widths'][0]
-            expected_h = crop_h + (crop_h % 2)  # YUV420 pads to even
-            expected_w = crop_w + (crop_w % 2)
-            if cached_h != expected_h or cached_w != expected_w:
+            # YUV420: roundtrip source through rgb_to_yuv420 → yuv420_to_rgb,
+            # then compare decoded pixels against cache's decoded pixels.
+            from slipstream.cache import rgb_to_yuv420, yuv420_to_rgb
+
+            # Source → YUV420 → RGB (expected)
+            rgb_source = img.permute(1, 2, 0).numpy()  # CHW → HWC
+            yuv_bytes_expected, pad_h, pad_w = rgb_to_yuv420(rgb_source)
+            rgb_expected = yuv420_to_rgb(yuv_bytes_expected, pad_h, pad_w)
+
+            # Cache → YUV420 → RGB (actual)
+            cached_h = int(batch['image']['heights'][0])
+            cached_w = int(batch['image']['widths'][0])
+            rgb_cached = yuv420_to_rgb(cached_bytes, cached_h, cached_w)
+
+            # Compare dimensions
+            if rgb_expected.shape != rgb_cached.shape:
                 errors.append(
-                    f"dimensions: expected {expected_h}x{expected_w}, "
-                    f"got {cached_h}x{cached_w}"
+                    f"shape: expected {rgb_expected.shape}, got {rgb_cached.shape}"
                 )
+            else:
+                # Allow ±1 tolerance for YUV420 rounding
+                max_diff = int(np.abs(
+                    rgb_expected.astype(np.int16) - rgb_cached.astype(np.int16)
+                ).max())
+                if max_diff > 1:
+                    errors.append(f"pixel max diff: {max_diff} (expected ≤1)")
 
         if errors:
             mismatches.append((idx, relpath, errors))
