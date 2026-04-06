@@ -530,22 +530,28 @@ def affine_transform(x: torch.Tensor, mat, sz=None, align_corners=False, mode="b
     if not align_corners and sz is None:
         # Fast path: cached base grid + bmm (matches torchvision's _affine_grid).
         # rescaled_theta normalizes pixel coords by image dimensions.
-        dtype = x.dtype
+        # Always compute grid in float32 — float16 bmm + grid_sample produces
+        # NaN/garbage on CPU (and is imprecise on GPU).
+        compute_dtype = torch.float32
         device = x.device
-        base_grid = _get_base_grid(oh, ow, dtype, device)
-        rescale = torch.tensor([0.5 * w, 0.5 * h], dtype=dtype, device=device)
+        base_grid = _get_base_grid(oh, ow, compute_dtype, device)
+        mat_f32 = mat.float()
+        rescale = torch.tensor([0.5 * w, 0.5 * h], dtype=compute_dtype, device=device)
         # mat is [B, 2, 3], transpose to [B, 3, 2], divide by rescale
-        rescaled_theta = mat.transpose(1, 2) / rescale
+        rescaled_theta = mat_f32.transpose(1, 2) / rescale
         # Translation row (index 2) must stay in normalized [-1,1] space —
         # it multiplies with the homogeneous coordinate (1), not pixel coords.
-        rescaled_theta[:, 2, :] = mat[:, :, 2]
+        rescaled_theta[:, 2, :] = mat_f32[:, :, 2]
         # bmm: [1, h*w, 3] x [B, 3, 2] -> [B, h*w, 2]  (broadcast on batch dim)
-        if mat.shape[0] == 1:
+        if mat_f32.shape[0] == 1:
             coords = base_grid.bmm(rescaled_theta).view(1, oh, ow, 2)
         else:
-            coords = base_grid.expand(mat.shape[0], -1, -1).bmm(rescaled_theta).view(mat.shape[0], oh, ow, 2)
+            coords = base_grid.expand(mat_f32.shape[0], -1, -1).bmm(rescaled_theta).view(mat_f32.shape[0], oh, ow, 2)
         # Same-size transform: anti-aliasing never triggers (d=0.5 < 1), skip _grid_sample.
-        out = F.grid_sample(x, coords, mode=mode, padding_mode=pad_mode, align_corners=False)
+        x_f32 = x.float() if x.dtype == torch.float16 and x.device.type == "cpu" else x
+        out = F.grid_sample(x_f32, coords, mode=mode, padding_mode=pad_mode, align_corners=False)
+        if out.dtype != x.dtype:
+            out = out.to(x.dtype)
     else:
         # Fallback: use F.affine_grid for align_corners=True or resize cases
         size = x.shape[:2] + (oh, ow)
