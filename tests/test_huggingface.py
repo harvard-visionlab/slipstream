@@ -79,7 +79,7 @@ class TestHuggingFaceImageDict:
         """Test decode_image raises on invalid HF dict."""
         from slipstream.dataset import decode_image
 
-        with pytest.raises(ValueError, match="Invalid HuggingFace image dict"):
+        with pytest.raises(ValueError, match="Unsupported image dict format"):
             decode_image({'bytes': None, 'path': None})
 
 
@@ -434,7 +434,7 @@ class TestNonJpegCacheBuilding:
     def test_optimized_cache_stores_image_format(self, tmp_path):
         """Test that OptimizedCache stores image_format in manifest."""
         import json
-        from slipstream.cache import OptimizedCache, CACHE_SUBDIR, MANIFEST_FILE
+        from slipstream.cache import OptimizedCache, MANIFEST_FILE
 
         # Create a mock dataset with PNG images
         class MockPNGDataset:

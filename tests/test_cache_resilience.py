@@ -2,7 +2,7 @@
 
 Verifies that:
 - check_integrity() detects missing and size-mismatched files
-- _wipe_cache() removes the .slipstream subdirectory
+- _wipe_cache() removes the cache directory
 - SlipstreamLoader auto-rebuilds when cache files are deleted
 - _check_extraction_integrity() detects incomplete tar extractions
 
@@ -21,7 +21,6 @@ import pytest
 from PIL import Image
 
 from slipstream.cache import (
-    CACHE_SUBDIR,
     MANIFEST_FILE,
     OptimizedCache,
     _get_expected_files,
@@ -126,10 +125,8 @@ class TestCheckIntegrity:
     def test_missing_bin_file(self, reader, built_cache):
         """check_integrity detects a missing .bin file."""
         cache_dir = reader.cache_path
-        slipstream_dir = cache_dir / CACHE_SUBDIR
 
-        # Delete the image.bin file
-        bin_file = slipstream_dir / "image.bin"
+        bin_file = cache_dir / "image.bin"
         assert bin_file.exists()
         bin_file.unlink()
 
@@ -140,10 +137,8 @@ class TestCheckIntegrity:
     def test_missing_npy_file(self, reader, built_cache):
         """check_integrity detects a missing .npy file."""
         cache_dir = reader.cache_path
-        slipstream_dir = cache_dir / CACHE_SUBDIR
 
-        # Delete the label.npy file
-        npy_file = slipstream_dir / "label.npy"
+        npy_file = cache_dir / "label.npy"
         assert npy_file.exists()
         npy_file.unlink()
 
@@ -154,10 +149,8 @@ class TestCheckIntegrity:
     def test_file_size_mismatch(self, reader, built_cache):
         """check_integrity detects file size mismatches."""
         cache_dir = reader.cache_path
-        slipstream_dir = cache_dir / CACHE_SUBDIR
 
-        # Corrupt the image.bin file (truncate it)
-        bin_file = slipstream_dir / "image.bin"
+        bin_file = cache_dir / "image.bin"
         original_size = bin_file.stat().st_size
         assert original_size > 10
         bin_file.write_bytes(b"corrupted")
@@ -169,9 +162,8 @@ class TestCheckIntegrity:
     def test_missing_manifest(self, reader, built_cache):
         """check_integrity returns False when manifest is missing."""
         cache_dir = reader.cache_path
-        slipstream_dir = cache_dir / CACHE_SUBDIR
 
-        manifest = slipstream_dir / MANIFEST_FILE
+        manifest = cache_dir / MANIFEST_FILE
         manifest.unlink()
 
         is_valid, problems = OptimizedCache.check_integrity(cache_dir)
@@ -181,9 +173,8 @@ class TestCheckIntegrity:
     def test_corrupt_manifest(self, reader, built_cache):
         """check_integrity handles a corrupt manifest gracefully."""
         cache_dir = reader.cache_path
-        slipstream_dir = cache_dir / CACHE_SUBDIR
 
-        manifest = slipstream_dir / MANIFEST_FILE
+        manifest = cache_dir / MANIFEST_FILE
         manifest.write_text("this is not json {{{")
 
         is_valid, problems = OptimizedCache.check_integrity(cache_dir)
@@ -198,10 +189,8 @@ class TestCheckIntegrity:
     def test_old_manifest_without_file_sizes(self, reader, built_cache):
         """check_integrity handles old manifests without file_sizes."""
         cache_dir = reader.cache_path
-        slipstream_dir = cache_dir / CACHE_SUBDIR
 
-        # Remove file_sizes from manifest (simulating old format)
-        manifest_path = slipstream_dir / MANIFEST_FILE
+        manifest_path = cache_dir / MANIFEST_FILE
         with open(manifest_path) as f:
             manifest = json.load(f)
         manifest.pop("file_sizes", None)
@@ -219,19 +208,18 @@ class TestCheckIntegrity:
 # ---------------------------------------------------------------------------
 
 class TestWipeCache:
-    def test_removes_slipstream_dir(self, reader, built_cache):
-        """_wipe_cache removes the .slipstream subdirectory."""
+    def test_removes_cache_dir(self, reader, built_cache):
+        """_wipe_cache removes the cache directory."""
         cache_dir = reader.cache_path
-        slipstream_dir = cache_dir / CACHE_SUBDIR
-        assert slipstream_dir.exists()
+        assert cache_dir.exists()
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             OptimizedCache._wipe_cache(cache_dir, "test reason")
 
-        assert not slipstream_dir.exists()
+        assert not cache_dir.exists()
         # Parent directory should still exist
-        assert cache_dir.exists()
+        assert cache_dir.parent.exists()
 
     def test_emits_warning(self, reader, built_cache):
         """_wipe_cache emits a warning with the reason."""
@@ -262,7 +250,7 @@ class TestBuildFilesSizes:
     def test_manifest_contains_file_sizes(self, reader, built_cache):
         """build() should store file_sizes in the manifest."""
         cache_dir = reader.cache_path
-        manifest_path = cache_dir / CACHE_SUBDIR / MANIFEST_FILE
+        manifest_path = cache_dir / MANIFEST_FILE
 
         with open(manifest_path) as f:
             manifest = json.load(f)
@@ -272,10 +260,8 @@ class TestBuildFilesSizes:
         assert isinstance(file_sizes, dict)
         assert len(file_sizes) > 0
 
-        # Verify recorded sizes match actual files
-        slipstream_dir = cache_dir / CACHE_SUBDIR
         for fname, expected_size in file_sizes.items():
-            fpath = slipstream_dir / fname
+            fpath = cache_dir / fname
             assert fpath.exists(), f"File {fname} recorded in file_sizes but missing"
             assert os.path.getsize(fpath) == expected_size
 
@@ -295,15 +281,14 @@ class TestLoaderAutoRebuild:
         # First: build cache normally
         loader1 = SlipstreamLoader(reader, batch_size=2, shuffle=False, verbose=False)
         cache_dir_used = reader.cache_path
-        slipstream_dir = cache_dir_used / CACHE_SUBDIR
 
         # Verify cache exists and is valid
-        assert slipstream_dir.exists()
+        assert cache_dir_used.exists()
         is_valid, _ = OptimizedCache.check_integrity(cache_dir_used)
         assert is_valid
 
         # Delete a .bin file to simulate GC
-        bin_file = slipstream_dir / "image.bin"
+        bin_file = cache_dir_used / "image.bin"
         assert bin_file.exists()
         bin_file.unlink()
 
@@ -331,10 +316,9 @@ class TestLoaderAutoRebuild:
         # Build cache
         loader1 = SlipstreamLoader(reader, batch_size=2, shuffle=False, verbose=False)
         cache_dir_used = reader.cache_path
-        slipstream_dir = cache_dir_used / CACHE_SUBDIR
 
         # Delete label.npy
-        npy_file = slipstream_dir / "label.npy"
+        npy_file = cache_dir_used / "label.npy"
         assert npy_file.exists()
         npy_file.unlink()
 
