@@ -50,6 +50,7 @@ import math
 import queue
 import threading
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -854,6 +855,92 @@ class SlipstreamLoader:
             self._remote_cache_full,
             endpoint_url=self._remote_cache_endpoint_url,
             verbose=self.verbose,
+        )
+
+    def warmup_cache(self, verbose: bool = True) -> dict:
+        """Pre-read cache files to populate OS page cache. No decoding, no pipeline execution.
+
+        This makes the first epoch fast by avoiding on-demand page faults during training.
+
+        Args:
+            verbose: Show tqdm progress bar with throughput.
+
+        Returns:
+            dict with: elapsed_sec, total_bytes, throughput_mb_s, cache_dir, num_files
+        """
+        import ctypes
+        import sys
+        import time
+
+        import numpy as np
+        from tqdm.auto import tqdm
+
+        cache_dir = Path(self.cache.cache_dir)
+        data_files = sorted(cache_dir.glob("*.bin")) + sorted(cache_dir.glob("*.npy"))
+
+        if not data_files:
+            return dict(
+                elapsed_sec=0,
+                total_bytes=0,
+                throughput_mb_s=0,
+                cache_dir=str(cache_dir),
+                num_files=0,
+            )
+
+        total_bytes = sum(f.stat().st_size for f in data_files)
+
+        # Phase 1: madvise hints (best-effort, Linux only)
+        MADV_SEQUENTIAL, MADV_WILLNEED = 2, 3
+        try:
+            libc = ctypes.CDLL(None)
+            for fpath in data_files:
+                try:
+                    mm = np.memmap(fpath, dtype=np.uint8, mode="r")
+                    libc.madvise(
+                        ctypes.c_void_p(mm.ctypes.data),
+                        ctypes.c_size_t(mm.nbytes),
+                        ctypes.c_int(MADV_SEQUENTIAL),
+                    )
+                    libc.madvise(
+                        ctypes.c_void_p(mm.ctypes.data),
+                        ctypes.c_size_t(mm.nbytes),
+                        ctypes.c_int(MADV_WILLNEED),
+                    )
+                    del mm
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Phase 2: Sequential read to fault pages into cache
+        CHUNK = 16 * 1024 * 1024  # 16 MB
+        t0 = time.time()
+
+        pbar = tqdm(
+            total=total_bytes,
+            unit="B",
+            unit_scale=True,
+            desc="Cache warmup",
+            disable=not verbose,
+            leave=True,
+            file=sys.stdout,
+        )
+        for fpath in data_files:
+            with open(fpath, "rb") as f:
+                while True:
+                    chunk = f.read(CHUNK)
+                    if not chunk:
+                        break
+                    pbar.update(len(chunk))
+        pbar.close()
+
+        elapsed = time.time() - t0
+        return dict(
+            elapsed_sec=elapsed,
+            total_bytes=total_bytes,
+            throughput_mb_s=(total_bytes / (1024**2)) / elapsed if elapsed > 0 else 0,
+            cache_dir=str(cache_dir),
+            num_files=len(data_files),
         )
 
     def __del__(self) -> None:

@@ -1,6 +1,6 @@
 [project]
 name = "visionlab-slipstream"
-version = "0.3.2"
+dynamic = ["version"]
 description = "High-performance data loading for PyTorch vision workloads"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -86,6 +86,9 @@ litdata = ["setuptools"]
 [build-system]
 requires = ["hatchling", "setuptools"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "slipstream/version.py"
 
 [tool.hatch.metadata]
 allow-direct-references = true
