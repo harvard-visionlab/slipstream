@@ -182,7 +182,17 @@ class SlipstreamLoader:
         self.drop_last = drop_last
         self._epoch = 0
 
-        # Distributed setup
+        # Distributed setup — auto-detect if torch.distributed is initialized
+        if not distributed:
+            import torch.distributed as dist
+            if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+                distributed = True
+                import warnings
+                warnings.warn(
+                    "torch.distributed is initialized but distributed=False was passed. "
+                    "Auto-enabling distributed mode for correct DDP sharding.",
+                    stacklevel=2,
+                )
         if distributed:
             import torch.distributed as dist
             if not dist.is_initialized():
