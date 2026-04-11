@@ -79,7 +79,13 @@ def compute_normalization_stats(
 
     # Resolve storage
     if image_format == "yuv420":
-        storage = load_yuv420_cache(cache.cache_dir, image_field)
+        # Check if the cache's image field is already YUV420 (dedicated YUV420 cache)
+        field_meta = cache._field_metadata.get(image_field, {})
+        if field_meta.get("image_format") == "yuv420":
+            storage = cache.fields.get(image_field)
+        else:
+            # Fall back to sidecar YUV420 cache (built from JPEG cache)
+            storage = load_yuv420_cache(cache.cache_dir, image_field)
         if storage is None:
             raise FileNotFoundError(
                 f"No YUV420 cache found for field '{image_field}' in {cache.cache_dir}. "
