@@ -36,6 +36,9 @@ from .effects import (
     FixedOpticalDistortion,
 )
 
+# Erasing
+from .erasing import RandomErasing
+
 # Color space
 from .color_space import SRGBToLMS, LMSToParvo, LMSToMagno, LMSToKonio, RGBToLGN, RGBToMagno
 
@@ -84,6 +87,8 @@ __all__ = [
     "RandomPatchShuffle",
     "CircularMask",
     "FixedOpticalDistortion",
+    # Erasing
+    "RandomErasing",
     # Color space
     "SRGBToLMS",
     "LMSToParvo",
