@@ -129,6 +129,7 @@ class SlipstreamLoader:
         remote_cache_endpoint_url: str | None = None,
         verbose: bool = True,
         use_threading: bool = True,
+        after_batch_transforms: list[Callable] | None = None,
     ) -> None:
         """Initialize SlipstreamLoader.
 
@@ -174,6 +175,11 @@ class SlipstreamLoader:
             verbose: Print progress messages
             use_threading: Use background thread for prefetching (default True).
                 Set to False for debugging to isolate threading overhead.
+            after_batch_transforms: Optional list of callables applied to the
+                whole batch dict after per-field pipelines complete. Each
+                callable receives ``batch: dict`` and returns a (possibly
+                modified) ``batch: dict``. Use for batch-level ops that
+                consume multiple fields (e.g. Mixup / CutMix on image+label).
         """
         self.dataset = dataset
         self.batch_size = batch_size
@@ -213,6 +219,7 @@ class SlipstreamLoader:
         self.exclude_fields = set(exclude_fields or [])
         self.verbose = verbose
         self.use_threading = use_threading
+        self.after_batch_transforms: list[Callable] = list(after_batch_transforms or [])
 
         # Remote cache settings (stored for potential re-sync)
         self._remote_cache = remote_cache
@@ -650,6 +657,9 @@ class SlipstreamLoader:
                 else:
                     batch[field_name] = field_data
 
+            for transform in self.after_batch_transforms:
+                batch = transform(batch)
+
             yield batch
 
     def _stop_worker(self) -> None:
@@ -792,6 +802,9 @@ class SlipstreamLoader:
                     else:
                         # Strings or other types - keep as-is
                         batch[field_name] = field_data
+
+                for transform in self.after_batch_transforms:
+                    batch = transform(batch)
 
                 yield batch
         finally:

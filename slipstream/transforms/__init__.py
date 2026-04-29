@@ -39,6 +39,9 @@ from .effects import (
 # Erasing
 from .erasing import RandomErasing
 
+# Mixup / CutMix
+from .mixup import Mixup, mixup_target, one_hot
+
 # Color space
 from .color_space import SRGBToLMS, LMSToParvo, LMSToMagno, LMSToKonio, RGBToLGN, RGBToMagno
 
@@ -89,6 +92,10 @@ __all__ = [
     "FixedOpticalDistortion",
     # Erasing
     "RandomErasing",
+    # Mixup / CutMix
+    "Mixup",
+    "mixup_target",
+    "one_hot",
     # Color space
     "SRGBToLMS",
     "LMSToParvo",
