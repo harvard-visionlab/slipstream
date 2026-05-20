@@ -246,10 +246,19 @@ class Mixup:
 
         lam = torch.from_numpy(lam_np).to(device=device, dtype=x.dtype)
 
-        # Mixup output for ALL samples — for no-op samples (λ=1), this equals x.
-        # For cutmix samples we'll override below.
-        lam_view = lam.view(B, 1, 1, 1)
-        x_out = x * lam_view + x_flip * (1.0 - lam_view)
+        # Image-blend λ: cutmix samples get λ=1 so the lerp leaves them as the
+        # original image — their pixels are replaced by the bbox paste below.
+        # The unmodified `lam` (with cutmix area-correction) still drives the
+        # label mix.
+        lam_blend_np = lam_np.copy()
+        lam_blend_np[use_cutmix_np] = 1.0
+        lam_blend = torch.from_numpy(lam_blend_np).to(device=device, dtype=x.dtype)
+
+        # In-place mixup: x ← x·λ + x_flip·(1-λ) == lerp(x, x_flip, 1-λ).
+        # One fused kernel, no full-size temporaries. x_flip is a separate
+        # copy, so it still holds the original pixels after this mutates x.
+        weight = (1.0 - lam_blend).view(B, 1, 1, 1)
+        x.lerp_(x_flip, weight)
 
         if use_cutmix_np.any():
             yl_np, yh_np, xl_np, xh_np = bbox
@@ -263,10 +272,11 @@ class Mixup:
             use_cutmix_t = torch.from_numpy(use_cutmix_np).to(device)
             cut_mask = (in_rect & use_cutmix_t.view(B, 1, 1)).unsqueeze(1)  # [B,1,H,W]
 
-            # Per-sample selection: cutmix samples get x with bbox replaced;
-            # other samples keep their mixup output.
-            x_cut = torch.where(cut_mask, x_flip, x)
-            x_out = torch.where(use_cutmix_t.view(B, 1, 1, 1), x_cut, x_out)
+            # In-place bbox paste: cutmix samples are still the original image
+            # post-lerp (λ=1), so writing x_flip into the bbox completes cutmix.
+            torch.where(cut_mask, x_flip, x, out=x)
+
+        x_out = x
 
         mixed_y = mixup_target(y, self.num_classes, lam, self.label_smoothing)
 

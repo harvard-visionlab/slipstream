@@ -85,6 +85,7 @@ class RandomErasing(BatchAugment):
         self.left = None
         self.eh = None
         self.ew = None
+        self.mask = None
         self.fill_tensor = None
 
     def _init_rng(self, device):
@@ -155,19 +156,35 @@ class RandomErasing(BatchAugment):
         top = (u_top * (H - eh + 1).float()).long().clamp_(0, H - 1)
         left = (u_left * (W - ew + 1).float()).long().clamp_(0, W - 1)
 
-        # Build fill tensor (only if needed).
+        # Per-image rectangle mask [N, H, W], built here (not in _apply) so
+        # apply_last() replays the exact same erase regions.
+        rows = torch.arange(H, device=device).view(1, H, 1)
+        cols = torch.arange(W, device=device).view(1, 1, W)
+        in_rect = (
+            (rows >= top.view(-1, 1, 1))
+            & (rows < (top + eh).view(-1, 1, 1))
+            & (cols >= left.view(-1, 1, 1))
+            & (cols < (left + ew).view(-1, 1, 1))
+        )
+        mask = in_rect & do.view(-1, 1, 1)  # [N, H, W]
+
+        # Fill content. random_color_pixel draws exactly as many values as
+        # there are erased pixels (× channels) — not a full [N, C, H, W]
+        # tensor — since only the masked pixels are ever written.
         if self.mode == "zeros":
             fill_tensor = None
         elif self.mode == "random_color_uniform":
             fill_tensor = self._sample_fill((N, C, 1, 1), b.dtype, device)
         else:  # random_color_pixel
-            fill_tensor = self._sample_fill((N, C, H, W), b.dtype, device)
+            n_fill = int(mask.sum().item()) * C
+            fill_tensor = self._sample_fill((n_fill,), b.dtype, device)
 
         self.do = do
         self.top = top
         self.left = left
         self.eh = eh
         self.ew = ew
+        self.mask = mask
         self.fill_tensor = fill_tensor
         self._is_3d = is_3d
         self._H = H
@@ -176,42 +193,31 @@ class RandomErasing(BatchAugment):
     def last_params(self):
         return {
             "do": self.do, "top": self.top, "left": self.left,
-            "eh": self.eh, "ew": self.ew, "fill_tensor": self.fill_tensor,
+            "eh": self.eh, "ew": self.ew, "mask": self.mask,
+            "fill_tensor": self.fill_tensor,
             "is_3d": self._is_3d, "H": self._H, "W": self._W,
         }
 
     def _apply(self, b, params):
-        do = params["do"]
-        if not do.any():
+        mask = params["mask"]
+        if mask is None or not mask.any():
             return b
 
-        H, W = params["H"], params["W"]
-        device = b.device
-
-        # Build per-image rectangle mask via broadcasting — no Python loop over N.
-        rows = torch.arange(H, device=device).view(1, H, 1)   # [1, H, 1]
-        cols = torch.arange(W, device=device).view(1, 1, W)   # [1, 1, W]
-
-        top_b = params["top"].view(-1, 1, 1)
-        bot_b = (params["top"] + params["eh"]).view(-1, 1, 1)
-        left_b = params["left"].view(-1, 1, 1)
-        right_b = (params["left"] + params["ew"]).view(-1, 1, 1)
-
-        in_rect = (rows >= top_b) & (rows < bot_b) & (cols >= left_b) & (cols < right_b)  # [N,H,W]
-        mask = (in_rect & do.view(-1, 1, 1)).unsqueeze(1)  # [N, 1, H, W]
-
-        if params["is_3d"]:
-            mask = mask.squeeze(0)  # [1, H, W]
+        # mask is [N, H, W]; reshape so it broadcasts against b for an
+        # in-place write — no full-size output tensor is allocated.
+        mask_b = mask if params["is_3d"] else mask.unsqueeze(1)
 
         if self.mode == "zeros":
-            fill = b.new_zeros(())  # scalar zero, broadcasts
-        else:
-            fill = params["fill_tensor"]
-            if params["is_3d"]:
-                # fill is [1, C, ...] — drop batch dim
-                fill = fill.squeeze(0)
+            return b.masked_fill_(mask_b, 0.0)
 
-        return torch.where(mask, fill, b)
+        fill = params["fill_tensor"]
+        if self.mode == "random_color_uniform":
+            if params["is_3d"]:
+                fill = fill.squeeze(0)  # [1,C,1,1] -> [C,1,1]
+            return torch.where(mask_b, fill, b, out=b)
+
+        # random_color_pixel: scatter the compact fill into erased pixels.
+        return b.masked_scatter_(mask_b, fill)
 
     def apply_last(self, b: torch.Tensor) -> torch.Tensor:
         return self._apply(b, self.last_params())
