@@ -40,7 +40,7 @@ from .effects import (
 from .erasing import RandomErasing
 
 # Mixup / CutMix
-from .mixup import Mixup, mixup_target, one_hot
+from .mixup import CutMixClutter, Mixup, mixup_target, one_hot
 
 # Color space
 from .color_space import SRGBToLMS, LMSToParvo, LMSToMagno, LMSToKonio, RGBToLGN, RGBToMagno
@@ -94,6 +94,7 @@ __all__ = [
     "RandomErasing",
     # Mixup / CutMix
     "Mixup",
+    "CutMixClutter",
     "mixup_target",
     "one_hot",
     # Color space

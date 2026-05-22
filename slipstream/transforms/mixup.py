@@ -15,6 +15,8 @@ References:
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import torch
 
@@ -113,6 +115,15 @@ class Mixup:
         correct_lam: For cutmix samples, recompute λ from the actual
             (clipped) bbox area. Recommended.
         label_smoothing: Label smoothing factor in [0, 1).
+        cutmix_label: How cutmix samples are labelled.
+            - "mixed" (default): area-weighted blend of the two classes,
+              the standard cutmix target.
+            - "inset": one-hot of the *inset* class — the pasted bbox patch
+              (``x.flip(0)``). The surrounding-image ("clutter") class gets
+              no special weight, only the label-smoothing floor like any
+              other non-target class. Use for target-in-clutter training.
+              Only affects cutmix samples; mixup samples (``mixup_alpha > 0``)
+              keep blended labels.
         num_classes: Number of classes (for one-hot conversion).
         image_key: Key in the batch dict for the image tensor.
         label_key: Key in the batch dict for integer-class labels.
@@ -128,6 +139,7 @@ class Mixup:
         switch_prob: float = 0.5,
         correct_lam: bool = True,
         label_smoothing: float = 0.0,
+        cutmix_label: str = "mixed",
         num_classes: int = 1000,
         image_key: str = "image",
         label_key: str = "label",
@@ -144,6 +156,18 @@ class Mixup:
                 "or cutmix_minmax must be set."
             )
 
+        if cutmix_label not in ("mixed", "inset"):
+            raise ValueError(
+                f"cutmix_label must be 'mixed' or 'inset', got {cutmix_label!r}"
+            )
+        if cutmix_label == "inset" and mixup_alpha > 0:
+            warnings.warn(
+                "cutmix_label='inset' only relabels cutmix samples; mixup "
+                "samples (mixup_alpha > 0) keep blended labels. Set "
+                "mixup_alpha=0 for a pure target-in-clutter setup.",
+                stacklevel=2,
+            )
+
         self.mixup_alpha = float(mixup_alpha)
         self.cutmix_alpha = float(cutmix_alpha)
         self.cutmix_minmax = tuple(cutmix_minmax) if cutmix_minmax is not None else None
@@ -151,6 +175,7 @@ class Mixup:
         self.switch_prob = float(switch_prob)
         self.correct_lam = bool(correct_lam)
         self.label_smoothing = float(label_smoothing)
+        self.cutmix_label = cutmix_label
         self.num_classes = int(num_classes)
         self.image_key = image_key
         self.label_key = label_key
@@ -278,7 +303,17 @@ class Mixup:
 
         x_out = x
 
-        mixed_y = mixup_target(y, self.num_classes, lam, self.label_smoothing)
+        # Label λ. "mixed" uses the area-weighted blend. "inset" forces
+        # cutmix samples to λ=0 → the label is the pure inset (pasted-bbox)
+        # class; the clutter class gets only the smoothing floor, exactly
+        # like every other non-target class.
+        if self.cutmix_label == "inset" and use_cutmix_np.any():
+            label_lam_np = lam_np.copy()
+            label_lam_np[use_cutmix_np] = 0.0
+            label_lam = torch.from_numpy(label_lam_np).to(device=device, dtype=x.dtype)
+        else:
+            label_lam = lam
+        mixed_y = mixup_target(y, self.num_classes, label_lam, self.label_smoothing)
 
         # Stash for testing / visualization.
         self.last_lam = lam.detach().cpu()
@@ -296,6 +331,67 @@ class Mixup:
             f"mixup_alpha={self.mixup_alpha}, cutmix_alpha={self.cutmix_alpha}, "
             f"cutmix_minmax={self.cutmix_minmax}, prob={self.prob}, "
             f"switch_prob={self.switch_prob}, correct_lam={self.correct_lam}, "
-            f"label_smoothing={self.label_smoothing}, num_classes={self.num_classes}, "
+            f"label_smoothing={self.label_smoothing}, cutmix_label={self.cutmix_label!r}, "
+            f"num_classes={self.num_classes}, "
             f"image_key={self.image_key!r}, label_key={self.label_key!r}, seed={self.seed})"
+        )
+
+
+class CutMixClutter(Mixup):
+    """CutMix preset for target-in-clutter classification.
+
+    Each image's bbox region is replaced with a patch from another image.
+    That pasted patch is the **target** (the "inset"); the surrounding,
+    untouched image is **clutter**. The returned label is the one-hot
+    target class — the clutter class gets no special weight, only the
+    optional label-smoothing floor, like any other non-target class.
+
+    The rectangular patch boundary is always a learnable cue for which
+    region is the target, so the inset stays discoverable across sizes.
+    The bbox is bounded (``cutmix_minmax``) so the inset is a genuine
+    sub-region with some size variability rather than covering the image.
+
+    This is a thin preset over :class:`Mixup`: cutmix-only (no mixup),
+    ``cutmix_label="inset"``. All the image / RNG / replay logic is shared.
+
+    Args:
+        num_classes: Number of classes (for one-hot conversion).
+        cutmix_minmax: ``(min, max)`` bounds for the bbox h/w as a fraction
+            of image size. Default ``(0.2, 0.8)`` → inset area ≈ 4–64%.
+            The wide range spans small and large insets so the model
+            cannot shortcut with a "smallest region wins" heuristic.
+        prob: Per-sample probability of embedding a target. At ``prob<1``,
+            skipped samples keep their own class and have no clutter.
+        label_smoothing: Label smoothing factor in [0, 1).
+        correct_lam: Recompute the (stashed) area λ from the clipped bbox.
+            Does not affect the label in inset mode.
+        image_key: Key in the batch dict for the image tensor.
+        label_key: Key in the batch dict for integer-class labels.
+        seed: RNG seed. For DDP, use a per-rank seed.
+    """
+
+    def __init__(
+        self,
+        num_classes: int = 1000,
+        cutmix_minmax: tuple[float, float] = (0.2, 0.8),
+        prob: float = 1.0,
+        label_smoothing: float = 0.0,
+        correct_lam: bool = True,
+        image_key: str = "image",
+        label_key: str = "label",
+        seed: int | None = None,
+    ):
+        super().__init__(
+            mixup_alpha=0.0,
+            cutmix_alpha=0.0,
+            cutmix_minmax=cutmix_minmax,
+            prob=prob,
+            switch_prob=0.0,
+            correct_lam=correct_lam,
+            label_smoothing=label_smoothing,
+            cutmix_label="inset",
+            num_classes=num_classes,
+            image_key=image_key,
+            label_key=label_key,
+            seed=seed,
         )

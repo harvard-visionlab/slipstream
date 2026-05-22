@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 import torch
 
-from slipstream.transforms import Mixup, mixup_target, one_hot
+import warnings
+
+from slipstream.transforms import CutMixClutter, Mixup, mixup_target, one_hot
 
 
 B, C, H, W, K = 8, 3, 32, 32, 10
@@ -323,3 +325,95 @@ class TestLoaderIntegration:
         from slipstream.loader import SlipstreamLoader
         sig = inspect.signature(SlipstreamLoader.__init__)
         assert "after_batch_transforms" in sig.parameters
+
+
+# ---------- cutmix_label="inset" (target-in-clutter) ----------
+
+class TestCutmixLabelInset:
+    def test_invalid_cutmix_label_raises(self):
+        with pytest.raises(ValueError, match="cutmix_label"):
+            Mixup(num_classes=K, cutmix_label="bad")
+
+    def test_inset_with_mixup_alpha_warns(self):
+        with pytest.warns(UserWarning, match="inset"):
+            Mixup(mixup_alpha=0.8, cutmix_alpha=1.0, cutmix_label="inset",
+                  num_classes=K)
+
+    def test_inset_label_is_pure_target(self):
+        # Cutmix-only, inset mode: every label is the one-hot inset
+        # (flipped-partner) class — the clutter class gets no weight.
+        m = Mixup(mixup_alpha=0.0, cutmix_alpha=1.0, prob=1.0,
+                  cutmix_label="inset", num_classes=K, seed=3)
+        b = make_batch()
+        labels_in = b["label"].clone()
+        out = m(b)
+        expected = torch.nn.functional.one_hot(labels_in.flip(0), K).float()
+        assert torch.equal(out["label"], expected)
+
+    def test_inset_clutter_gets_only_smoothing_floor(self):
+        # The clutter class (the sample's own label) is treated like any
+        # other non-target class: exactly smoothing/num_classes.
+        smoothing = 0.1
+        m = Mixup(mixup_alpha=0.0, cutmix_alpha=1.0, prob=1.0,
+                  cutmix_label="inset", label_smoothing=smoothing,
+                  num_classes=K, seed=4)
+        b = make_batch()
+        labels_in = b["label"].clone()
+        out = m(b)
+        floor = smoothing / K
+        on = 1.0 - smoothing + floor
+        for i in range(B):
+            target_cls = int(labels_in.flip(0)[i])
+            clutter_cls = int(labels_in[i])
+            assert abs(out["label"][i, target_cls].item() - on) < 1e-5
+            if clutter_cls != target_cls:
+                assert abs(out["label"][i, clutter_cls].item() - floor) < 1e-5
+
+    def test_inset_leaves_image_identical_to_mixed(self):
+        # cutmix_label only changes labels — the image output is untouched.
+        b_mixed = make_batch(seed=5)
+        b_inset = make_batch(seed=5)
+        m_mixed = Mixup(mixup_alpha=0.0, cutmix_alpha=1.0, prob=1.0,
+                        cutmix_label="mixed", num_classes=K, seed=9)
+        m_inset = Mixup(mixup_alpha=0.0, cutmix_alpha=1.0, prob=1.0,
+                        cutmix_label="inset", num_classes=K, seed=9)
+        out_mixed = m_mixed(b_mixed)
+        out_inset = m_inset(b_inset)
+        assert torch.equal(out_mixed["image"], out_inset["image"])
+        assert not torch.equal(out_mixed["label"], out_inset["label"])
+
+
+# ---------- CutMixClutter preset ----------
+
+class TestCutMixClutter:
+    def test_defaults(self):
+        m = CutMixClutter(num_classes=K)
+        assert m.cutmix_label == "inset"
+        assert m.mixup_alpha == 0.0
+        assert m.cutmix_minmax == (0.2, 0.8)
+        assert m.prob == 1.0
+
+    def test_construction_emits_no_warning(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            CutMixClutter(num_classes=K)
+
+    def test_produces_inset_labels(self):
+        m = CutMixClutter(num_classes=K, seed=1)
+        b = make_batch()
+        labels_in = b["label"].clone()
+        out = m(b)
+        expected = torch.nn.functional.one_hot(labels_in.flip(0), K).float()
+        assert torch.equal(out["label"], expected)
+
+    def test_bbox_within_minmax(self):
+        m = CutMixClutter(num_classes=K, seed=2)
+        b = make_batch()
+        m(b)
+        yl, yh, xl, xh = m.last_bbox
+        cut_h, cut_w = yh - yl, xh - xl
+        assert (cut_h >= int(H * 0.2)).all() and (cut_h <= int(H * 0.8)).all()
+        assert (cut_w >= int(W * 0.2)).all() and (cut_w <= int(W * 0.8)).all()
+
+    def test_repr(self):
+        assert "CutMixClutter" in repr(CutMixClutter(num_classes=K))
