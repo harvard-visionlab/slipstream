@@ -417,3 +417,71 @@ class TestCutMixClutter:
 
     def test_repr(self):
         assert "CutMixClutter" in repr(CutMixClutter(num_classes=K))
+
+    def test_default_mixed_label_key_is_none(self):
+        assert CutMixClutter(num_classes=K).mixed_label_key is None
+
+
+# ---------- mixed_label_key (dual-label output) ----------
+
+class TestMixedLabelKey:
+    def test_collision_with_label_key_raises(self):
+        with pytest.raises(ValueError, match="mixed_label_key"):
+            Mixup(num_classes=K, mixed_label_key="label")
+
+    def test_collision_with_image_key_raises(self):
+        with pytest.raises(ValueError, match="mixed_label_key"):
+            Mixup(num_classes=K, mixed_label_key="image")
+
+    def test_none_default_emits_only_primary(self):
+        m = CutMixClutter(num_classes=K, seed=1)
+        b = make_batch()
+        out = m(b)
+        assert "label" in out
+        assert "label_mixed" not in out
+
+    def test_inset_plus_mixed_both_emitted(self):
+        m = CutMixClutter(num_classes=K, mixed_label_key="label_mixed", seed=2)
+        b = make_batch()
+        labels_in = b["label"].clone()
+        out = m(b)
+        # Primary is the inset one-hot (target class).
+        expected_inset = torch.nn.functional.one_hot(labels_in.flip(0), K).float()
+        assert torch.equal(out["label"], expected_inset)
+        # Secondary is the standard area-weighted blend.
+        assert out["label_mixed"].shape == (B, K)
+        assert torch.allclose(out["label_mixed"].sum(dim=-1), torch.ones(B), atol=1e-5)
+        # The two are different in general (some samples have non-degenerate λ).
+        assert not torch.equal(out["label_mixed"], expected_inset)
+
+    def test_blended_matches_cutmix_label_mixed_reference(self):
+        # The dual-emitted label must equal what cutmix_label="mixed" would
+        # produce on its own with the same seed/batch.
+        b_dual = make_batch(seed=11)
+        b_ref = make_batch(seed=11)
+        m_dual = CutMixClutter(num_classes=K, mixed_label_key="label_mixed", seed=33)
+        m_ref = Mixup(mixup_alpha=0.0, cutmix_alpha=0.0,
+                      cutmix_minmax=(0.2, 0.8), prob=1.0,
+                      cutmix_label="mixed", num_classes=K, seed=33)
+        out_dual = m_dual(b_dual)
+        out_ref = m_ref(b_ref)
+        assert torch.equal(out_dual["label_mixed"], out_ref["label"])
+
+    def test_mixed_mode_aliases_primary(self):
+        # When cutmix_label="mixed", primary already IS the blended label.
+        # The dual emit must equal the primary (alias path, no recompute).
+        m = Mixup(mixup_alpha=0.0, cutmix_alpha=1.0, prob=1.0,
+                  cutmix_label="mixed", mixed_label_key="label_mixed",
+                  num_classes=K, seed=44)
+        b = make_batch()
+        out = m(b)
+        assert torch.equal(out["label_mixed"], out["label"])
+
+    def test_image_output_unaffected(self):
+        b1 = make_batch(seed=7)
+        b2 = make_batch(seed=7)
+        m_no_dual = CutMixClutter(num_classes=K, seed=55)
+        m_dual = CutMixClutter(num_classes=K, mixed_label_key="label_mixed", seed=55)
+        out_no = m_no_dual(b1)
+        out_dual = m_dual(b2)
+        assert torch.equal(out_no["image"], out_dual["image"])

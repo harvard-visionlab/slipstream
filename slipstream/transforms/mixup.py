@@ -126,7 +126,14 @@ class Mixup:
               keep blended labels.
         num_classes: Number of classes (for one-hot conversion).
         image_key: Key in the batch dict for the image tensor.
-        label_key: Key in the batch dict for integer-class labels.
+        label_key: Key in the batch dict for integer-class labels. The
+            written label respects ``cutmix_label`` (blended or inset).
+        mixed_label_key: If not None, also write the standard area-weighted
+            *blended* cutmix/mixup label (i.e. what ``cutmix_label="mixed"``
+            would produce) to ``batch[mixed_label_key]``. Useful with
+            ``cutmix_label="inset"`` when you want both the target-only
+            label and the conventional blended label available downstream.
+            Must differ from ``label_key`` and ``image_key``.
         seed: RNG seed. For DDP, use a per-rank seed (e.g. ``base + rank``).
     """
 
@@ -143,6 +150,7 @@ class Mixup:
         num_classes: int = 1000,
         image_key: str = "image",
         label_key: str = "label",
+        mixed_label_key: str | None = None,
         seed: int | None = None,
     ):
         if cutmix_minmax is not None:
@@ -168,6 +176,12 @@ class Mixup:
                 stacklevel=2,
             )
 
+        if mixed_label_key is not None and mixed_label_key in (image_key, label_key):
+            raise ValueError(
+                f"mixed_label_key {mixed_label_key!r} collides with "
+                f"image_key={image_key!r} / label_key={label_key!r}"
+            )
+
         self.mixup_alpha = float(mixup_alpha)
         self.cutmix_alpha = float(cutmix_alpha)
         self.cutmix_minmax = tuple(cutmix_minmax) if cutmix_minmax is not None else None
@@ -179,6 +193,7 @@ class Mixup:
         self.num_classes = int(num_classes)
         self.image_key = image_key
         self.label_key = label_key
+        self.mixed_label_key = mixed_label_key
         self.seed = seed
         self.rng = np.random.default_rng(seed)
 
@@ -315,6 +330,17 @@ class Mixup:
             label_lam = lam
         mixed_y = mixup_target(y, self.num_classes, label_lam, self.label_smoothing)
 
+        # Optional dual-label output: also emit the standard area-weighted
+        # blended cutmix/mixup label. When the primary label already *is*
+        # the blended one (label_lam is lam), just alias instead of
+        # recomputing.
+        if self.mixed_label_key is not None:
+            if label_lam is lam:
+                blended_y = mixed_y
+            else:
+                blended_y = mixup_target(y, self.num_classes, lam, self.label_smoothing)
+            batch[self.mixed_label_key] = blended_y
+
         # Stash for testing / visualization.
         self.last_lam = lam.detach().cpu()
         self.last_use_mixup = use_mixup_np.copy()
@@ -333,7 +359,8 @@ class Mixup:
             f"switch_prob={self.switch_prob}, correct_lam={self.correct_lam}, "
             f"label_smoothing={self.label_smoothing}, cutmix_label={self.cutmix_label!r}, "
             f"num_classes={self.num_classes}, "
-            f"image_key={self.image_key!r}, label_key={self.label_key!r}, seed={self.seed})"
+            f"image_key={self.image_key!r}, label_key={self.label_key!r}, "
+            f"mixed_label_key={self.mixed_label_key!r}, seed={self.seed})"
         )
 
 
@@ -366,7 +393,12 @@ class CutMixClutter(Mixup):
         correct_lam: Recompute the (stashed) area λ from the clipped bbox.
             Does not affect the label in inset mode.
         image_key: Key in the batch dict for the image tensor.
-        label_key: Key in the batch dict for integer-class labels.
+        label_key: Key in the batch dict for integer-class labels (the
+            inset/target one-hot label).
+        mixed_label_key: If not None, also emit the standard area-weighted
+            *blended* cutmix label at ``batch[mixed_label_key]`` — useful
+            for joint or auxiliary losses against the conventional cutmix
+            target. Must differ from ``label_key`` / ``image_key``.
         seed: RNG seed. For DDP, use a per-rank seed.
     """
 
@@ -379,6 +411,7 @@ class CutMixClutter(Mixup):
         correct_lam: bool = True,
         image_key: str = "image",
         label_key: str = "label",
+        mixed_label_key: str | None = None,
         seed: int | None = None,
     ):
         super().__init__(
@@ -393,5 +426,6 @@ class CutMixClutter(Mixup):
             num_classes=num_classes,
             image_key=image_key,
             label_key=label_key,
+            mixed_label_key=mixed_label_key,
             seed=seed,
         )
