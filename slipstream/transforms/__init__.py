@@ -42,6 +42,9 @@ from .erasing import RandomErasing
 # Mixup / CutMix
 from .mixup import CutMixClutter, Mixup, mixup_target, one_hot
 
+# Side-by-side search pair
+from .sidebyside import SideBySideSearchPair
+
 # Color space
 from .color_space import SRGBToLMS, LMSToParvo, LMSToMagno, LMSToKonio, RGBToLGN, RGBToMagno
 
@@ -97,6 +100,8 @@ __all__ = [
     "CutMixClutter",
     "mixup_target",
     "one_hot",
+    # Side-by-side search pair
+    "SideBySideSearchPair",
     # Color space
     "SRGBToLMS",
     "LMSToParvo",
