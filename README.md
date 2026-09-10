@@ -65,6 +65,33 @@ for batch in loader:
 
 First epoch builds the cache (if not already present locally). Subsequent epochs run at full speed.
 
+## Am I set up? (`slipstream status`)
+
+Installing slipstream adds a `slipstream` command (also `python -m slipstream`):
+
+```bash
+uv run slipstream status     # cache dir + permissions, S3 credentials/access, lab datasets
+uv run slipstream datasets   # list the lab's registered datasets (needs visionlab-datasets)
+uv run slipstream sync imagenet100 --fmt yuv420          # fetch train+val caches from S3
+uv run slipstream sync imagenet1k --split val --fmt all  # both formats, val only
+uv run slipstream sync s3://bucket/slipstream-cache/imagenet10/imagenet10-s256_l512-jpeg-val
+```
+
+`status` reports:
+
+- **Cache directory**: the resolved path, where the setting came from (`SLIPSTREAM_CACHE_DIR`,
+  the platform default from `visionlab-datasets`, or `~/.slipstream`), owner/mode, whether
+  you can read and write it, and free disk space.
+- **S3 access**: `s5cmd` availability, which AWS credentials were found, your IAM identity,
+  and whether you can list the lab cache bucket.
+- **Lab datasets**: for every registered `(dataset, split, fmt)` in `visionlab-datasets`,
+  whether the cache is present and intact locally (with its exact path) and readable on S3.
+  Missing entries come with the exact `slipstream sync ...` command to fetch them.
+
+Exit code is non-zero when something would block training (unreadable cache dir, no S3
+access), so it can be used in setup scripts. Add `--json` for machine-readable output and
+`--no-remote` to skip network checks.
+
 ## More Examples
 
 See **[Advanced Usage](docs/ADVANCED.md)** for:

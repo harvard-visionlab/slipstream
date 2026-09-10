@@ -29,6 +29,9 @@ dependencies = [
     "pyarrow", # Required by litdata for parquet file reading
 ]
 
+[project.scripts]
+slipstream = "slipstream.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=7.0.0",

@@ -17,6 +17,15 @@ uv run pytest tests/ -v          # Run tests
 uv run python libslipstream/setup.py build_ext --inplace
 ```
 
+**CLI** (`slipstream/cli.py`, entry point `slipstream` / `python -m slipstream`):
+
+```bash
+uv run slipstream status          # cache dir, permissions, S3 access, lab datasets
+uv run slipstream sync imagenet100 --fmt yuv420
+```
+
+Lab dataset registry comes from the optional `visionlab-datasets` package (`visionlab.datasets`); the CLI degrades gracefully without it. To test with the real registry, run from a repo that has it installed (e.g. lrm-space-dev) with `PYTHONPATH=<this repo>`.
+
 **s5cmd** (for S3 remote cache):
 
 ```bash
