@@ -1,7 +1,6 @@
-"""Tests for the ``slipstream`` command-line interface.
+"""Tests for the ``slipstream`` command-line interface (plumbing checks).
 
-All tests here run offline: the lab-dataset registry (visionlab-datasets) is
-replaced with a fake, and S3 calls are patched. Real S3 checks are marked
+All tests run offline; S3 calls are patched. Real S3 checks are marked
 ``@pytest.mark.s3``.
 """
 
@@ -9,7 +8,8 @@ from __future__ import annotations
 
 import json
 import os
-import types
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,47 +19,6 @@ import pytest
 from slipstream import cli
 from slipstream.cache import MANIFEST_FILE
 from slipstream.utils.cache_dir import CACHE_DIR_ENV_VAR
-
-REMOTE_BASE = "s3://test-bucket/slipstream-cache"
-
-
-# --------------------------------------------------------------------------- #
-# Fixtures
-# --------------------------------------------------------------------------- #
-
-
-class _Platform:
-    value = "cpu_workstation"
-
-
-def make_fake_registry(cache_dir: Path):
-    """A stand-in for the ``visionlab.datasets`` module."""
-    configs = {
-        "tiny": types.SimpleNamespace(
-            name="tiny",
-            num_classes=3,
-            metadata={"num_val": 4, "num_train": 100},
-            remote_cache={
-                ("val", "jpeg"): f"{REMOTE_BASE}/tiny/tiny-jpeg-val",
-                ("val", "yuv420"): f"{REMOTE_BASE}/tiny/tiny-yuv420-val",
-                ("train", "jpeg"): f"{REMOTE_BASE}/tiny/tiny-jpeg-train",
-            },
-        ),
-        "other": types.SimpleNamespace(
-            name="other",
-            num_classes=2,
-            remote_cache={("val", "jpeg"): f"{REMOTE_BASE}/other/other-jpeg-val"},
-        ),
-        "empty": types.SimpleNamespace(name="empty", num_classes=5, remote_cache={}),
-    }
-    vd = types.SimpleNamespace(
-        __version__="9.9.9",
-        list_datasets=lambda: sorted(configs),
-        get_config=lambda name: configs[name],
-        detect_platform=lambda: _Platform(),
-        get_platform_cache_dir=lambda plat=None: str(cache_dir),
-    )
-    return vd
 
 
 def write_cache(path: Path, *, complete: bool = True, n: int = 4) -> None:
@@ -93,19 +52,6 @@ def cache_dir(tmp_path, monkeypatch):
     return d
 
 
-@pytest.fixture
-def fake_registry(cache_dir):
-    vd = make_fake_registry(cache_dir)
-    with patch.object(cli, "_import_registry", return_value=vd):
-        yield vd
-
-
-@pytest.fixture
-def no_registry():
-    with patch.object(cli, "_import_registry", return_value=None):
-        yield
-
-
 def _run(argv, capsys):
     code = cli.main(argv)
     return code, capsys.readouterr().out
@@ -117,100 +63,81 @@ def _run(argv, capsys):
 
 
 class TestStatus:
-    def test_status_without_registry(self, cache_dir, no_registry, capsys):
+    def test_status_json(self, cache_dir, capsys):
         write_cache(cache_dir / "slipcache-abc12345")
+        (cache_dir / "not-a-cache").mkdir()
         code, out = _run(["status", "--no-remote", "--json"], capsys)
         data = json.loads(out)
         assert data["cache"]["path"] == str(cache_dir)
         assert CACHE_DIR_ENV_VAR in data["cache"]["source"]
         assert data["cache"]["access"]["readable"] is True
         assert data["cache"]["access"]["writable"] is True
-        assert data["visionlab_datasets_version"] is None
-        assert data["datasets"] == []
-        assert [o["name"] for o in data["other_caches"]] == ["slipcache-abc12345"]
-        # Missing registry is reported but is not a hard failure.
+        assert [o["name"] for o in data["caches"]] == ["slipcache-abc12345"]
+        assert data["caches"][0]["bytes"] > 0
+        assert data["s3"]["checked"] is False
+        assert "datasets" not in data
         assert code == 0
 
-    def test_status_local_dataset_states(self, cache_dir, fake_registry, capsys):
-        write_cache(cache_dir / "tiny-jpeg-val")
-        write_cache(cache_dir / "tiny-yuv420-val", complete=False)
-        # tiny-jpeg-train and other-jpeg-val are missing.
-        code, out = _run(["status", "--no-remote", "--json"], capsys)
-        data = json.loads(out)
-        by_name = {e["cache_name"]: e for e in data["datasets"]}
-        assert by_name["tiny-jpeg-val"]["local_status"] == "ok"
-        assert by_name["tiny-jpeg-val"]["local_bytes"] > 0
-        assert by_name["tiny-yuv420-val"]["local_status"] == "incomplete"
-        assert any("index.npy" in p for p in by_name["tiny-yuv420-val"]["local_problems"])
-        assert by_name["tiny-jpeg-train"]["local_status"] == "missing"
-        assert by_name["other-jpeg-val"]["local_status"] == "missing"
-        assert all(e["remote_status"] == "unchecked" for e in data["datasets"])
-        assert by_name["tiny-jpeg-val"]["local_path"] == str(cache_dir / "tiny-jpeg-val")
-        assert data["visionlab_datasets_version"] == "9.9.9"
-
-    def test_status_text_output(self, cache_dir, fake_registry, capsys):
-        write_cache(cache_dir / "tiny-jpeg-val")
+    def test_status_text(self, cache_dir, capsys):
+        write_cache(cache_dir / "slipcache-abc12345")
         code, out = _run(["status", "--no-remote"], capsys)
         assert "Cache directory" in out
         assert str(cache_dir) in out
-        assert "Lab datasets" in out
-        assert "tiny-jpeg-val" in out
-        assert "to fetch:   slipstream sync " in out  # hint for a missing cache
-        assert "--split val --fmt jpeg" in out
+        assert "Slipstream caches in cache dir" in out
+        assert "slipcache-abc12345" in out
+        assert "lab users" not in out  # env var is set
+        assert "slipstream sync" not in out
+        assert "visionlab-datasets not installed" not in out
 
-    def test_sample_count_cross_check(self, cache_dir, fake_registry, capsys):
-        write_cache(cache_dir / "tiny-jpeg-val", n=4)  # matches num_val=4
-        write_cache(cache_dir / "tiny-yuv420-val", n=3)  # mismatch
-        code, out = _run(["status", "--no-remote", "--json"], capsys)
-        data = json.loads(out)
-        by_name = {e["cache_name"]: e for e in data["datasets"]}
-        assert by_name["tiny-jpeg-val"]["local_status"] == "ok"
-        assert by_name["tiny-jpeg-val"]["local_problems"] == []
-        assert by_name["tiny-jpeg-val"]["expected_samples"] == 4
-        assert by_name["tiny-yuv420-val"]["local_status"] == "ok"  # files intact; count is a warning
-        assert any("sample count 3 != registry num_val 4" in m for m in by_name["tiny-yuv420-val"]["local_problems"])
-        assert data["datasets_without_caches"] == ["empty"]
+    def test_default_cache_dir_hint(self, monkeypatch, capsys):
+        monkeypatch.delenv(CACHE_DIR_ENV_VAR, raising=False)
         code, out = _run(["status", "--no-remote"], capsys)
-        assert "sample count 3 != registry num_val 4" in out
-        assert "registered but no remote caches yet: empty" in out
+        assert "slipstream default (~/.slipstream)" in out
+        assert "visionlab-datasets status" in out
 
-    def test_config_is_alias(self, cache_dir, fake_registry, capsys):
+    def test_config_is_alias(self, cache_dir, capsys):
         code, out = _run(["config", "--no-remote"], capsys)
         assert "Cache directory" in out
 
-    def test_status_remote_checks(self, cache_dir, fake_registry, capsys):
-        write_cache(cache_dir / "tiny-jpeg-val")
+    def test_status_with_remote(self, cache_dir, capsys):
+        s3info = cli.S3Info(
+            s5cmd_path="/usr/bin/s5cmd",
+            s5cmd_version="v2.3.0",
+            credentials_found=True,
+            credentials_method="env",
+            identity_arn="arn:aws:iam::********8893:user/x",
+            bucket_url=cli.DEFAULT_REMOTE_CACHE_BASE,
+            bucket_readable=True,
+        )
+        with patch.object(cli, "check_s3", return_value=s3info) as chk:
+            code, out = _run(["status"], capsys)
+        assert chk.call_args.kwargs["check_remote"] is True
+        assert "arn:aws:iam::********8893:user/x" in out
+        assert "Everything looks good" in out
+        assert code == 0
 
-        def fake_listing(remote, **kw):
-            if remote.endswith("tiny-jpeg-train/"):
-                return 0, 0
-            if remote.endswith("other-jpeg-val/"):
-                raise RuntimeError("An error occurred (AccessDenied)")
-            return 5, 12345
-
+    def test_status_no_bucket_access_is_hard_failure(self, cache_dir, capsys):
         s3info = cli.S3Info(
             s5cmd_path="/usr/bin/s5cmd",
             credentials_found=True,
-            identity_arn="arn:aws:iam::1:user/x",
-            bucket_url=REMOTE_BASE + "/",
-            bucket_readable=True,
+            identity_arn="arn:aws:iam::********0000:user/x",
+            bucket_url=cli.DEFAULT_REMOTE_CACHE_BASE,
+            bucket_readable=False,
+            bucket_error="AccessDenied",
         )
-        with (
-            patch.object(cli, "remote_listing", side_effect=fake_listing),
-            patch.object(cli, "check_s3", return_value=s3info),
-        ):
-            code, out = _run(["status", "--json"], capsys)
-        data = json.loads(out)
-        by_name = {e["cache_name"]: e for e in data["datasets"]}
-        assert by_name["tiny-jpeg-val"]["remote_status"] == "ok"
-        assert by_name["tiny-jpeg-val"]["remote_bytes"] == 12345
-        assert by_name["tiny-jpeg-train"]["remote_status"] == "missing"
-        assert by_name["other-jpeg-val"]["remote_status"] == "denied"
-        assert code == 0
+        with patch.object(cli, "check_s3", return_value=s3info):
+            code, out = _run(["status"], capsys)
+        assert code == 1
+        assert "Cannot list" in out
 
-    def test_status_unreadable_cache_dir_is_hard_failure(
-        self, tmp_path, monkeypatch, no_registry, capsys
-    ):
+    def test_status_no_credentials(self, cache_dir, capsys):
+        s3info = cli.S3Info(s5cmd_path="/usr/bin/s5cmd", credentials_found=False)
+        with patch.object(cli, "check_s3", return_value=s3info):
+            code, out = _run(["status"], capsys)
+        assert code == 1
+        assert "No AWS credentials found" in out
+
+    def test_status_unreadable_cache_dir_is_hard_failure(self, tmp_path, monkeypatch, capsys):
         if os.geteuid() == 0:
             pytest.skip("root ignores permission bits")
         d = tmp_path / "locked"
@@ -224,7 +151,7 @@ class TestStatus:
         assert code == 1
         assert "No read access" in out
 
-    def test_status_missing_cache_dir(self, tmp_path, monkeypatch, no_registry, capsys):
+    def test_status_missing_cache_dir(self, tmp_path, monkeypatch, capsys):
         d = tmp_path / "not-yet"
         monkeypatch.setenv(CACHE_DIR_ENV_VAR, str(d))
         code, out = _run(["status", "--no-remote", "--json"], capsys)
@@ -233,159 +160,91 @@ class TestStatus:
         assert data["cache"]["access"]["can_create"] is True
         assert code == 0
 
-
-# --------------------------------------------------------------------------- #
-# datasets
-# --------------------------------------------------------------------------- #
-
-
-class TestDatasets:
-    def test_lists_registry(self, cache_dir, fake_registry, capsys):
-        code, out = _run(["datasets"], capsys)
-        assert code == 0
-        assert "tiny  (3 classes)" in out
-        assert "empty  (5 classes)\n  (no remote caches registered)" in out
-        assert f"{REMOTE_BASE}/tiny/tiny-jpeg-train" in out
-
-    def test_without_registry(self, no_registry, capsys):
-        code, out = _run(["datasets"], capsys)
-        assert code == 1
-        assert "not installed" in out
+    def test_no_sync_or_datasets_subcommands(self):
+        for cmd in (["sync", "imagenet100"], ["datasets"]):
+            with pytest.raises(SystemExit) as exc:
+                cli.main(cmd)
+            assert exc.value.code == 2
 
 
 # --------------------------------------------------------------------------- #
-# sync
+# public helpers (visionlab-datasets builds on these; keep signatures stable)
 # --------------------------------------------------------------------------- #
 
 
-class TestSync:
-    def test_dry_run_downloads_nothing(self, cache_dir, fake_registry, capsys):
-        with (
-            patch.object(cli, "remote_listing", return_value=(5, 1000)),
-            patch("slipstream.s3_sync.download_s3_cache") as dl,
-        ):
-            code, out = _run(["sync", "tiny", "--dry-run"], capsys)
-        assert code == 0
-        dl.assert_not_called()
-        # default fmt=jpeg, split=all -> val + train
-        assert "tiny-jpeg-val" in out and "tiny-jpeg-train" in out
-        assert "tiny-yuv420-val" not in out
-        assert "[dry-run]" in out
-
-    def test_sync_downloads_missing_and_skips_present(self, cache_dir, fake_registry, capsys):
-        write_cache(cache_dir / "tiny-jpeg-val")
-
-        def fake_download(remote, local, **kw):
-            write_cache(Path(local))
-            return True
-
-        with (
-            patch.object(cli, "remote_listing", return_value=(5, 1000)),
-            patch("slipstream.s3_sync.download_s3_cache", side_effect=fake_download) as dl,
-        ):
-            code, out = _run(["sync", "tiny", "--split", "all", "--fmt", "jpeg"], capsys)
-        assert code == 0
-        assert dl.call_count == 1
-        remote, local = dl.call_args[0]
-        assert remote == f"{REMOTE_BASE}/tiny/tiny-jpeg-train/"
-        assert Path(local) == cache_dir / "tiny-jpeg-train"
-        assert (cache_dir / "tiny-jpeg-train" / MANIFEST_FILE).exists()
-        assert "already present" in out
-
-    def test_sync_force_redownloads(self, cache_dir, fake_registry, capsys):
-        write_cache(cache_dir / "tiny-yuv420-val")
-        with (
-            patch.object(cli, "remote_listing", return_value=(5, 1000)),
-            patch("slipstream.s3_sync.download_s3_cache", return_value=True) as dl,
-        ):
-            code, out = _run(
-                ["sync", "tiny", "--split", "val", "--fmt", "yuv420", "--force"], capsys
-            )
-        assert code == 0
-        assert dl.call_count == 1
-
-    def test_sync_incomplete_is_redownloaded(self, cache_dir, fake_registry, capsys):
-        write_cache(cache_dir / "tiny-jpeg-val", complete=False)
-
-        def fake_download(remote, local, **kw):
-            write_cache(Path(local))
-            return True
-
-        with (
-            patch.object(cli, "remote_listing", return_value=(5, 1000)),
-            patch("slipstream.s3_sync.download_s3_cache", side_effect=fake_download) as dl,
-        ):
-            code, out = _run(["sync", "tiny", "--split", "val"], capsys)
-        assert code == 0
-        assert dl.call_count == 1
-        assert "incomplete locally" in out
-
-    def test_sync_s3_url_target(self, cache_dir, no_registry, capsys):
-        url = f"{REMOTE_BASE}/tiny/tiny-jpeg-val"
-        with (
-            patch.object(cli, "remote_listing", return_value=(5, 1000)),
-            patch("slipstream.s3_sync.download_s3_cache", return_value=True) as dl,
-        ):
-            code, out = _run(["sync", url, "--dest", str(cache_dir / "alt")], capsys)
-        # download succeeded but no manifest was written -> integrity failure
-        assert code == 1
-        remote, local = dl.call_args[0]
-        assert remote == url + "/"
-        assert Path(local) == cache_dir / "alt" / "tiny-jpeg-val"
-
-    def test_sync_remote_missing_fails(self, cache_dir, fake_registry, capsys):
-        with (
-            patch.object(cli, "remote_listing", return_value=(0, 0)),
-            patch("slipstream.s3_sync.download_s3_cache") as dl,
-        ):
-            code, out = _run(["sync", "tiny", "--split", "val"], capsys)
-        assert code == 1
-        dl.assert_not_called()
-        assert "remote missing" in out
-
-    def test_sync_unknown_dataset(self, cache_dir, fake_registry, capsys):
-        with pytest.raises(SystemExit) as exc:
-            cli.main(["sync", "nope"])
-        assert "Unknown dataset" in str(exc.value)
-
-    def test_sync_bad_split(self, cache_dir, fake_registry, capsys):
-        with pytest.raises(SystemExit) as exc:
-            cli.main(["sync", "other", "--split", "train"])
-        assert "no cache for" in str(exc.value)
-
-    def test_sync_name_without_registry(self, cache_dir, no_registry, capsys):
-        with pytest.raises(SystemExit) as exc:
-            cli.main(["sync", "tiny"])
-        assert "visionlab-datasets is not installed" in str(exc.value)
-
-    def test_sync_insufficient_disk(self, cache_dir, fake_registry, capsys):
-        huge = 10**18
-        with (
-            patch.object(cli, "remote_listing", return_value=(5, huge)),
-            patch("slipstream.s3_sync.download_s3_cache") as dl,
-        ):
-            code, out = _run(["sync", "tiny", "--split", "val"], capsys)
-        assert code == 1
-        dl.assert_not_called()
-        assert "not enough free disk space" in out
+def test_inspect_dir(tmp_path):
+    info = cli.inspect_dir(tmp_path)
+    assert info.exists and info.is_dir and info.readable and info.writable
+    assert info.owner and info.mode and info.free_bytes
+    missing = cli.inspect_dir(tmp_path / "a" / "b")
+    assert not missing.exists and missing.can_create
 
 
-# --------------------------------------------------------------------------- #
-# helpers
-# --------------------------------------------------------------------------- #
+def test_dir_bytes_recursive(tmp_path):
+    (tmp_path / "a.bin").write_bytes(b"x" * 10)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.bin").write_bytes(b"y" * 5)
+    assert cli.dir_bytes(tmp_path) == 15
+
+
+def test_find_other_caches(tmp_path):
+    write_cache(tmp_path / "known-cache")
+    write_cache(tmp_path / "other-cache")
+    (tmp_path / "plain-dir").mkdir()
+    found = cli.find_other_caches(tmp_path, {"known-cache"})
+    assert [n for n, _ in found] == ["other-cache"]
+    assert found[0][1] > 0
+    assert cli.find_other_caches(tmp_path / "nope", set()) == []
+
+
+def test_remote_listing_paginates():
+    pages = [
+        {"Contents": [{"Size": 10}, {"Size": 20}], "IsTruncated": True, "NextContinuationToken": "t"},
+        {"Contents": [{"Size": 5}], "IsTruncated": False},
+    ]
+    calls = []
+
+    class FakeS3:
+        def list_objects_v2(self, **kw):
+            calls.append(kw)
+            return pages[len(calls) - 1]
+
+    class FakeSession:
+        def client(self, *a, **kw):
+            return FakeS3()
+
+    with patch.object(cli, "_boto_session", return_value=FakeSession()):
+        assert cli.remote_listing("s3://b/prefix") == (3, 35)
+    assert calls[0] == {"Bucket": "b", "Prefix": "prefix/"}
+    assert calls[1]["ContinuationToken"] == "t"
+
+
+def test_check_s3_no_remote():
+    info = cli.check_s3("s3://b/p/", check_remote=False)
+    assert info.checked is False
+    assert info.bucket_readable is None
 
 
 def test_fmt_bytes():
-    assert cli._fmt_bytes(0) == "0 B"
-    assert cli._fmt_bytes(1536) == "1.5 KB"
-    assert cli._fmt_bytes(17_089_829_376) == "15.9 GB"
-    assert cli._fmt_bytes(None) == "?"
+    assert cli.fmt_bytes(0) == "0 B"
+    assert cli.fmt_bytes(1536) == "1.5 KB"
+    assert cli.fmt_bytes(17_089_829_376) == "15.9 GB"
+    assert cli.fmt_bytes(None) == "?"
 
 
 def test_mask_account():
-    assert cli._mask_account("arn:aws:iam::777749968893:user/alvarez") == "arn:aws:iam::********8893:user/alvarez"
-    assert cli._mask_account("arn:aws:sts::123456789012:assumed-role/r/s") == "arn:aws:sts::********9012:assumed-role/r/s"
-    assert cli._mask_account("no-account-here") == "no-account-here"
+    assert (
+        cli.mask_account("arn:aws:iam::777749968893:user/alvarez")
+        == "arn:aws:iam::********8893:user/alvarez"
+    )
+    assert cli.mask_account("no-account-here") == "no-account-here"
+
+
+def test_split_s3():
+    assert cli.split_s3("s3://bucket/a/b/") == ("bucket", "a/b/")
+    assert cli.split_s3("s3://bucket") == ("bucket", "")
+    with pytest.raises(ValueError):
+        cli.split_s3("/local/path")
 
 
 def test_colorize_only_when_enabled(monkeypatch):
@@ -399,7 +258,7 @@ def test_colorize_only_when_enabled(monkeypatch):
     assert "\033[31mmissing" in out
 
 
-def test_no_color_when_not_tty(cache_dir, no_registry, capsys, monkeypatch):
+def test_no_color_when_not_tty(cache_dir, capsys, monkeypatch):
     monkeypatch.delenv("FORCE_COLOR", raising=False)
     code, out = _run(["status", "--no-remote"], capsys)
     assert "\033[" not in out
@@ -410,17 +269,37 @@ def test_no_color_when_not_tty(cache_dir, no_registry, capsys, monkeypatch):
     assert "\033[" not in out
 
 
-def test_split_s3():
-    assert cli._split_s3("s3://bucket/a/b/") == ("bucket", "a/b/")
-    assert cli._split_s3("s3://bucket") == ("bucket", "")
-    with pytest.raises(ValueError):
-        cli._split_s3("/local/path")
+def test_public_api_surface():
+    """Names visionlab-datasets relies on; keep stable."""
+    for name in cli.__all__:
+        assert hasattr(cli, name), name
+    for name in (
+        "inspect_dir",
+        "check_s3",
+        "remote_listing",
+        "find_other_caches",
+        "fmt_bytes",
+        "dir_bytes",
+        "mask_account",
+        "configure_color",
+        "print_line",
+        "OK",
+        "BAD",
+        "WARN",
+        "SKIP",
+        "MANIFEST_FILE",
+        "DirAccess",
+        "S3Info",
+    ):
+        assert name in cli.__all__, name
+    # backward-compatible private aliases still resolve
+    assert cli._fmt_bytes is cli.fmt_bytes
+    assert cli._problems is cli.problems
+    assert cli._configure_color is cli.configure_color
+    assert cli._print is cli.print_line
 
 
 def test_python_dash_m_entry():
-    import subprocess
-    import sys
-
     out = subprocess.run(
         [sys.executable, "-m", "slipstream", "--version"], capture_output=True, text=True
     )

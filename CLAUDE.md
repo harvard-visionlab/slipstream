@@ -20,11 +20,14 @@ uv run python libslipstream/setup.py build_ext --inplace
 **CLI** (`slipstream/cli.py`, entry point `slipstream` / `python -m slipstream`):
 
 ```bash
-uv run slipstream status          # cache dir, permissions, S3 access, lab datasets
-uv run slipstream sync imagenet100 --fmt yuv420
+uv run slipstream status          # plumbing only: cache dir, permissions, S3 access, caches on disk
 ```
 
-Lab dataset registry comes from the optional `visionlab-datasets` package (`visionlab.datasets`); the CLI degrades gracefully without it. To test with the real registry, run from a repo that has it installed (e.g. lrm-space-dev) with `PYTHONPATH=<this repo>`.
+slipstream's CLI is registry-agnostic (no `sync`, no lab-dataset table). Lab-dataset status/sync
+lives in `visionlab-datasets` (`visionlab-datasets status|sync`), which imports the public helpers
+in `slipstream.cli` (`inspect_dir`, `check_s3`, `remote_listing`, `find_other_caches`, `fmt_bytes`,
+`dir_bytes`, `configure_color`, `print_line`, glyphs, `DirAccess`, `S3Info`). Keep those
+signatures stable.
 
 **s5cmd** (for S3 remote cache):
 

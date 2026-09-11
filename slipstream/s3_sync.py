@@ -404,12 +404,29 @@ def s3_path_exists(
         return False
 
 
+def _cp_tuning_flags(concurrency: int | None, part_size_mb: int | None) -> list[str]:
+    """Per-file transfer tuning flags for ``s5cmd cp``.
+
+    ``--concurrency`` = parallel part uploads/downloads per file (s5cmd default 5),
+    ``--part-size`` = part size in MB (s5cmd default 50). On some NFS filesystems
+    (e.g. Isilon with small wsize) concurrency=1 is several times faster.
+    """
+    flags: list[str] = []
+    if concurrency is not None:
+        flags += ["--concurrency", str(int(concurrency))]
+    if part_size_mb is not None:
+        flags += ["--part-size", str(int(part_size_mb))]
+    return flags
+
+
 def download_s3_cache(
     remote_cache_path: str,
     local_dest,
     endpoint_url: str | None = None,
     numworkers: int = 32,
     verbose: bool = True,
+    concurrency: int | None = None,
+    part_size_mb: int | None = None,
 ) -> bool:
     """Download cache directory from S3 to local path.
 
@@ -420,8 +437,11 @@ def download_s3_cache(
             download to. Paths can point to either the parent directory
             or the slipcache/ subdirectory itself.
         endpoint_url: S3-compatible endpoint URL (e.g., for Wasabi)
-        numworkers: Number of parallel s5cmd workers
+        numworkers: Number of parallel s5cmd workers (files in flight)
         verbose: Print progress information
+        concurrency: Parallel parts per file (``s5cmd cp --concurrency``).
+            None = s5cmd default (5). Use 1 on slow NFS mounts.
+        part_size_mb: Part size in MB (``s5cmd cp --part-size``). None = default (50).
 
     Returns:
         True if successful, False if download failed
@@ -440,11 +460,9 @@ def download_s3_cache(
     cmd = ["s5cmd"]
     if endpoint_url:
         cmd += ["--endpoint-url", endpoint_url]
-    cmd += [
-        "--numworkers", str(numworkers),
-        "cp", "--show-progress",
-        remote, local
-    ]
+    cmd += ["--numworkers", str(numworkers), "cp", "--show-progress"]
+    cmd += _cp_tuning_flags(concurrency, part_size_mb)
+    cmd += [remote, local]
 
     if verbose:
         print(f"Downloading cache from S3: {remote_cache_path}")
@@ -468,6 +486,8 @@ def upload_s3_cache(
     endpoint_url: str | None = None,
     numworkers: int = 32,
     verbose: bool = True,
+    concurrency: int | None = None,
+    part_size_mb: int | None = None,
 ) -> bool:
     """Upload local cache directory to S3.
 
@@ -478,8 +498,10 @@ def upload_s3_cache(
         remote_cache_path: S3 URL to upload to
             (e.g., "s3://bucket/caches/imagenet1k/")
         endpoint_url: S3-compatible endpoint URL (e.g., for Wasabi)
-        numworkers: Number of parallel s5cmd workers
+        numworkers: Number of parallel s5cmd workers (files in flight)
         verbose: Print progress information
+        concurrency: Parallel parts per file (``s5cmd cp --concurrency``). None = default.
+        part_size_mb: Part size in MB (``s5cmd cp --part-size``). None = default.
 
     Returns:
         True if successful, False if upload failed
@@ -502,11 +524,9 @@ def upload_s3_cache(
     cmd = ["s5cmd"]
     if endpoint_url:
         cmd += ["--endpoint-url", endpoint_url]
-    cmd += [
-        "--numworkers", str(numworkers),
-        "cp", "--show-progress", "--if-size-differ",
-        local, remote
-    ]
+    cmd += ["--numworkers", str(numworkers), "cp", "--show-progress", "--if-size-differ"]
+    cmd += _cp_tuning_flags(concurrency, part_size_mb)
+    cmd += [local, remote]
 
     num_files = _count_files(local_dir)
     total_size = sum(f.stat().st_size for f in local_dir.iterdir() if f.is_file())

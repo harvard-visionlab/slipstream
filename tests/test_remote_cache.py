@@ -367,6 +367,46 @@ class TestSyncS3Cache:
 class TestCommandGeneration:
     """Tests to verify correct s5cmd command generation."""
 
+    @staticmethod
+    def _capture(fn, *args, **kwargs):
+        captured = {}
+
+        def capture_cmd(cmd, verbose=True):
+            captured["cmd"] = cmd
+            return 0
+
+        with patch("slipstream.s3_sync.run_s5cmd_with_progress", side_effect=capture_cmd):
+            with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
+                fn(*args, verbose=False, **kwargs)
+        return captured["cmd"]
+
+    def test_download_default_has_no_tuning_flags(self, tmp_path):
+        from slipstream.s3_sync import download_s3_cache
+
+        cmd = self._capture(download_s3_cache, "s3://b/c/slipcache-x", tmp_path)
+        assert "--concurrency" not in cmd
+        assert "--part-size" not in cmd
+
+    def test_download_concurrency_and_part_size(self, tmp_path):
+        from slipstream.s3_sync import download_s3_cache
+
+        cmd = self._capture(
+            download_s3_cache, "s3://b/c/slipcache-x", tmp_path, concurrency=1, part_size_mb=64
+        )
+        i = cmd.index("cp")
+        # tuning flags must come after `cp` and before src/dst
+        assert cmd[i + 1 :][:5] == ["--show-progress", "--concurrency", "1", "--part-size", "64"]
+        assert cmd[-2:] == ["s3://b/c/slipcache-x/*", str(tmp_path) + "/"]
+
+    def test_upload_concurrency(self, tmp_path):
+        from slipstream.s3_sync import upload_s3_cache
+
+        (tmp_path / "manifest.json").write_text("{}")
+        cmd = self._capture(upload_s3_cache, tmp_path, "s3://b/c/slipcache-x", concurrency=2)
+        i = cmd.index("cp")
+        assert cmd[i + 1 : i + 5] == ["--show-progress", "--if-size-differ", "--concurrency", "2"]
+        assert cmd[-2:] == [str(tmp_path) + "/*", "s3://b/c/slipcache-x/"]
+
     def test_download_command_format(self, tmp_path):
         """Verify download generates correct s5cmd cp command with progress."""
         from slipstream.s3_sync import download_s3_cache
