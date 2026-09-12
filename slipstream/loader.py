@@ -63,6 +63,82 @@ if TYPE_CHECKING:
     from slipstream.decoders import BatchTransform
 
 
+# =============================================================================
+# Cache warmup helpers
+# =============================================================================
+
+_PAGE = 4096
+# Merge record ranges separated by less than this many bytes: reading a few
+# spare pages is cheaper than an extra seek, and adjacent records in a
+# subset are usually page-neighbours anyway.
+_COALESCE_GAP = 64 * 1024
+
+
+def _coalesce_ranges(
+    starts: np.ndarray, ends: np.ndarray, gap: int = _COALESCE_GAP
+) -> list[tuple[int, int]]:
+    """Sort ``(start, end)`` byte ranges by offset and merge touching/near ones.
+
+    Empty ranges are dropped. Ranges whose start lies within ``gap`` bytes of
+    the running end are merged into it.
+    """
+    if len(starts) == 0:
+        return []
+    order = np.argsort(starts, kind="stable")
+    starts = starts[order]
+    ends = ends[order]
+    out: list[tuple[int, int]] = []
+    cur_s: int | None = None
+    cur_e = 0
+    for s, e in zip(starts.tolist(), ends.tolist()):
+        if e <= s:
+            continue
+        if cur_s is None:
+            cur_s, cur_e = s, e
+        elif s <= cur_e + gap:
+            cur_e = max(cur_e, e)
+        else:
+            out.append((cur_s, cur_e))
+            cur_s, cur_e = s, e
+    if cur_s is not None:
+        out.append((cur_s, cur_e))
+    return out
+
+
+def _madvise_willneed(fpath: Path, ranges: list[tuple[int, int]] | None) -> None:
+    """Best-effort MADV_WILLNEED (+ MADV_SEQUENTIAL for whole files) on ``fpath``.
+
+    Kicks off kernel readahead for the pages the follow-up read will touch.
+    Silently a no-op where madvise is unavailable.
+    """
+    import ctypes
+
+    MADV_SEQUENTIAL, MADV_WILLNEED = 2, 3
+    try:
+        libc = ctypes.CDLL(None)
+        mm = np.memmap(fpath, dtype=np.uint8, mode="r")
+        base = mm.ctypes.data
+        if ranges is None:
+            spans = [(0, mm.nbytes)]
+            libc.madvise(
+                ctypes.c_void_p(base), ctypes.c_size_t(mm.nbytes),
+                ctypes.c_int(MADV_SEQUENTIAL),
+            )
+        else:
+            spans = [
+                (s - (s % _PAGE), min(e, mm.nbytes)) for s, e in ranges
+            ]
+        for s, e in spans:
+            if e > s:
+                libc.madvise(
+                    ctypes.c_void_p(base + s), ctypes.c_size_t(e - s),
+                    ctypes.c_int(MADV_WILLNEED),
+                )
+        del mm
+    except Exception:
+        pass
+
+
 class SlipstreamLoader:
     """High-level data loader for training with streaming datasets.
 
@@ -151,10 +227,17 @@ class SlipstreamLoader:
                 Each pipeline can be a list of transforms, a single transform,
                 or a callable. If None, raw data is returned.
             device: Device for non-pipelined fields (labels, indices)
-            image_field: Primary image field name for prefetch optimization.
-                Auto-detected if None.
+            image_field: Primary variable-size bytes field that gets the
+                zero-copy prefetch banks. May be an image field (ImageBytes /
+                HFImageDict) or a raw ``bytes`` field (e.g. a video container).
+                Auto-detected if None: first image field, else first ``bytes``
+                field. Its batch value (without a pipeline) is a dict
+                ``{data, sizes, heights, widths}`` of views into the current
+                bank slot. Every other bytes-backed field is returned as an
+                owned ``{data, sizes}`` dict (plus heights/widths for images).
             image_format: Image format to use ("jpeg" or "yuv420"). Default "jpeg".
                 Auto-adjusted if cache stores images in a different format.
+                Ignored when the primary field is a raw ``bytes`` field.
             exclude_fields: List of field names to exclude from loading
             force_rebuild: Force rebuilding the optimized cache
             presync_s3: If True, use s5cmd to sync the dataset's S3 remote
@@ -384,23 +467,49 @@ class SlipstreamLoader:
         # TODO: Future enhancement - generalize prefetch banks to handle multiple
         # image fields if the need arises. Currently only the primary image field
         # gets pre-allocated memory banks for zero-copy async loading.
+        #
+        # Two kinds of variable-size byte fields share ImageBytesStorage:
+        #   - image fields (ImageBytes / HFImageDict): get JPEG/YUV420 format
+        #     handling and can be decoded by pipelines
+        #   - raw `bytes` fields (e.g. video MP4, np.save blobs): stored and
+        #     returned as-is, never decoded or format-converted
+        # Both are "bank-eligible": any of them may be the primary field that
+        # gets the slot-rotated zero-copy prefetch banks. Image fields win
+        # auto-detection; declaration order breaks ties.
         self._image_fields: set[str] = set()
+        self._bytes_fields: set[str] = set()
         for field_name, field_type in self.cache.field_types.items():
             if field_type in ("ImageBytes", "HFImageDict"):
                 self._image_fields.add(field_name)
+            elif field_type == "bytes":
+                self._bytes_fields.add(field_name)
+        bank_eligible = [
+            f for f in self.cache.field_types if f in self._image_fields
+        ] + [
+            f for f in self.cache.field_types if f in self._bytes_fields
+        ]
 
-        # Auto-select primary image field for prefetch optimization
-        if self.image_field is None and self._image_fields:
-            self.image_field = next(iter(self._image_fields))
-        elif self.image_field not in self._image_fields and self._image_fields:
+        # Auto-select primary field for prefetch optimization
+        if self.image_field is None and bank_eligible:
+            self.image_field = bank_eligible[0]
+        elif self.image_field not in bank_eligible and bank_eligible:
             old_field = self.image_field
-            self.image_field = next(iter(self._image_fields))
+            self.image_field = bank_eligible[0]
             if verbose:
                 print(f"  Auto-detected image field: '{self.image_field}' (specified '{old_field}' not found)")
+        elif self.image_field is not None and not bank_eligible:
+            # Named field is not variable-size bytes (or does not exist):
+            # nothing to prefetch into banks.
+            self.image_field = None
+
+        # Format handling (JPEG vs YUV420) only applies to true image fields.
+        # A raw `bytes` primary (manifest image_format e.g. "bytes"/"mp4")
+        # must never trigger YUV420 detection or conversion.
+        primary_is_image = self.image_field in self._image_fields
 
         # Check if cache stores non-JPEG images as YUV420 (auto-converted during build)
-        stored_format = self.cache.get_image_format(self.image_field) if self._image_fields else "jpeg"
-        if stored_format == "yuv420" and image_format == "jpeg":
+        stored_format = self.cache.get_image_format(self.image_field) if primary_is_image else "jpeg"
+        if primary_is_image and stored_format == "yuv420" and image_format == "jpeg":
             # Non-JPEG images were converted to YUV420 during cache build
             # Override user's image_format to use the stored format
             if verbose:
@@ -409,7 +518,7 @@ class SlipstreamLoader:
             self.image_format = "yuv420"
 
         # Build/load alternative image format if requested
-        if image_format == "yuv420" and stored_format != "yuv420":
+        if primary_is_image and image_format == "yuv420" and stored_format != "yuv420":
             # User requested YUV420 but cache stores JPEG - need sibling cache
             from slipstream.cache import build_yuv420_cache, load_yuv420_cache
 
@@ -552,6 +661,40 @@ class SlipstreamLoader:
         else:
             self._data_banks = None
 
+    def _load_secondary_bytes_field(
+        self,
+        field_name: str,
+        batch_indices: np.ndarray,
+        parallel: bool,
+    ) -> dict[str, np.ndarray]:
+        """Load a non-primary variable-size bytes field as an owned copy.
+
+        ``ImageBytesStorage.load_batch`` returns views into a single scratch
+        buffer that is reused by the next call. For the primary field the
+        loader avoids this via slot-rotated banks; every other bytes-backed
+        field (secondary image fields, raw ``bytes`` fields such as np.save
+        blobs or video containers) gets copied here so the batch dict stays
+        valid after the prefetch worker moves on.
+
+        Returns:
+            ``{'data': uint8 [B, max_size_in_batch], 'sizes': uint64 [B]}``
+            plus ``'heights'``/``'widths'`` for image-typed fields. Row ``i``
+            holds ``data[i, :sizes[i]]``.
+        """
+        storage = self.cache.fields[field_name]
+        result = storage.load_batch(batch_indices, parallel=parallel)
+        n = len(batch_indices)
+        sizes = np.array(result['sizes'][:n], dtype=np.uint64)  # copy
+        width = int(sizes.max()) if n > 0 else 0
+        out: dict[str, np.ndarray] = {
+            'data': np.array(result['data'][:n, :width], dtype=np.uint8),  # copy
+            'sizes': sizes,
+        }
+        if field_name in self._image_fields:
+            out['heights'] = np.array(result['heights'][:n], dtype=np.uint32)
+            out['widths'] = np.array(result['widths'][:n], dtype=np.uint32)
+        return out
+
     def _apply_single_pipeline(self, pipeline: list[Any], data: Any) -> Any:
         """Apply a single pipeline (list of transforms) to data."""
         result = data
@@ -642,12 +785,13 @@ class SlipstreamLoader:
                 if field_name == self.image_field:
                     continue
 
-                field_result = self.cache.fields[field_name].load_batch(batch_indices)
-
-                # Image-type fields need full dict (data, sizes, heights, widths)
-                if field_name in self._image_fields:
-                    field_data = field_result  # Full dict
+                if field_name in self._image_fields or field_name in self._bytes_fields:
+                    # Variable-size bytes: dict with data + sizes (owned copy)
+                    field_data = self._load_secondary_bytes_field(
+                        field_name, batch_indices, parallel=True
+                    )
                 else:
+                    field_result = self.cache.fields[field_name].load_batch(batch_indices)
                     field_data = field_result['data']  # Just the data
 
                 if field_name in self.pipelines:
@@ -735,13 +879,19 @@ class SlipstreamLoader:
                 for field_name in self._fields_to_load:
                     if field_name == self.image_field:
                         continue
-                    field_result = self.cache.fields[field_name].load_batch(
-                        batch_indices, parallel=False
-                    )
-                    # Image-type fields need full dict (data, sizes, heights, widths)
-                    if field_name in self._image_fields:
-                        other_fields[field_name] = field_result  # Full dict
+                    if field_name in self._image_fields or field_name in self._bytes_fields:
+                        # Variable-size bytes: the storage's load_batch hands
+                        # back a view into ONE shared scratch buffer that the
+                        # next batch overwrites, while the main thread may
+                        # still be consuming this batch (worker runs up to
+                        # batches_ahead batches ahead). Copy out the payload.
+                        other_fields[field_name] = self._load_secondary_bytes_field(
+                            field_name, batch_indices, parallel=False
+                        )
                     else:
+                        field_result = self.cache.fields[field_name].load_batch(
+                            batch_indices, parallel=False
+                        )
                         other_fields[field_name] = field_result['data']  # Just the data
 
                 # Only pass slot index and metadata - not the actual data!
@@ -870,62 +1020,80 @@ class SlipstreamLoader:
             verbose=self.verbose,
         )
 
-    def warmup_cache(self, verbose: bool = True) -> dict:
+    def warmup_cache(
+        self,
+        verbose: bool = True,
+        indices: Sequence[int] | np.ndarray | None = None,
+    ) -> dict:
         """Pre-read cache files to populate OS page cache. No decoding, no pipeline execution.
 
         This makes the first epoch fast by avoiding on-demand page faults during training.
 
+        When a subset is in play (``indices`` here, or the loader's own
+        ``indices``), only the byte ranges of the selected records are read
+        for variable-size fields (``.bin`` of image / ``bytes`` / ``str``
+        fields): record ranges are sorted by offset and coalesced, so a
+        contiguous subset becomes a single sequential read. Fixed-size
+        ``.npy`` fields and metadata tables are read whole (they are tiny per
+        record). With no subset, every ``*.bin`` / ``*.npy`` in the cache dir
+        is read sequentially.
+
         Args:
             verbose: Show tqdm progress bar with throughput.
+            indices: Records to warm. ``None`` (default) uses the loader's
+                ``indices`` (the full subset, not this rank's shard); if the
+                loader has none, the whole cache is read. Pass
+                ``np.arange(len(loader.cache))`` to force a full read on a
+                subset loader.
 
         Returns:
-            dict with: elapsed_sec, total_bytes, throughput_mb_s, cache_dir, num_files
+            dict with: elapsed_sec, total_bytes, throughput_mb_s, cache_dir,
+            num_files, subset (bool), num_records, num_ranges
         """
-        import ctypes
         import sys
         import time
 
-        import numpy as np
         from tqdm.auto import tqdm
 
         cache_dir = Path(self.cache.cache_dir)
-        data_files = sorted(cache_dir.glob("*.bin")) + sorted(cache_dir.glob("*.npy"))
 
-        if not data_files:
+        if indices is None:
+            indices = self.indices
+        if indices is not None:
+            indices = np.unique(np.asarray(indices, dtype=np.int64))
+
+        if indices is None:
+            # Full read: every data file in the cache dir
+            data_files = sorted(cache_dir.glob("*.bin")) + sorted(cache_dir.glob("*.npy"))
+            plan = [(f, None) for f in data_files]
+            num_records = len(self.cache)
+        else:
+            plan = self._warmup_plan(indices)
+            num_records = len(indices)
+
+        total_bytes = sum(
+            f.stat().st_size if ranges is None else int(sum(e - s for s, e in ranges))
+            for f, ranges in plan
+        )
+        num_ranges = sum(1 if ranges is None else len(ranges) for _, ranges in plan)
+
+        if not plan:
             return dict(
                 elapsed_sec=0,
                 total_bytes=0,
                 throughput_mb_s=0,
                 cache_dir=str(cache_dir),
                 num_files=0,
+                subset=indices is not None,
+                num_records=num_records,
+                num_ranges=0,
             )
 
-        total_bytes = sum(f.stat().st_size for f in data_files)
+        # Phase 1: madvise hints (best-effort, Linux/macOS)
+        for fpath, ranges in plan:
+            _madvise_willneed(fpath, ranges)
 
-        # Phase 1: madvise hints (best-effort, Linux only)
-        MADV_SEQUENTIAL, MADV_WILLNEED = 2, 3
-        try:
-            libc = ctypes.CDLL(None)
-            for fpath in data_files:
-                try:
-                    mm = np.memmap(fpath, dtype=np.uint8, mode="r")
-                    libc.madvise(
-                        ctypes.c_void_p(mm.ctypes.data),
-                        ctypes.c_size_t(mm.nbytes),
-                        ctypes.c_int(MADV_SEQUENTIAL),
-                    )
-                    libc.madvise(
-                        ctypes.c_void_p(mm.ctypes.data),
-                        ctypes.c_size_t(mm.nbytes),
-                        ctypes.c_int(MADV_WILLNEED),
-                    )
-                    del mm
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # Phase 2: Sequential read to fault pages into cache
+        # Phase 2: read to fault pages into cache
         CHUNK = 16 * 1024 * 1024  # 16 MB
         t0 = time.time()
 
@@ -938,13 +1106,24 @@ class SlipstreamLoader:
             leave=True,
             file=sys.stdout,
         )
-        for fpath in data_files:
+        for fpath, ranges in plan:
             with open(fpath, "rb") as f:
-                while True:
-                    chunk = f.read(CHUNK)
-                    if not chunk:
-                        break
-                    pbar.update(len(chunk))
+                if ranges is None:
+                    while True:
+                        chunk = f.read(CHUNK)
+                        if not chunk:
+                            break
+                        pbar.update(len(chunk))
+                else:
+                    for start, end in ranges:
+                        f.seek(start)
+                        remaining = end - start
+                        while remaining > 0:
+                            chunk = f.read(min(CHUNK, remaining))
+                            if not chunk:
+                                break
+                            remaining -= len(chunk)
+                            pbar.update(len(chunk))
         pbar.close()
 
         elapsed = time.time() - t0
@@ -953,8 +1132,50 @@ class SlipstreamLoader:
             total_bytes=total_bytes,
             throughput_mb_s=(total_bytes / (1024**2)) / elapsed if elapsed > 0 else 0,
             cache_dir=str(cache_dir),
-            num_files=len(data_files),
+            num_files=len(plan),
+            subset=indices is not None,
+            num_records=num_records,
+            num_ranges=num_ranges,
         )
+
+    def _warmup_plan(
+        self, indices: np.ndarray
+    ) -> list[tuple[Path, list[tuple[int, int]] | None]]:
+        """Build the per-file read plan for a subset warmup.
+
+        Returns ``[(path, ranges)]`` where ``ranges`` is a sorted, coalesced
+        list of ``(start, end)`` byte offsets, or ``None`` for whole-file
+        reads. Only fields the loader will actually load are included, plus
+        the sibling YUV420 store when that is the active primary storage.
+        """
+        from slipstream.cache import ImageBytesStorage, StringStorage
+
+        cache_dir = Path(self.cache.cache_dir)
+        storages: dict[str, Any] = {
+            name: self.cache.fields[name] for name in self._fields_to_load
+        }
+        primary = self._image_storage
+        if primary is not None and primary is not self.cache.fields.get(self.image_field):
+            storages[primary.field_name] = primary  # sibling YUV420 cache
+
+        plan: list[tuple[Path, list[tuple[int, int]] | None]] = []
+        for name, storage in storages.items():
+            if isinstance(storage, ImageBytesStorage):
+                meta = storage._metadata
+                starts = meta['data_ptr'][indices].astype(np.int64)
+                ends = starts + meta['data_size'][indices].astype(np.int64)
+                plan.append((cache_dir / f"{name}.bin", _coalesce_ranges(starts, ends)))
+                plan.append((cache_dir / f"{name}.meta.npy", None))
+            elif isinstance(storage, StringStorage):
+                offs = np.asarray(storage._offsets)[indices]
+                starts = offs[:, 0].astype(np.int64)
+                ends = starts + offs[:, 1].astype(np.int64)
+                plan.append((cache_dir / f"{name}.bin", _coalesce_ranges(starts, ends)))
+                plan.append((cache_dir / f"{name}.offsets.npy", None))
+            else:
+                plan.append((cache_dir / f"{name}.npy", None))
+
+        return [(p, r) for p, r in plan if p.exists()]
 
     def __del__(self) -> None:
         """Cleanup on deletion."""
