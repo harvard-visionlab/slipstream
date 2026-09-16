@@ -36,7 +36,14 @@ All notable changes to slipstream are documented here. Versions follow
   through `t0_key` and the loader's new `sample_data`. The last `end_margin_frames` of a
   clip are never requested; CUDA decodes retry once on the CPU. Persistent decoder thread
   pool, `num_ffmpeg_threads=1`, `seek_mode="exact"`, optional decoder-side `resize`, and
-  inner `transforms` applied to the flat frames with `seed_repeat = T`.
+  inner `transforms` applied to the flat frames with `seed_repeat = T`. The stage is
+  asynchronous (`submit()` / `collect()`): the loader's prefetch thread submits a batch's
+  decodes as soon as its bytes are loaded and the main thread collects them, so
+  `batches_ahead * batch_size` decodes are in flight; workers write straight into the
+  `[B, T, 3, H, W]` output. `device` may be a list of CUDA devices (threads pinned per
+  device, results gathered on `output_device`).
+- `SlipstreamLoader`: async stage protocol. If the primary field's pipeline starts with an
+  object exposing `submit`/`collect`, decoding is pipelined across `batches_ahead` batches.
 - `RandomResizedCropBatch`: per-image random resized crop on decoded tensors
   (uint8 or float), `seed_repeat`-aware, replayable.
 - `SlipstreamLoader(sample_data={name: array})`: per-sample side arrays aligned with

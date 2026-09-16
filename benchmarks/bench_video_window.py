@@ -35,7 +35,9 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--ffmpeg-threads", type=int, default=1)
-    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--device", default="cpu", help="cpu, cuda:0, or a comma list cuda:0,cuda:1 (one stage, threads pinned per device)")
+    ap.add_argument("--output-device", default=None)
+    ap.add_argument("--batches-ahead", type=int, default=None, help="default: ceil(workers / batch_size), min 3")
     ap.add_argument("--resize", type=int, default=None)
     ap.add_argument("--crop", type=int, default=None)
     ap.add_argument("--indices", default=None, help=".npy of record indices (clips with duration >= T/rate)")
@@ -47,10 +49,12 @@ def main() -> None:
     ds = SlipstreamDataset(local_dir=a.cache)   # a prebuilt .slipstream cache dir
     indices = np.load(a.indices) if a.indices else None
     inner = [RandomResizedCropBatch(a.crop, seed=1), RandomHorizontalFlip(p=0.5, seed=2)] if a.crop else None
-    stage = DecodeVideoWindow(T=a.T, rate_hz=a.rate, seed=0, device=a.device, num_workers=a.workers,
-                              num_ffmpeg_threads=a.ffmpeg_threads, resize=a.resize, transforms=inner)
+    devices = a.device.split(",") if "," in a.device else a.device
+    stage = DecodeVideoWindow(T=a.T, rate_hz=a.rate, seed=0, device=devices, output_device=a.output_device,
+                              num_workers=a.workers, num_ffmpeg_threads=a.ffmpeg_threads, resize=a.resize, transforms=inner)
+    ahead = a.batches_ahead or max(3, -(-stage.num_workers // a.batch_size))
     loader = SlipstreamLoader(ds, batch_size=a.batch_size, shuffle=True, seed=0, drop_last=True, indices=indices,
-                              image_field=a.field, pipelines={a.field: [stage]}, verbose=False)
+                              batches_ahead=ahead, image_field=a.field, pipelines={a.field: [stage]}, verbose=False)
     if a.warm:
         st = loader.warmup_cache(verbose=False)
         print(f"warmup: {st['total_bytes'] / 1e9:.1f} GB in {st['elapsed_sec']:.1f} s")
@@ -69,7 +73,7 @@ def main() -> None:
         if i + 1 >= a.max_batches + a.warmup_batches:
             break
     dt = time.perf_counter() - (t0 or time.perf_counter())
-    print(f"T={a.T} rate={a.rate:g} B={a.batch_size} device={a.device} workers={stage.num_workers} "
+    print(f"T={a.T} rate={a.rate:g} B={a.batch_size} device={a.device} workers={stage.num_workers} ahead={ahead} "
           f"resize={a.resize} crop={a.crop} shape={shape}: {n_win / dt:,.1f} windows/s, "
           f"{n_win * a.T / dt:,.0f} frames/s over {n_win} windows ({dt:.1f} s)")
     loader.shutdown()

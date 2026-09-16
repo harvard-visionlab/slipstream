@@ -26,17 +26,27 @@ clamped into ``[begin, usable_end)``. On CUDA a ``RuntimeError`` is retried
 once on a CPU decoder and the frames moved to the device.
 
 Decoding runs in a persistent thread pool (torchcodec releases the GIL; one
-ffmpeg thread per decoder). ``transforms`` (slipstream ``BatchAugment``
-objects) are applied to the flat ``[B*T, 3, H, W]`` frames with
-``seed_repeat = T``, so a window's frames share one crop / flip / colour draw.
+ffmpeg thread per decoder). The stage is *asynchronous*: ``submit(batch_data)``
+copies the bytes out of the loader's banks and queues one decode per record,
+each worker writing its ``[T, 3, H, W]`` straight into the batch's output
+tensor; ``collect(pending)`` waits and applies ``transforms``. ``SlipstreamLoader``
+calls ``submit`` from its prefetch thread as soon as a batch's bytes are loaded
+and ``collect`` when the batch is consumed, so ``batches_ahead * batch_size``
+decodes are in flight (choose ``batches_ahead >= num_workers / batch_size``).
+``__call__`` is ``collect(submit(...))`` for use outside the loader.
+
+``transforms`` (slipstream ``BatchAugment`` objects) are applied to the flat
+``[B*T, 3, H, W]`` frames with ``seed_repeat = T``, so a window's frames share
+one crop / flip / colour draw.
 """
 
 from __future__ import annotations
 
+import itertools
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any, Sequence
 
 import numpy as np
 import torch
@@ -57,6 +67,20 @@ def _load_torchcodec():
     return VideoDecoder
 
 
+class _PendingBatch:
+    """One submitted batch: decode futures plus the output buffers the workers fill."""
+
+    __slots__ = ("B", "T", "field", "indices", "futures", "out", "t_sec", "t0", "lock")
+
+    def __init__(self, B: int, T: int, field: str, indices):
+        self.B, self.T, self.field, self.indices = B, T, field, indices
+        self.futures: list[Future] = []
+        self.out: torch.Tensor | None = None            # [B, T, 3, H, W], allocated by the first finisher
+        self.t_sec = torch.empty(B, T, dtype=torch.float32)
+        self.t0 = torch.empty(B, dtype=torch.float32)
+        self.lock = threading.Lock()
+
+
 class DecodeVideoWindow(BatchTransform):
     """Decode ``T`` frames at ``rate_hz`` from each record's video bytes.
 
@@ -67,9 +91,13 @@ class DecodeVideoWindow(BatchTransform):
             non-reproducible (counter only), as for the JPEG decoders.
         t0_key: Name of a loader ``sample_data`` array giving the window start in
             seconds per sample. When present in the batch the random mode is off.
-        device: ``"cpu"`` or ``"cuda[:N]"``. One device per stage instance; use
-            one instance per GPU, never two devices in one thread.
-        num_workers: Decoder threads (default: CPU count, capped at 32; 2 on CUDA).
+        device: ``"cpu"``, ``"cuda[:N]"``, or a list of CUDA devices. Each worker
+            thread is pinned to one device (round-robin), so no thread ever
+            touches two devices; results are gathered on ``output_device``.
+        output_device: Where the ``[B, T, 3, H, W]`` batch lives (default: the
+            first entry of ``device``).
+        num_workers: Decoder threads (default: CPU count, capped at 32;
+            4 per CUDA device).
         num_ffmpeg_threads: FFmpeg threads per decoder (default 1: parallelism
             comes from the pool).
         seek_mode: torchcodec seek mode, ``"exact"`` (default) or ``"approximate"``.
@@ -97,7 +125,8 @@ class DecodeVideoWindow(BatchTransform):
         *,
         seed: int | None = None,
         t0_key: str | None = None,
-        device: str | torch.device = "cpu",
+        device: str | torch.device | Sequence[str | torch.device] = "cpu",
+        output_device: str | torch.device | None = None,
         num_workers: int | None = None,
         num_ffmpeg_threads: int = 1,
         seek_mode: str = "exact",
@@ -114,10 +143,15 @@ class DecodeVideoWindow(BatchTransform):
         self.window_s = self.T / self.rate_hz
         self.seed = seed
         self.t0_key = t0_key
-        self.device = torch.device(device)
+        devs = [device] if isinstance(device, (str, torch.device)) else list(device)
+        self.devices = [torch.device(d) for d in devs]
+        if len({d.type for d in self.devices}) != 1:
+            raise ValueError(f"device list must be all CPU or all CUDA, got {devs!r}")
+        self.device = self.devices[0]
         self.is_cuda = self.device.type == "cuda"
+        self.output_device = torch.device(output_device) if output_device is not None else self.device
         if num_workers is None:
-            num_workers = 2 if self.is_cuda else min(32, os.cpu_count() or 4)
+            num_workers = 4 * len(self.devices) if self.is_cuda else min(32, os.cpu_count() or 4)
         self.num_workers = max(1, int(num_workers))
         self.num_ffmpeg_threads = int(num_ffmpeg_threads)
         self.seek_mode = seek_mode
@@ -132,7 +166,18 @@ class DecodeVideoWindow(BatchTransform):
         self._pool_lock = threading.Lock()
         self._VideoDecoder = None
         self._last_params: dict[str, Any] | None = None
+        self._tls = threading.local()                      # per-worker device
+        self._thread_counter = itertools.count()
         self._set_inner_seed_repeat()
+
+    def _init_thread(self) -> None:
+        """Pin each pool thread to one device (round-robin over `devices`)."""
+        k = next(self._thread_counter)
+        self._tls.device = self.devices[k % len(self.devices)]
+
+    @property
+    def _thread_device(self) -> torch.device:
+        return getattr(self._tls, "device", self.device)
 
     # ------------------------------------------------------------------ setup
     def _set_inner_seed_repeat(self) -> None:
@@ -151,7 +196,8 @@ class DecodeVideoWindow(BatchTransform):
     def _ensure_pool(self) -> ThreadPoolExecutor:
         with self._pool_lock:
             if self._pool is None:
-                self._pool = ThreadPoolExecutor(max_workers=self.num_workers, thread_name_prefix="slipstream-video")
+                self._pool = ThreadPoolExecutor(max_workers=self.num_workers, thread_name_prefix="slipstream-video",
+                                                initializer=self._init_thread)
             if self._VideoDecoder is None:
                 self._VideoDecoder = _load_torchcodec()
         return self._pool
@@ -203,7 +249,7 @@ class DecodeVideoWindow(BatchTransform):
 
     def _decode_one(self, raw: bytes, t0_given: float | None, seed_i: int | None):
         rng = None if t0_given is not None else np.random.default_rng(seed_i)
-        device = str(self.device) if self.is_cuda else "cpu"
+        device = str(self._thread_device) if self.is_cuda else "cpu"
         try:
             dec = self._make_decoder(raw, device)
             t0, times = self._times(dec.metadata, t0_given, rng)
@@ -214,11 +260,26 @@ class DecodeVideoWindow(BatchTransform):
             dec = self._make_decoder(raw, "cpu")
             t0, times = self._times(dec.metadata, t0_given, rng)
             fb = dec.get_frames_played_at(times.tolist())
-            fb_data = fb.data.to(self.device, non_blocking=True)
-            return fb_data, fb.pts_seconds.to(torch.float32), t0
         return fb.data, fb.pts_seconds.to(torch.float32), t0
 
-    def __call__(self, batch_data: dict[str, Any]) -> dict[str, Any]:
+    def _decode_into(self, pend: _PendingBatch, i: int, raw: bytes, t0_given: float | None, seed_i: int) -> None:
+        """Worker: decode record i of the batch and write it into the batch buffers."""
+        data, pts, t0 = self._decode_one(raw, t0_given, seed_i)
+        with pend.lock:
+            if pend.out is None:
+                pend.out = torch.empty((pend.B, pend.T, *data.shape[1:]), dtype=data.dtype, device=self.output_device)
+        if tuple(data.shape) != tuple(pend.out.shape[1:]):
+            raise ValueError(
+                f"frame shape {tuple(data.shape[1:])} of record {i} differs from {tuple(pend.out.shape[2:])} in the "
+                f"same batch; pass resize= so every clip decodes to one size"
+            )
+        pend.out[i].copy_(data)
+        pend.t_sec[i] = pts
+        pend.t0[i] = float(t0)
+
+    # ------------------------------------------------------------- async API
+    def submit(self, batch_data: dict[str, Any]) -> _PendingBatch:
+        """Queue the decodes for a batch (called by the loader's prefetch thread). Copies the bytes out."""
         pool = self._ensure_pool()
         data, sizes = batch_data["data"], batch_data["sizes"]
         B = len(sizes)
@@ -236,27 +297,36 @@ class DecodeVideoWindow(BatchTransform):
         base = (self.seed if self.seed is not None else 0) + B * self._seed_counter
         seeds = [(base + i) % _MOD for i in range(B)]
 
-        raws = [bytes(data[i, : int(sizes[i])]) for i in range(B)]   # own copies: bank rows are reused
-        futs = [pool.submit(self._decode_one, raws[i], None if t0_given is None else float(t0_given[i]), seeds[i])
-                for i in range(B)]
-        results = [f.result() for f in futs]
+        pend = _PendingBatch(B, self.T, field, None if indices is None else np.asarray(indices, dtype=np.int64).copy())
+        for i in range(B):
+            raw = bytes(data[i, : int(sizes[i])])                     # own copy: bank rows are reused
+            t0_i = None if t0_given is None else float(t0_given[i])
+            pend.futures.append(pool.submit(self._decode_into, pend, i, raw, t0_i, seeds[i]))
+        return pend
 
-        frames = torch.stack([r[0] for r in results])                 # [B, T, 3, H, W] on self.device
-        t_sec = torch.stack([r[1] for r in results])                  # [B, T] float32 (cpu)
-        t0 = torch.tensor([r[2] for r in results], dtype=torch.float32)
+    def collect(self, pend: _PendingBatch) -> dict[str, Any]:
+        """Wait for a submitted batch, apply `transforms`, return the output dict."""
+        for f in pend.futures:
+            f.result()                                                # re-raises the first worker error
+        frames = pend.out
+        if frames is None:                                            # B == 0
+            frames = torch.empty((0, self.T, 3, 0, 0), dtype=torch.uint8, device=self.output_device)
 
-        if self.transforms:
+        if self.transforms and pend.B:
             self._set_inner_seed_repeat()                             # loader may have reset them
-            flat = frames.reshape(B * self.T, *frames.shape[2:])
+            flat = frames.reshape(pend.B * self.T, *frames.shape[2:])
             for t in self.transforms:
                 flat = t(flat)
-            frames = flat.reshape(B, self.T, *flat.shape[1:])
+            frames = flat.reshape(pend.B, self.T, *flat.shape[1:])
 
-        self._last_params = {"t0": t0, "t_sec": t_sec}
-        out = {field: frames, f"{field}_t_sec": t_sec, f"{field}_t0": t0}
-        if indices is not None:
-            out[f"{field}_rec"] = torch.as_tensor(np.asarray(indices, dtype=np.int64))
+        self._last_params = {"t0": pend.t0, "t_sec": pend.t_sec}
+        out = {pend.field: frames, f"{pend.field}_t_sec": pend.t_sec, f"{pend.field}_t0": pend.t0}
+        if pend.indices is not None:
+            out[f"{pend.field}_rec"] = torch.from_numpy(pend.indices)
         return out
+
+    def __call__(self, batch_data: dict[str, Any]) -> dict[str, Any]:
+        return self.collect(self.submit(batch_data))
 
     # ------------------------------------------------------------------ misc
     def shutdown(self) -> None:
@@ -270,6 +340,7 @@ class DecodeVideoWindow(BatchTransform):
 
     def __repr__(self) -> str:
         tr = ", ".join(type(t).__name__ for t in self.transforms)
+        devs = ",".join(str(d) for d in self.devices)
         return (f"DecodeVideoWindow(T={self.T}, rate_hz={self.rate_hz:g}, window_s={self.window_s:g}, "
-                f"seed={self.seed}, t0_key={self.t0_key!r}, device='{self.device}', workers={self.num_workers}, "
-                f"resize={self.resize}, transforms=[{tr}])")
+                f"seed={self.seed}, t0_key={self.t0_key!r}, device='{devs}', output_device='{self.output_device}', "
+                f"workers={self.num_workers}, resize={self.resize}, transforms=[{tr}])")

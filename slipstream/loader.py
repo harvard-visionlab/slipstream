@@ -599,6 +599,19 @@ class SlipstreamLoader:
                     if hasattr(transform, 'set_image_format'):
                         transform.set_image_format(field_format)
 
+        # Async decode stage: the primary field's pipeline may start with an object exposing
+        # submit()/collect() (e.g. DecodeVideoWindow). The prefetch thread then calls submit()
+        # as soon as a batch's bytes are in the bank and the main thread collect()s, so
+        # `batches_ahead * batch_size` decodes are in flight instead of one batch's worth.
+        self._async_stage = None
+        self._async_rest: list[Any] = []
+        prim = self.pipelines.get(self.image_field) if self.image_field is not None else None
+        if prim and self.image_field not in self._multi_pipeline_fields:
+            first = prim[0]
+            if hasattr(first, 'submit') and hasattr(first, 'collect'):
+                self._async_stage = first
+                self._async_rest = list(prim[1:])
+
         # Determine which fields to load
         self._fields_to_load = [
             f for f in self.cache.fields.keys()
@@ -1022,6 +1035,13 @@ class SlipstreamLoader:
                         parallel=False,
                     )
 
+                # Async stage: start decoding this batch now; the main thread collects it later.
+                pending = None
+                if has_image_field and self._async_stage is not None:
+                    pending = self._async_stage.submit(
+                        self._primary_dict(current_slot, actual_batch_size, batch_indices,
+                                           self._batch_sample_data(start, end)))
+
                 # Load other fields (labels are fast - simple array indexing).
                 # Use parallel=False for ALL loads in the worker thread —
                 # Numba's workqueue threading layer is not reentrant, so the
@@ -1054,6 +1074,7 @@ class SlipstreamLoader:
                     batch_indices,
                     other_fields,
                     (start, end),
+                    pending,
                 ))
                 current_slot = (current_slot + 1) % num_slots
 
@@ -1069,7 +1090,7 @@ class SlipstreamLoader:
                 if result is None:
                     break
 
-                slot, actual_size, anchors, batch_indices, other_fields, (start, end) = result
+                slot, actual_size, anchors, batch_indices, other_fields, (start, end), pending = result
 
                 # Build output batch
                 batch = self._index_fields(anchors, batch_indices)
@@ -1080,7 +1101,15 @@ class SlipstreamLoader:
                 if has_image_field:
                     image_data = self._primary_dict(slot, actual_size, batch_indices, sdata)
 
-                    if self.image_field in self.pipelines:
+                    if pending is not None:
+                        pipeline_result = self._async_stage.collect(pending)
+                        for transform in self._async_rest:
+                            pipeline_result = transform(pipeline_result)
+                        if isinstance(pipeline_result, dict):
+                            batch.update(pipeline_result)
+                        else:
+                            batch[self.image_field] = pipeline_result
+                    elif self.image_field in self.pipelines:
                         pipeline_result = self._apply_pipeline(
                             self.image_field, image_data
                         )

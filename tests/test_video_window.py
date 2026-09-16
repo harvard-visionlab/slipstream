@@ -32,6 +32,7 @@ def _clip(n_frames: int, fps: float, w: int = 96, h: int = 64, static: bool = Fa
     rng = np.random.default_rng(seed)
     base = torch.from_numpy(rng.integers(0, 255, (3, h, w), dtype=np.uint8))
     frames = base.unsqueeze(0).repeat(n_frames, 1, 1, 1).clone()
+    frames[:, 2] = min(250, 40 * seed)                # blue channel encodes the clip id
     if not static:
         for t in range(n_frames):
             frames[t, 0] = min(255, 2 * t)            # red channel encodes the frame index
@@ -203,3 +204,33 @@ class TestDecodeVideoWindow:
             assert "DecodeVideoWindow(T=4" in repr(stage)
         finally:
             loader.shutdown()
+
+
+class TestAsyncPipelining:
+    """The loader submits decodes from its prefetch thread; results must stay aligned with their records."""
+
+    def test_batches_ahead_alignment_and_parity_with_sync(self, tmp_path):
+        ds = MockVideoStore(cache_path=tmp_path / "cache")
+        indices = np.array([4, 0, 3, 1, 2, 0, 4, 3])
+        def run(use_threading, batches_ahead):
+            stage = DecodeVideoWindow(T=6, rate_hz=10.0, seed=9, num_workers=4)
+            loader = SlipstreamLoader(ds, batch_size=2, shuffle=True, seed=5, drop_last=False, verbose=False,
+                                      indices=indices, batches_ahead=batches_ahead, use_threading=use_threading,
+                                      pipelines={"video": [stage]})
+            try:
+                assert (loader._async_stage is stage) == True
+                out = []
+                for b in loader:
+                    assert torch.equal(b["video_rec"], b["_indices"])
+                    blue = b["video"][:, :, 2].float().mean(dim=(-2, -1))          # [B, T]
+                    expect = (40 * b["_indices"].float()).clamp(min=16, max=250)[:, None]   # yuv limited range floors 0 at 16
+                    assert torch.allclose(blue, expect.expand_as(blue), atol=6), (blue, expect)
+                    out.append((b["_indices"].clone(), b["video_t0"].clone(), b["video"].clone()))
+                return out
+            finally:
+                loader.shutdown()
+        a = run(True, 4)
+        b = run(False, 1)
+        assert len(a) == len(b) == 4
+        for (i0, t0, f0), (i1, t1, f1) in zip(a, b):
+            assert torch.equal(i0, i1) and torch.equal(t0, t1) and torch.equal(f0, f1)
