@@ -91,9 +91,11 @@ class DecodeVideoWindow(BatchTransform):
             non-reproducible (counter only), as for the JPEG decoders.
         t0_key: Name of a loader ``sample_data`` array giving the window start in
             seconds per sample. When present in the batch the random mode is off.
-        device: ``"cpu"``, ``"cuda[:N]"``, or a list of CUDA devices. Each worker
-            thread is pinned to one device (round-robin), so no thread ever
-            touches two devices; results are gathered on ``output_device``.
+        device: ``"cpu"``, ``"cuda[:N]"``, or a list of devices. Pool threads are
+            pinned to the entries round-robin, so no thread ever touches two
+            devices; results are gathered on ``output_device``. Mixed lists add
+            up: ``["cpu"] * 40 + ["cuda:0"] * 8 + ["cuda:1"] * 8`` with
+            ``num_workers=56`` runs 40 CPU decoders and 8 NVDEC sessions per GPU.
         output_device: Where the ``[B, T, 3, H, W]`` batch lives (default: the
             first entry of ``device``).
         num_workers: Decoder threads (default: CPU count, capped at 32;
@@ -145,13 +147,13 @@ class DecodeVideoWindow(BatchTransform):
         self.t0_key = t0_key
         devs = [device] if isinstance(device, (str, torch.device)) else list(device)
         self.devices = [torch.device(d) for d in devs]
-        if len({d.type for d in self.devices}) != 1:
-            raise ValueError(f"device list must be all CPU or all CUDA, got {devs!r}")
         self.device = self.devices[0]
-        self.is_cuda = self.device.type == "cuda"
+        self.is_cuda = any(d.type == "cuda" for d in self.devices)      # any CUDA worker present
         self.output_device = torch.device(output_device) if output_device is not None else self.device
         if num_workers is None:
-            num_workers = 4 * len(self.devices) if self.is_cuda else min(32, os.cpu_count() or 4)
+            n_cuda = sum(d.type == "cuda" for d in self.devices)
+            n_cpu = len(self.devices) - n_cuda
+            num_workers = 4 * n_cuda + (min(32, os.cpu_count() or 4) if n_cpu else 0)
         self.num_workers = max(1, int(num_workers))
         self.num_ffmpeg_threads = int(num_ffmpeg_threads)
         self.seek_mode = seek_mode
@@ -249,13 +251,14 @@ class DecodeVideoWindow(BatchTransform):
 
     def _decode_one(self, raw: bytes, t0_given: float | None, seed_i: int | None):
         rng = None if t0_given is not None else np.random.default_rng(seed_i)
-        device = str(self._thread_device) if self.is_cuda else "cpu"
+        dev = self._thread_device
+        device = str(dev) if dev.type == "cuda" else "cpu"
         try:
             dec = self._make_decoder(raw, device)
             t0, times = self._times(dec.metadata, t0_given, rng)
             fb = dec.get_frames_played_at(times.tolist())
         except RuntimeError:
-            if not (self.is_cuda and self.cpu_fallback):
+            if not (device != "cpu" and self.cpu_fallback):
                 raise
             dec = self._make_decoder(raw, "cpu")
             t0, times = self._times(dec.metadata, t0_given, rng)

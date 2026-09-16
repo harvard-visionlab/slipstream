@@ -234,3 +234,15 @@ class TestAsyncPipelining:
         assert len(a) == len(b) == 4
         for (i0, t0, f0), (i1, t1, f1) in zip(a, b):
             assert torch.equal(i0, i1) and torch.equal(t0, t1) and torch.equal(f0, f1)
+
+
+    def test_device_list_pins_threads(self, tmp_path):
+        ds = MockVideoStore(cache_path=tmp_path / "cache")
+        stage = DecodeVideoWindow(T=4, rate_hz=10.0, seed=1, device=["cpu", "cpu", "cpu"], num_workers=3)
+        loader = SlipstreamLoader(ds, batch_size=5, shuffle=False, verbose=False, pipelines={"video": [stage]})
+        try:
+            b = next(iter(loader))
+            assert b["video"].shape[:2] == (5, 4) and stage.output_device == torch.device("cpu")
+            assert "device='cpu,cpu,cpu'" in repr(stage)
+        finally:
+            loader.shutdown()
