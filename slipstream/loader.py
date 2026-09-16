@@ -857,6 +857,14 @@ class SlipstreamLoader:
         Uses zero-copy loading: JIT functions write directly into pre-allocated
         buffers, and only slot indices are passed through the queue.
         """
+        if self.verbose and not getattr(self, '_residency_checked', False):
+            self._residency_checked = True
+            frac = self.page_cache_residency(max_records=512)
+            if frac is not None and frac < 0.5:
+                print(
+                    f"  Note: only {frac * 100:.0f}% of this loader's records are in the OS page cache; "
+                    f"on a network mount cold reads serialize badly. Consider loader.warmup_cache() first."
+                )
         if self.use_threading:
             yield from self._iter_threaded()
         else:
@@ -1362,6 +1370,50 @@ class SlipstreamLoader:
                 plan.append((cache_dir / f"{name}.npy", None))
 
         return [(p, r) for p, r in plan if p.exists()]
+
+    def page_cache_residency(self, indices: Sequence[int] | np.ndarray | None = None, max_records: int = 4096) -> float | None:
+        """Fraction of the primary field's bytes for ``indices`` that are resident in the OS page cache.
+
+        Uses ``mincore`` on the store's mmap (Linux / macOS); returns None where unavailable. Samples
+        at most ``max_records`` records evenly. ``indices`` default to the loader's own (anchors are
+        expanded when windowed). Cheap: no data is read.
+        """
+        import ctypes
+        import sys
+
+        storage = self._image_storage
+        if storage is None or not hasattr(storage, '_metadata'):
+            return None
+        if indices is None:
+            indices = self.indices if self.indices is not None else np.arange(self._num_anchors(), dtype=np.int64)
+        indices = np.asarray(indices, dtype=np.int64)
+        if self.window_size > 1:
+            indices = self._expand_window(indices)
+        if len(indices) == 0:
+            return None
+        if len(indices) > max_records:
+            indices = indices[np.linspace(0, len(indices) - 1, max_records).astype(np.int64)]
+        meta = storage._metadata
+        starts = meta['data_ptr'][indices].astype(np.int64)
+        ends = starts + meta['data_size'][indices].astype(np.int64)
+        mm = storage._data_mmap
+        try:
+            libc = ctypes.CDLL(None)
+            page = 4096 if sys.platform != 'darwin' else 16384
+            base = mm.ctypes.data
+            vec_t = ctypes.c_ubyte if sys.platform != 'darwin' else ctypes.c_char
+            resident = total = 0
+            for s0, e0 in zip(starts.tolist(), ends.tolist()):
+                a = s0 - (s0 % page)
+                n_pages = (e0 - a + page - 1) // page
+                vec = (vec_t * n_pages)()
+                if libc.mincore(ctypes.c_void_p(base + a), ctypes.c_size_t(n_pages * page), vec) != 0:
+                    return None
+                resident += sum(1 for v in vec if (v if isinstance(v, int) else ord(v)) & 1)
+                total += n_pages
+            return resident / total if total else None
+        except Exception:
+            return None
 
     def __del__(self) -> None:
         """Cleanup on deletion."""

@@ -35,6 +35,13 @@ and ``collect`` when the batch is consumed, so ``batches_ahead * batch_size``
 decodes are in flight (choose ``batches_ahead >= num_workers / batch_size``).
 ``__call__`` is ``collect(submit(...))`` for use outside the loader.
 
+Network mounts: the loader reads the video bytes through an mmap of the store.
+On a network filesystem (CIFS/NFS) a cold page fault costs a round trip per
+page and serializes across threads (measured: a flat 2.4 windows/s for 1 to 48
+decoders on a cold CIFS mount vs 87 windows/s warm). Call
+``loader.warmup_cache()`` over the epoch's records first; the loader prints a
+hint when most of the records it is about to read are not in the page cache.
+
 ``transforms`` (slipstream ``BatchAugment`` objects) are applied to the flat
 ``[B*T, 3, H, W]`` frames with ``seed_repeat = T``, so a window's frames share
 one crop / flip / colour draw.
@@ -291,7 +298,12 @@ class DecodeVideoWindow(BatchTransform):
                 f"frame shape {tuple(data.shape[1:])} of record {i} differs from {tuple(pend.out.shape[2:])} in the "
                 f"same batch; pass resize= so every clip decodes to one size"
             )
-        pend.out[i].copy_(data)
+        if pend.out.device.type == "cpu" and data.device.type == "cpu":
+            # plain memcpy: a torch copy_ on a 30+ MB tensor opens an OpenMP parallel region per call,
+            # which with dozens of decoder threads oversubscribes every core with spinning OMP workers
+            np.copyto(pend.out[i].numpy(), data.numpy())
+        else:
+            pend.out[i].copy_(data)
         pend.t_sec[i] = pts
         pend.t0[i] = float(t0)
 
