@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from slipstream.dataset import CachedDataset
+from slipstream.dataset import SlipstreamDataset
 from slipstream.decoders import DecodeVideoWindow
 from slipstream.loader import SlipstreamLoader
 from slipstream.transforms import RandomHorizontalFlip, RandomResizedCropBatch
@@ -44,7 +44,7 @@ def main() -> None:
     ap.add_argument("--warm", action="store_true", help="warmup_cache(indices) first")
     a = ap.parse_args()
 
-    ds = CachedDataset(a.cache)
+    ds = SlipstreamDataset(local_dir=a.cache)   # a prebuilt .slipstream cache dir
     indices = np.load(a.indices) if a.indices else None
     inner = [RandomResizedCropBatch(a.crop, seed=1), RandomHorizontalFlip(p=0.5, seed=2)] if a.crop else None
     stage = DecodeVideoWindow(T=a.T, rate_hz=a.rate, seed=0, device=a.device, num_workers=a.workers,

@@ -18,7 +18,7 @@ import time
 import numpy as np
 
 from slipstream.cache import OptimizedCache
-from slipstream.dataset import CachedDataset
+from slipstream.dataset import SlipstreamDataset
 from slipstream.decoders import DecodeCenterCrop, DecodeRandomResizedCrop
 from slipstream.loader import SlipstreamLoader
 
@@ -39,7 +39,7 @@ def main() -> None:
     ap.add_argument("--warm", action="store_true", help="warmup_cache(indices=anchors) before timing")
     a = ap.parse_args()
 
-    ds = CachedDataset(a.cache)
+    ds = SlipstreamDataset(local_dir=a.cache)   # a prebuilt .slipstream cache dir
     anchors = np.load(a.anchors) if a.anchors else None
     pipelines = None
     if a.decode:
