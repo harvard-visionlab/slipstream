@@ -82,10 +82,13 @@ from slipstream.decoders.multicrop import (
     MultiRandomResizeShortCropLong,
 )
 from slipstream.decoders.utils import estimate_rejection_fallback_rate
+from slipstream.decoders.video import DecodeVideoWindow
 
 __all__ = [
     # Base
     "BatchTransform",
+    # Video (torchcodec, time-based windows)
+    "DecodeVideoWindow",
     # CPU decoder
     "CPUDecoder",
     "TurboJPEGBatchDecoder",

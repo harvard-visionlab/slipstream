@@ -22,7 +22,7 @@ from .brightness_contrast import RandomBrightness, RandomContrast
 from .color_jitter import ColorJitter, RandomColorJitter, RandomColorJitterHSV, RandomColorJitterYIQ
 
 # Geometric
-from .geometric import RandomHorizontalFlip, RandomRotate, RandomZoom, RandomRotateObject
+from .geometric import RandomHorizontalFlip, RandomRotate, RandomZoom, RandomRotateObject, RandomResizedCropBatch
 
 # Embed
 from .embed import RandomEmbed, RandomBackgroundBlend
@@ -83,7 +83,7 @@ __all__ = [
     "RandomHorizontalFlip",
     "RandomRotate",
     "RandomZoom",
-    "RandomRotateObject",
+    "RandomRotateObject", "RandomResizedCropBatch",
     # Embed
     "RandomEmbed",
     "RandomBackgroundBlend",

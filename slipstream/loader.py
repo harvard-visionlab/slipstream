@@ -207,6 +207,7 @@ class SlipstreamLoader:
         use_threading: bool = True,
         after_batch_transforms: list[Callable] | None = None,
         window: int | tuple[int, int] | None = None,
+        sample_data: dict[str, Any] | None = None,
     ) -> None:
         """Initialize SlipstreamLoader.
 
@@ -276,6 +277,13 @@ class SlipstreamLoader:
                 None, every record ``a`` with ``a+(T-1)*stride < len(cache)`` is
                 an anchor. ``batch['_indices']`` is ``[B, T]`` record indices and
                 ``batch['_anchors']`` the ``[B]`` anchors.
+            sample_data: Per-sample side arrays aligned with ``indices`` (which
+                is then required), e.g. ``{"t0": window_start_seconds}``. They
+                travel with their sample through shuffling and sharding: each
+                batch carries ``batch[name]`` (a ``[B]`` tensor / list) and the
+                primary field's pipeline receives them under
+                ``batch_data['sample_data']``. This is how a record index can
+                be repeated with different per-sample parameters.
         """
         self.dataset = dataset
         self.batch_size = batch_size
@@ -296,6 +304,17 @@ class SlipstreamLoader:
             raise ValueError(f"window must be (T >= 1, stride >= 1), got {window!r}")
         self.window_size = T
         self.window_stride = stride
+
+        # Per-sample side data aligned with `indices` (shuffled / sharded together with them)
+        self.sample_data: dict[str, np.ndarray] = {}
+        if sample_data:
+            if self.indices is None:
+                raise ValueError("sample_data requires indices (the arrays are aligned with it)")
+            for k, v in sample_data.items():
+                arr = np.asarray(v)
+                if len(arr) != len(self.indices):
+                    raise ValueError(f"sample_data[{k!r}] has {len(arr)} entries, indices has {len(self.indices)}")
+                self.sample_data[k] = arr
 
         # Distributed setup — auto-detect if torch.distributed is initialized
         if not distributed:
@@ -626,25 +645,29 @@ class SlipstreamLoader:
         Returns:
             Array of sample indices for this rank to process.
         """
-        if self.indices is not None:
-            indices = self.indices.copy()
-            n = len(indices)
-        else:
-            n = self._num_anchors()
-            indices = np.arange(n, dtype=np.int64)
+        n = self._num_anchors()
+        pos = np.arange(n, dtype=np.int64)          # positions into self.indices (or the anchor range)
 
         if self.shuffle:
             rng_seed = (self.seed + epoch) if self.seed is not None else None
             rng = np.random.default_rng(rng_seed)
-            rng.shuffle(indices)
+            rng.shuffle(pos)
 
         if self.distributed:
             total = math.ceil(n / self.world_size) * self.world_size
             if total > n:
-                indices = np.concatenate([indices, indices[:total - n]])
-            indices = indices[self.rank::self.world_size]
+                pos = np.concatenate([pos, pos[:total - n]])
+            pos = pos[self.rank::self.world_size]
 
-        return indices
+        self._epoch_positions = pos                  # lets the iterators pick up sample_data per batch
+        return self.indices[pos] if self.indices is not None else pos
+
+    def _batch_sample_data(self, start: int, end: int) -> dict[str, np.ndarray]:
+        """sample_data rows for the batch occupying positions [start, end) of this epoch's order."""
+        if not self.sample_data:
+            return {}
+        pos = self._epoch_positions[start:end]
+        return {k: v[pos] for k, v in self.sample_data.items()}
 
     def _num_anchors(self) -> int:
         """Number of samples (anchors when windowed) before sharding."""
@@ -670,6 +693,8 @@ class SlipstreamLoader:
             return
         yield obj
         for attr in ('transforms', '_decoder', '_cpu_decoder'):
+            if attr == 'transforms' and getattr(obj, 'owns_transforms', False):
+                continue                      # e.g. DecodeVideoWindow manages its inner transforms itself
             inner = getattr(obj, attr, None)
             if inner is not None and inner is not obj:
                 yield from SlipstreamLoader._walk_transforms(inner)
@@ -721,19 +746,11 @@ class SlipstreamLoader:
         batches_per_epoch = len(self)
         target_counter = epoch * batches_per_epoch
 
-        seen_decoders: set[int] = set()
-        for field_name, pipeline in self.pipelines.items():
-            transforms = []
-            if field_name in self._multi_pipeline_fields:
-                for sub_pipeline in pipeline:
-                    transforms.extend(sub_pipeline)
-            else:
-                transforms.extend(pipeline)
-            for transform in transforms:
-                decoder = getattr(transform, '_decoder', None)
-                if decoder is not None and id(decoder) not in seen_decoders:
-                    seen_decoders.add(id(decoder))
-                    decoder._seed_counter = target_counter
+        seen: set[int] = set()
+        for obj in self._walk_transforms(list(self.pipelines.values())):
+            if hasattr(obj, '_seed_counter') and id(obj) not in seen:
+                seen.add(id(obj))
+                obj._seed_counter = target_counter
 
     def _setup_prefetch_banks(self) -> None:
         """Set up pre-allocated memory banks for async prefetching."""
@@ -853,6 +870,8 @@ class SlipstreamLoader:
 
             # Build output batch
             batch = self._index_fields(anchors, batch_indices)
+            sdata = self._batch_sample_data(start, end)
+            self._add_sample_data(batch, sdata)
 
             # Load and add image data
             if has_image_field:
@@ -864,12 +883,7 @@ class SlipstreamLoader:
                     self._width_banks[0],
                     parallel=True,
                 )
-                image_data = {
-                    'data': self._data_banks[0][:actual_size],
-                    'sizes': self._size_banks[0][:actual_size],
-                    'heights': self._height_banks[0][:actual_size],
-                    'widths': self._width_banks[0][:actual_size],
-                }
+                image_data = self._primary_dict(0, actual_size, batch_indices, sdata)
 
                 if self.image_field in self.pipelines:
                     pipeline_result = self._apply_pipeline(
@@ -880,7 +894,7 @@ class SlipstreamLoader:
                     else:
                         batch[self.image_field] = pipeline_result
                 else:
-                    batch[self.image_field] = image_data
+                    batch[self.image_field] = self._raw_view(image_data)
 
             # Load other fields
             for field_name in self._fields_to_load:
@@ -916,6 +930,29 @@ class SlipstreamLoader:
             return {'_indices': torch.from_numpy(batch_indices).to(self._device_str)}
         rec = torch.from_numpy(batch_indices.reshape(len(anchors), self.window_size)).to(self._device_str)
         return {'_indices': rec, '_anchors': torch.from_numpy(anchors).to(self._device_str)}
+
+    def _primary_dict(self, slot: int, n: int, batch_indices: np.ndarray, sdata: dict[str, np.ndarray]) -> dict[str, Any]:
+        """The primary field's pipeline input: bank views plus bookkeeping the stages may use."""
+        d = {
+            'data': self._data_banks[slot][:n],
+            'sizes': self._size_banks[slot][:n],
+            'heights': self._height_banks[slot][:n],
+            'widths': self._width_banks[slot][:n],
+            'indices': batch_indices,
+            'field': self.image_field,
+        }
+        if sdata:
+            d['sample_data'] = sdata
+        return d
+
+    @staticmethod
+    def _raw_view(d: dict[str, Any]) -> dict[str, Any]:
+        """The user-facing raw bytes dict: data/sizes/heights/widths only (bookkeeping keys are for stages)."""
+        return {k: d[k] for k in ('data', 'sizes', 'heights', 'widths')}
+
+    def _add_sample_data(self, batch: dict[str, Any], sdata: dict[str, np.ndarray]) -> None:
+        for k, v in sdata.items():
+            batch[k] = torch.from_numpy(v).to(self._device_str) if v.dtype.kind in 'biuf' else v.tolist()
 
     def _stop_worker(self) -> None:
         """Stop any running prefetch worker and wait for it to finish."""
@@ -1016,6 +1053,7 @@ class SlipstreamLoader:
                     anchors,
                     batch_indices,
                     other_fields,
+                    (start, end),
                 ))
                 current_slot = (current_slot + 1) % num_slots
 
@@ -1031,19 +1069,16 @@ class SlipstreamLoader:
                 if result is None:
                     break
 
-                slot, actual_size, anchors, batch_indices, other_fields = result
+                slot, actual_size, anchors, batch_indices, other_fields, (start, end) = result
 
                 # Build output batch
                 batch = self._index_fields(anchors, batch_indices)
+                sdata = self._batch_sample_data(start, end)
+                self._add_sample_data(batch, sdata)
 
                 # Access image data from pre-allocated banks using slot index
                 if has_image_field:
-                    image_data = {
-                        'data': self._data_banks[slot][:actual_size],
-                        'sizes': self._size_banks[slot][:actual_size],
-                        'heights': self._height_banks[slot][:actual_size],
-                        'widths': self._width_banks[slot][:actual_size],
-                    }
+                    image_data = self._primary_dict(slot, actual_size, batch_indices, sdata)
 
                     if self.image_field in self.pipelines:
                         pipeline_result = self._apply_pipeline(
@@ -1055,7 +1090,7 @@ class SlipstreamLoader:
                             batch[self.image_field] = pipeline_result
                     else:
                         # No pipeline - return raw data dict
-                        batch[self.image_field] = image_data
+                        batch[self.image_field] = self._raw_view(image_data)
 
                 # Add other fields
                 for field_name, field_data in other_fields.items():

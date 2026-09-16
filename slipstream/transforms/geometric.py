@@ -249,3 +249,63 @@ class RandomRotateObject(BatchAugment):
             f"\t\t      dest_x={self.destx_range}, dest_y={self.desty_range}, "
             f"pad_mode='{self.pad_mode}')"
         )
+
+
+class RandomResizedCropBatch(BatchAugment):
+    """Per-image random resized crop on decoded tensors (torchvision semantics, batched).
+
+    For already-decoded frames (e.g. from ``DecodeVideoWindow``) where the JPEG
+    decode-time crops do not apply. Samples an area fraction in ``scale`` and an
+    aspect ratio in ``ratio`` per image (analytic, no rejection loop), places the
+    crop uniformly inside the image and resamples it to ``size`` with bilinear
+    ``grid_sample``. uint8 input gives uint8 output. Honours ``seed_repeat``
+    (windows share one crop) and supports replay via ``apply_last``.
+    """
+
+    def __init__(self, size, scale=(0.08, 1.0), ratio=(3.0 / 4.0, 4.0 / 3.0), seed=None, device=None):
+        self.size = (size, size) if isinstance(size, int) else tuple(size)
+        self.scale = tuple(scale)
+        self.log_ratio = (float(torch.log(torch.tensor(ratio[0]))), float(torch.log(torch.tensor(ratio[1]))))
+        self.seed = seed
+        self.rng = None
+        if self.seed is not None:
+            self.rng = torch.Generator("cpu" if device is None else device)
+            self.rng.manual_seed(self.seed)
+
+    def before_call(self, b, **kwargs):
+        n = b.shape[0] if b.ndim == 4 else 1
+        ng = self._ng(n)
+        u = lambda lo, hi: self._expand(torch.empty(ng).uniform_(lo, hi, generator=self.rng), n)
+        area = u(self.scale[0], self.scale[1])
+        ratio = torch.exp(u(self.log_ratio[0], self.log_ratio[1]))
+        w = torch.sqrt(area * ratio).clamp_(max=1.0)          # crop width as a fraction of W
+        h = torch.sqrt(area / ratio).clamp_(max=1.0)          # crop height as a fraction of H
+        cx = u(0.0, 1.0) * (1 - w) + w / 2                     # centre, fraction of W
+        cy = u(0.0, 1.0) * (1 - h) + h / 2
+        self.params = {"w": w, "h": h, "cx": cx, "cy": cy}
+        # normalized affine: x_in = w * x_out + (2*cx - 1)
+        mat = torch.zeros(n, 2, 3)
+        mat[:, 0, 0] = w; mat[:, 1, 1] = h
+        mat[:, 0, 2] = 2 * cx - 1; mat[:, 1, 2] = 2 * cy - 1
+        self.mat = mat.to(b.device)
+
+    def last_params(self):
+        return {"mat": self.mat, **self.params}
+
+    def apply_last(self, b):
+        squeeze = b.ndim == 3
+        x = b.unsqueeze(0) if squeeze else b
+        orig_dtype = x.dtype
+        xf = x if x.is_floating_point() else x.float()
+        grid = torch.nn.functional.affine_grid(self.mat.to(xf.dtype), (xf.shape[0], xf.shape[1], *self.size), align_corners=False)
+        out = torch.nn.functional.grid_sample(xf, grid, mode="bilinear", padding_mode="border", align_corners=False)
+        if not orig_dtype.is_floating_point:
+            out = out.round_().clamp_(0, 255).to(orig_dtype)
+        return out.squeeze(0) if squeeze else out
+
+    def __call__(self, b, **kwargs):
+        self.before_call(b, **kwargs)
+        return self.apply_last(b)
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(size={self.size}, scale={self.scale}, seed={self.seed})"

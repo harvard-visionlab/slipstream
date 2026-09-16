@@ -89,6 +89,31 @@ augmentation draws its random parameters once per window, so a seeded run reprod
 same anchor order and the same pixels. Fixed-shape per-record arrays are declared with the
 field type `"<dtype>[d0,d1,...]"`, e.g. `"float32[7]"`, and stored as one mmap'd `.npy`.
 
+### Video clips (one container per record)
+
+For a `bytes` field holding one video per record, `DecodeVideoWindow` decodes `T` frames
+at `rate_hz` from each clip with torchcodec, sampling by time so mixed source frame rates
+never matter:
+
+```python
+from slipstream.decoders import DecodeVideoWindow
+from slipstream.transforms import RandomResizedCropBatch, RandomHorizontalFlip
+
+stage = DecodeVideoWindow(T=120, rate_hz=15, seed=0,           # 8 s windows, random start per clip
+                          device="cpu", num_workers=32,          # or device="cuda:0"
+                          transforms=[RandomResizedCropBatch(224, seed=1), RandomHorizontalFlip(seed=2)])
+loader = SlipstreamLoader(store, batch_size=8, indices=clip_ids, pipelines={"video": [stage]})
+for batch in loader:
+    batch["video"]        # [B, 120, 3, 224, 224] uint8, one crop/flip per window
+    batch["video_t_sec"]  # [B, 120] true presentation times of the frames
+    batch["video_t0"], batch["video_rec"]
+```
+
+Fixed window starts come from per-sample side data aligned with `indices`:
+`SlipstreamLoader(indices=recs, sample_data={"t0": starts}, ...)` with
+`DecodeVideoWindow(..., t0_key="t0")`. Repeating a record index with different `t0` gives
+several windows per clip. Needs `torchcodec` with loadable FFmpeg libraries.
+
 ## Am I set up? (`slipstream status`)
 
 Installing slipstream adds a `slipstream` command (also `python -m slipstream`):

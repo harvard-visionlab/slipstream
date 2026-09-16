@@ -28,6 +28,24 @@ All notable changes to slipstream are documented here. Versions follow
   `.npy`, returned as `[B, d0, ...]` (or `[B, T, d0, ...]`) tensors. Readers that report
   `np.ndarray` values have the type inferred from the first sample.
 - `benchmarks/bench_window_loader.py`: windows/s and frames/s for a frame store.
+- `DecodeVideoWindow` (`slipstream.decoders.video`): time-based video window decoding with
+  torchcodec for a raw `bytes` video field. Per record it decodes `T` frames at `rate_hz`
+  from `t0` and returns `{field: [B, T, 3, H, W] uint8, field_t_sec: [B, T] true frame
+  times, field_t0: [B], field_rec: [B]}`. `t0` is random-in-clip (seeded per sample with
+  the decoders' `_seed_counter` contract, so `set_epoch` resumes it) or given per sample
+  through `t0_key` and the loader's new `sample_data`. The last `end_margin_frames` of a
+  clip are never requested; CUDA decodes retry once on the CPU. Persistent decoder thread
+  pool, `num_ffmpeg_threads=1`, `seek_mode="exact"`, optional decoder-side `resize`, and
+  inner `transforms` applied to the flat frames with `seed_repeat = T`.
+- `RandomResizedCropBatch`: per-image random resized crop on decoded tensors
+  (uint8 or float), `seed_repeat`-aware, replayable.
+- `SlipstreamLoader(sample_data={name: array})`: per-sample side arrays aligned with
+  `indices`, shuffled and sharded together with their sample; each batch carries
+  `batch[name]` and the primary field's pipeline receives them as
+  `batch_data['sample_data']`. Lets a record index be repeated with different parameters.
+- The primary field's pipeline dict now also carries `indices` and `field` (the raw
+  `{data, sizes, heights, widths}` returned without a pipeline is unchanged).
+  `set_epoch` resets the seed counter of every decoder or stage reachable from the pipelines.
 
 ### Fixed
 
