@@ -82,7 +82,7 @@ class _PendingBatch:
     def __init__(self, B: int, T: int, field: str, indices):
         self.B, self.T, self.field, self.indices = B, T, field, indices
         self.futures: list[Future] = []
-        self.out: torch.Tensor | None = None            # [B, T, 3, H, W], allocated by the first finisher
+        self.out: torch.Tensor | None = None            # [B, T, H, W, 3] (native HWC memory), first finisher allocates
         self.t_sec = torch.empty(B, T, dtype=torch.float32)
         self.t0 = torch.empty(B, dtype=torch.float32)
         self.lock = threading.Lock()
@@ -130,6 +130,12 @@ class DecodeVideoWindow(BatchTransform):
         ``{field: [B, T, 3, H, W] uint8 (after `transforms`), field_t_sec: [B, T]
         float32 true frame times, field_t0: [B] float32, field_rec: [B] int64
         record indices}``. Frames live on ``device``; times on the CPU.
+
+    Layout note: like torchcodec's own ``FrameBatch.data``, the ``[B, T, 3, H, W]``
+    frames are a CHW *view* over HWC memory (the decoder writes packed RGB;
+    copying it as-is is a memcpy, transposing it per window is 15x slower).
+    Call ``.contiguous()`` if a consumer needs CHW memory order; ``transforms``
+    output whatever their ops produce (usually contiguous).
     """
 
     #: the stage manages `seed_repeat` of its own `transforms`; the loader must not descend into them
@@ -289,26 +295,27 @@ class DecodeVideoWindow(BatchTransform):
 
     def _decode_into(self, pend: _PendingBatch, i: int, raw: bytes, t0_given: float | None, seed_i: int) -> None:
         """Worker: decode record i of the batch and write it into the batch buffers."""
-        data, pts, t0 = self._decode_one(raw, t0_given, seed_i)
+        data, pts, t0 = self._decode_one(raw, t0_given, seed_i)     # [T, 3, H, W]: torchcodec's CHW view of HWC memory
+        hwc = data.permute(0, 2, 3, 1)                                 # back to the native, contiguous layout
         with pend.lock:
             if pend.out is None:
-                pend.out = self._output_buffer((pend.B, pend.T, *data.shape[1:]), data.dtype)
-        if tuple(data.shape) != tuple(pend.out.shape[1:]):
+                pend.out = self._output_buffer((pend.B, pend.T, *hwc.shape[1:]), data.dtype)
+        if tuple(hwc.shape) != tuple(pend.out.shape[1:]):
             raise ValueError(
-                f"frame shape {tuple(data.shape[1:])} of record {i} differs from {tuple(pend.out.shape[2:])} in the "
+                f"frame size {tuple(data.shape[2:])} of record {i} differs from {tuple(pend.out.shape[2:4])} in the "
                 f"same batch; pass resize= so every clip decodes to one size"
             )
-        if pend.out.device.type == "cpu" and data.device.type == "cpu":
-            # plain memcpy: a torch copy_ on a 30+ MB tensor opens an OpenMP parallel region per call,
-            # which with dozens of decoder threads oversubscribes every core with spinning OMP workers
-            np.copyto(pend.out[i].numpy(), data.numpy())
+        if pend.out.device.type == "cpu" and hwc.device.type == "cpu":
+            # contiguous -> contiguous memcpy, no torch op (a torch copy_ opens an OpenMP region per call,
+            # which with dozens of decoder threads floods the cores with spinning OMP workers)
+            np.copyto(pend.out[i].numpy(), hwc.contiguous().numpy())
         else:
-            pend.out[i].copy_(data)
+            pend.out[i].copy_(hwc)
         pend.t_sec[i] = pts
         pend.t0[i] = float(t0)
 
     def _output_buffer(self, shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
-        """A [B, T, 3, H, W] output tensor: fresh, or the next slot of the reuse ring."""
+        """A [B, T, H, W, 3] output tensor (native HWC memory): fresh, or the next slot of the reuse ring."""
         if not self.reuse_output:
             return torch.empty(shape, dtype=dtype, device=self.output_device)
         with self._ring_lock:
@@ -358,7 +365,8 @@ class DecodeVideoWindow(BatchTransform):
             f.result()                                                # re-raises the first worker error
         frames = pend.out
         if frames is None:                                            # B == 0
-            frames = torch.empty((0, self.T, 3, 0, 0), dtype=torch.uint8, device=self.output_device)
+            frames = torch.empty((0, self.T, 0, 0, 3), dtype=torch.uint8, device=self.output_device)
+        frames = frames.permute(0, 1, 4, 2, 3)                        # [B, T, 3, H, W] view over HWC memory
 
         if self.transforms and pend.B:
             self._set_inner_seed_repeat()                             # loader may have reset them
