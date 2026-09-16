@@ -54,11 +54,11 @@ class RandomGaussianBlur(BatchAugment):
         return torch.stack(kernels)
 
     def before_call(self, b, **kwargs):
-        _, self.idx = mask_batch(b, p=self.p, rng=self.rng)
-        self.selected_kernels = torch.randint(
-            0, self.kernels.shape[0], (self.idx.shape[0],),
+        _, self.idx = mask_batch(b, p=self.p, rng=self.rng, group=self.seed_repeat)
+        self.selected_kernels = self._expand(torch.randint(
+            0, self.kernels.shape[0], (self._ng(self.idx.shape[0]),),
             generator=self.rng, device=b.device,
-        )
+        ), self.idx.shape[0])
         if self.kernels.device != b.device:
             self.kernels = self.kernels.to(b.device, non_blocking=True)
         if self.kernels.dtype != b.dtype:
@@ -99,7 +99,7 @@ class RandomSolarization(BatchAugment):
 
     def before_call(self, b, **kwargs):
         self._init_rng(b.device)
-        self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng)
+        self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng, group=self.seed_repeat)
 
     def last_params(self):
         return {"do": self.do, "idx": self.idx}
@@ -112,7 +112,7 @@ class RandomSolarization(BatchAugment):
         n = b.shape[0] if b.ndim == 4 else 1
 
         if self.p < 1.0:
-            do = torch.empty(n, device=b.device, dtype=b.dtype).bernoulli_(self.p, generator=self.rng)
+            do = self._expand(torch.empty(self._ng(n), device=b.device, dtype=b.dtype).bernoulli_(self.p, generator=self.rng), n)
         else:
             do = torch.ones(n, device=b.device, dtype=b.dtype)
 
@@ -194,7 +194,8 @@ class RandomPatchShuffle(BatchAugment):
                 continue
 
             n_patches = int(H / patch_size) * int(W / patch_size)
-            shuffled_patch_idxs = F.generate_batch_permutations(len(loc), n_patches, rng=self.rng)
+            shuffled_patch_idxs = self._expand(
+                F.generate_batch_permutations(self._ng(len(loc)), n_patches, rng=self.rng), len(loc))
             shuffled_patches = patches[patch_size][shuffled_patch_idxs]
 
             B, nP, C, pH, pW = shuffled_patches.shape
@@ -228,7 +229,8 @@ class RandomPatchShuffle(BatchAugment):
 
             n_grid = img_size // patch_size
             n_patches = n_grid * n_grid
-            perm = F.generate_batch_permutations(len(loc), n_patches, rng=self.rng).to(device)
+            perm = self._expand(
+                F.generate_batch_permutations(self._ng(len(loc)), n_patches, rng=self.rng), len(loc)).to(device)
 
             # Unfold into patches: [B, C, n_grid, patch, n_grid, patch]
             sub = out[loc]
@@ -249,9 +251,9 @@ class RandomPatchShuffle(BatchAugment):
         return out.squeeze(0) if images.ndim == 3 else out
 
     def before_call(self, b, **kwargs):
-        self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng)
+        self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng, group=self.seed_repeat)
         n = len(self.idx)
-        rand_patch_idxs = torch.randint(0, len(self.sizes), (n,), generator=self.rng)
+        rand_patch_idxs = self._expand(torch.randint(0, len(self.sizes), (self._ng(n),), generator=self.rng), n)
         self.rand_patch_sizes = torch.tensor([self.sizes[idx] for idx in rand_patch_idxs])
 
     def last_params(self):

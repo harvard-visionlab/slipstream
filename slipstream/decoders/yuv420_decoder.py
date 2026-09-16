@@ -17,6 +17,8 @@ from slipstream.decoders.numba_decoder import _available_cpus
 from typing import Any
 
 import numpy as np
+
+from slipstream.decoders._window import repeat_params
 from numpy.typing import NDArray
 
 from slipstream.decoders.numba_decoder import (
@@ -472,6 +474,7 @@ class YUV420NumbaBatchDecoder:
         self._yuv_crop_fn = _get_yuv420_yuv_crop()
         self._extract_planes_fn = _get_yuv420_extract_planes()
         self._seed_counter = 0
+        self.seed_repeat = 1   # window support, see slipstream.decoders._window
 
         self._temp_buffer: np.ndarray | None = None
         self._dest_buffer: np.ndarray | None = None
@@ -584,12 +587,12 @@ class YUV420NumbaBatchDecoder:
         else:
             batch_seed = (batch_size * self._seed_counter) % 2147483647
 
-        crop_params = _generate_random_crop_params_batch(
+        crop_params = repeat_params(_generate_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
             batch_seed,
-        )
+        ), self.seed_repeat)
 
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
         dest_buffer = self._ensure_dest_buffer(batch_size, target_size, target_size)
@@ -634,12 +637,12 @@ class YUV420NumbaBatchDecoder:
         else:
             batch_seed = (batch_size * self._seed_counter) % 2147483647
 
-        crop_params = _generate_direct_random_crop_params_batch(
+        crop_params = repeat_params(_generate_direct_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
             batch_seed,
-        )
+        ), self.seed_repeat)
 
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
         dest_buffer = self._ensure_dest_buffer(batch_size, target_size, target_size)
@@ -780,12 +783,12 @@ class YUV420NumbaBatchDecoder:
                 self._seed_counter += 1
                 batch_seed = (batch_size * self._seed_counter) % 2147483647
 
-            all_crop_params[c] = _generate_random_crop_params_batch(
+            all_crop_params[c] = repeat_params(_generate_random_crop_params_batch(
                 widths_i32, heights_i32,
                 scale[0], scale[1],
                 log_ratio_min, log_ratio_max,
                 batch_seed,
-            )
+            ), self.seed_repeat)
 
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
 
@@ -1068,12 +1071,12 @@ class YUV420NumbaBatchDecoder:
         else:
             batch_seed = (batch_size * self._seed_counter) % 2147483647
 
-        crop_params = _generate_random_crop_params_batch(
+        crop_params = repeat_params(_generate_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
             batch_seed,
-        )
+        ), self.seed_repeat)
 
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
         dest_buffer = self._ensure_yuv_dest_buffer(batch_size, target_size, target_size)

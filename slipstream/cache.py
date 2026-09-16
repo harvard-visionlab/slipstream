@@ -6,6 +6,7 @@ field types benefit from different storage strategies:
 
 - ImageBytes: Contiguous data with metadata table for O(1) access
 - Numeric (int, float): Simple numpy arrays with mmap
+- Fixed-shape arrays ("float32[7]", "int16[2,3]"): one (N, ...) numpy array with mmap
 - Strings: Concatenated bytes with offset table
 
 All storage uses memory-mapping for zero-copy reads after the first epoch
@@ -31,6 +32,7 @@ import gc
 import hashlib
 import json
 import random
+import re
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -65,6 +67,33 @@ VARIABLE_METADATA_DTYPE = np.dtype([
     ('height', '<u4'),     # 32-bit height (for images, 0 otherwise)
     ('width', '<u4'),      # 32-bit width (for images, 0 otherwise)
 ])
+
+# Fixed-shape array field types: "<dtype>[<d0>,<d1>,...]", e.g. "float32[7]" (a 7-vector per sample),
+# "float32[3,3]" (a 3x3 matrix per sample). Stored as one (N, d0, d1, ...) .npy, mmap'd like scalars,
+# and returned by the loader as [B, d0, ...] (or [B, T, d0, ...] with window=).
+_ARRAY_TYPE_RE = re.compile(r"^(u?int(?:8|16|32|64)|float(?:16|32|64)|bool)\[(\d+(?:\s*,\s*\d+)*)\]$")
+
+
+def parse_array_type(field_type: Any) -> tuple[np.dtype, tuple[int, ...]] | None:
+    """Parse a fixed-shape array type string.
+
+    ``"float32[7]"`` -> ``(dtype('float32'), (7,))``; ``"int16[2,3]"`` -> ``(dtype('int16'), (2, 3))``.
+    Returns None for anything that is not an array type (scalar types, "str", "ImageBytes", ...).
+    """
+    if not isinstance(field_type, str):
+        return None
+    m = _ARRAY_TYPE_RE.match(field_type.strip())
+    if m is None:
+        return None
+    return np.dtype(m.group(1)), tuple(int(x) for x in m.group(2).split(','))
+
+
+def array_type_of(value: Any) -> str:
+    """Type string for a fixed-shape array sample value: ``np.zeros(7, np.float32)`` -> ``"float32[7]"``."""
+    arr = np.asarray(value)
+    if arr.ndim == 0:
+        raise ValueError("array_type_of() needs an array with at least one dimension")
+    return f"{arr.dtype.name}[{','.join(str(d) for d in arr.shape)}]"
 
 
 # =============================================================================
@@ -1215,18 +1244,31 @@ class NumpyWriter(StreamingFieldWriter):
         self.num_samples = num_samples
         self.field_type = field_type
 
-        # Choose dtype based on field type
-        if field_type in ("float", "float32", "float64"):
-            dtype = np.float64
+        # Choose dtype (and per-sample shape) based on field type
+        parsed = parse_array_type(field_type)
+        if parsed is not None:
+            dtype, shape = parsed                          # fixed-shape array per sample, exact dtype
+        elif field_type in ("float", "float32", "float64"):
+            dtype, shape = np.float64, ()
         else:
-            dtype = np.int64
+            dtype, shape = np.int64, ()
+        self._shape = shape
 
-        self._data = np.zeros(num_samples, dtype=dtype)
+        self._data = np.zeros((num_samples, *shape), dtype=dtype)
         self._path = output_dir / f"{field_name}.npy"
 
     def add_sample(self, idx: int, value: Any) -> None:
-        """Write one numeric value."""
-        self._data[idx] = value
+        """Write one numeric value (scalar, or a fixed-shape array for array field types)."""
+        if self._shape:
+            arr = np.asarray(value)
+            if arr.shape != self._shape:
+                raise ValueError(
+                    f"Field '{self.field_name}' ({self.field_type}) expects shape {self._shape}, "
+                    f"got {arr.shape} at sample {idx}"
+                )
+            self._data[idx] = arr
+        else:
+            self._data[idx] = value
 
     def finalize(self) -> dict[str, Any]:
         """Save array to disk. Does NOT create storage objects."""
@@ -1571,10 +1613,10 @@ def _merge_numpy_field(
     shard_ranges: list[tuple[int, int]],
     num_samples: int,
 ) -> dict:
-    """Merge Numpy shards: stack arrays into final .npy."""
-    # Load first shard to determine dtype
+    """Merge Numpy shards: stack arrays into final .npy (scalar or fixed-shape array fields)."""
+    # Load first shard to determine dtype and per-sample shape
     first_shard = np.load(shard_dirs[0] / f"{field_name}.npy")
-    final_data = np.zeros(num_samples, dtype=first_shard.dtype)
+    final_data = np.zeros((num_samples, *first_shard.shape[1:]), dtype=first_shard.dtype)
 
     start_0, end_0 = shard_ranges[0]
     final_data[start_0:end_0] = first_shard
@@ -1787,6 +1829,13 @@ class OptimizedCache:
             k: (v if isinstance(v, str) else v.__name__)
             for k, v in dataset.field_types.items()
         }
+        # Readers that infer types from values report numpy arrays as `np.ndarray` ("ndarray");
+        # resolve them to a fixed-shape array type ("float32[7]") from the first sample.
+        if any(t == "ndarray" for t in field_types.values()):
+            first = getattr(dataset, '_reader', dataset)[0]
+            for k, t in field_types.items():
+                if t == "ndarray":
+                    field_types[k] = array_type_of(first[k])
 
         if verbose:
             print(f"Fields: {field_types}")
@@ -2266,7 +2315,13 @@ class OptimizedCache:
 
                 elif isinstance(storage, NumpyStorage):
                     cache_val = storage._data[idx]
-                    if dataset_value != cache_val:
+                    if np.ndim(cache_val) > 0:
+                        # fixed-shape array field: compare after casting to the stored dtype
+                        expected = np.asarray(dataset_value, dtype=cache_val.dtype)
+                        mismatch = expected.shape != cache_val.shape or not np.array_equal(expected, cache_val)
+                    else:
+                        mismatch = dataset_value != cache_val
+                    if mismatch:
                         errors.append(
                             f"Value mismatch at {idx}, '{field_name}': "
                             f"{dataset_value} vs {cache_val}"

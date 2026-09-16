@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from slipstream.decoders._window import repeat_params
 from numba import njit, prange, set_num_threads
 from numpy.typing import NDArray
 
@@ -995,6 +997,9 @@ class NumbaBatchDecoder:
 
         # Seed counter for random crops
         self._seed_counter = 0
+        # Window support: repeat per-sample crop params across groups of `seed_repeat`
+        # consecutive samples (set by SlipstreamLoader(window=...); 1 = independent samples)
+        self.seed_repeat = 1
 
         # Reusable buffers (allocated on first use)
         self._temp_buffer: np.ndarray | None = None
@@ -1383,12 +1388,12 @@ class NumbaBatchDecoder:
             self._seed_counter += 1
             batch_seed = (batch_size * self._seed_counter) % 2147483647
 
-        crop_params = _generate_random_crop_params_batch(
+        crop_params = repeat_params(_generate_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
             batch_seed,
-        )
+        ), self.seed_repeat)
 
         # Allocate buffers
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
@@ -1458,12 +1463,12 @@ class NumbaBatchDecoder:
             self._seed_counter += 1
             batch_seed = (batch_size * self._seed_counter) % 2147483647
 
-        crop_params = _generate_direct_random_crop_params_batch(
+        crop_params = repeat_params(_generate_direct_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
             batch_seed,
-        )
+        ), self.seed_repeat)
 
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
         dest_buffer = self._ensure_dest_buffer(batch_size, target_size, target_size)
@@ -1533,12 +1538,12 @@ class NumbaBatchDecoder:
                 self._seed_counter += 1
                 batch_seed = (batch_size * self._seed_counter) % 2147483647
 
-            all_crop_params[c] = _generate_random_crop_params_batch(
+            all_crop_params[c] = repeat_params(_generate_random_crop_params_batch(
                 widths_i32, heights_i32,
                 scale[0], scale[1],
                 log_ratio_min, log_ratio_max,
                 batch_seed,
-            )
+            ), self.seed_repeat)
 
         # Allocate buffers
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)

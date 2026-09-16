@@ -38,6 +38,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from slipstream.decoders._window import repeat_params
+
 from slipstream.utils.crop import (
     generate_batch_center_crop_params,
     generate_batch_random_crop_params,
@@ -506,9 +508,9 @@ class GPUDecoder:
             )
 
         # Generate random crop params using unified utility
-        rois = generate_batch_random_crop_params(
+        rois = repeat_params(generate_batch_random_crop_params(
             widths, heights, scale=scale, ratio=ratio
-        )
+        ), getattr(self, 'seed_repeat', 1))
 
         return self.decode_batch_with_roi(
             data, sizes, heights, widths, rois, (target_size, target_size)

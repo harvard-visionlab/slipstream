@@ -2,6 +2,8 @@
 
 import torch
 
+from slipstream.decoders._window import expand_groups, n_groups
+
 
 class BatchAugment:
     """Base class for GPU batch augmentations with replay.
@@ -10,7 +12,22 @@ class BatchAugment:
     and apply_last() to apply those parameters. __call__ does both.
     This enables SSL replay: call t(x) on view 1, then t.apply_last(y)
     on view 2 to apply the same augmentation.
+
+    Window support: ``seed_repeat`` (set by ``SlipstreamLoader(window=(T, stride))``)
+    makes every ``seed_repeat`` consecutive samples of a batch share one draw of the
+    per-sample random parameters. Subclasses draw ``self._ng(n)`` values and expand
+    them with ``self._expand(x, n)``.
     """
+
+    seed_repeat: int = 1
+
+    def _ng(self, n: int) -> int:
+        """Number of independent parameter draws for an (expanded) batch of n samples."""
+        return n_groups(n, self.seed_repeat)
+
+    def _expand(self, x, n: int):
+        """Expand per-group parameters [ng, ...] to per-sample parameters [n, ...]."""
+        return expand_groups(x, self.seed_repeat, n)
 
     def before_call(self, b: torch.Tensor, **kwargs) -> None:
         """Sample random parameters for this batch."""

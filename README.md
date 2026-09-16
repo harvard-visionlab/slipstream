@@ -65,6 +65,30 @@ for batch in loader:
 
 First epoch builds the cache (if not already present locally). Subsequent epochs run at full speed.
 
+### Sequence windows (video frame stores)
+
+For a cache whose records are consecutive frames, `window=(T, stride)` turns the loader
+into a window sampler. `indices` are the anchor records; each sample is the `T` records
+`a, a+stride, …, a+(T-1)*stride`, and every field comes back as `[B, T, ...]`:
+
+```python
+loader = SlipstreamLoader(
+    frame_store, batch_size=16, shuffle=True, seed=0,
+    indices=anchors,                 # records with room for a whole window inside their clip
+    window=(40, 1),                  # 40 frames per sample
+    pipelines={"image": [DecodeRandomResizedCrop(224, seed=0, to_tensor=True, permute=True)]},
+)
+for batch in loader:
+    batch["image"]     # [B, 40, 3, 224, 224]: one crop per window, shared by its 40 frames
+    batch["pose"]      # [B, 40, 7]  from a "float32[7]" field
+    batch["_indices"]  # [B, 40] record indices, batch["_anchors"] the [B] anchors
+```
+
+Shuffle, distributed sharding and `drop_last` operate on anchors. Every decoder and
+augmentation draws its random parameters once per window, so a seeded run reproduces the
+same anchor order and the same pixels. Fixed-shape per-record arrays are declared with the
+field type `"<dtype>[d0,d1,...]"`, e.g. `"float32[7]"`, and stored as one mmap'd `.npy`.
+
 ## Am I set up? (`slipstream status`)
 
 Installing slipstream adds a `slipstream` command (also `python -m slipstream`):

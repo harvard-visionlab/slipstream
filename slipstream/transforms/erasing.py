@@ -123,23 +123,24 @@ class RandomErasing(BatchAugment):
 
         device = b.device
 
-        # Per-image Bernoulli mask: which images get erased.
+        # Per-image Bernoulli mask: which images get erased (one draw per window, see BatchAugment).
+        NG = self._ng(N)
         if self.p >= 1.0:
             do = torch.ones(N, device=device, dtype=torch.bool)
         elif self.p <= 0.0:
             do = torch.zeros(N, device=device, dtype=torch.bool)
         else:
-            do = torch.empty(N, device=device, dtype=torch.float32).bernoulli_(
+            do = self._expand(torch.empty(NG, device=device, dtype=torch.float32).bernoulli_(
                 self.p, generator=self.rng
-            ).bool()
+            ).bool(), N)
 
         # Per-image rectangle params, all shape [N], sampled in single vectorized calls.
-        area_frac = torch.empty(N, device=device, dtype=torch.float32).uniform_(
+        area_frac = self._expand(torch.empty(NG, device=device, dtype=torch.float32).uniform_(
             self.area_range[0], self.area_range[1], generator=self.rng
-        )
-        log_aspect = torch.empty(N, device=device, dtype=torch.float32).uniform_(
+        ), N)
+        log_aspect = self._expand(torch.empty(NG, device=device, dtype=torch.float32).uniform_(
             self.log_aspect_range[0], self.log_aspect_range[1], generator=self.rng
-        )
+        ), N)
         aspect = log_aspect.exp()
 
         area = area_frac * float(H * W)
@@ -147,12 +148,12 @@ class RandomErasing(BatchAugment):
         ew = (area / aspect).sqrt().round().long().clamp_(1, W)
 
         # Sample top-left in [0, dim - extent], inclusive of the lower bound.
-        u_top = torch.empty(N, device=device, dtype=torch.float32).uniform_(
+        u_top = self._expand(torch.empty(NG, device=device, dtype=torch.float32).uniform_(
             0.0, 1.0, generator=self.rng
-        )
-        u_left = torch.empty(N, device=device, dtype=torch.float32).uniform_(
+        ), N)
+        u_left = self._expand(torch.empty(NG, device=device, dtype=torch.float32).uniform_(
             0.0, 1.0, generator=self.rng
-        )
+        ), N)
         top = (u_top * (H - eh + 1).float()).long().clamp_(0, H - 1)
         left = (u_left * (W - ew + 1).float()).long().clamp_(0, W - 1)
 
@@ -174,8 +175,9 @@ class RandomErasing(BatchAugment):
         if self.mode == "zeros":
             fill_tensor = None
         elif self.mode == "random_color_uniform":
-            fill_tensor = self._sample_fill((N, C, 1, 1), b.dtype, device)
-        else:  # random_color_pixel
+            # one colour per window when seed_repeat > 1 (rectangle is already shared)
+            fill_tensor = self._expand(self._sample_fill((NG, C, 1, 1), b.dtype, device), N)
+        else:  # random_color_pixel: per-pixel noise is drawn per frame, also under seed_repeat
             n_fill = int(mask.sum().item()) * C
             fill_tensor = self._sample_fill((n_fill,), b.dtype, device)
 

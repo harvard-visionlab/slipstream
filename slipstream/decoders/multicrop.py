@@ -13,6 +13,8 @@ from typing import Any
 import copy
 
 import numpy as np
+
+from slipstream.decoders._window import repeat_params
 import torch
 
 from numba import njit
@@ -321,7 +323,7 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
                 log_ratio_min, log_ratio_max,
                 batch_seed,
             )
-            crop_params_list.append(params)
+            crop_params_list.append(repeat_params(params, self._decoder.seed_repeat))
 
         all_same_size = len(set(self._crop_sizes)) == 1
 
@@ -568,6 +570,12 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                 x_pos_list.append(x_pos)
                 y_pos_list.append(y_pos)
 
+            T = getattr(self._decoder, 'seed_repeat', 1)
+            if T > 1:                                   # windows: share size / position across frames
+                params = repeat_params(params, T)
+                target_sizes_arr = repeat_params(target_sizes_arr, T)
+                x_pos_list[-1] = repeat_params(x_pos_list[-1], T)
+                y_pos_list[-1] = repeat_params(y_pos_list[-1], T)
             crop_params_list.append(params)
             target_sizes_list.append(target_sizes_arr)
 

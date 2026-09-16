@@ -25,7 +25,7 @@ class RandomHorizontalFlip(BatchAugment):
 
     def before_call(self, b, **kwargs):
         n = b.shape[0] if (hasattr(b, "shape") and len(b.shape) == 4) else 1
-        self.do = mask_tensor(b.new_ones(n), p=self.p, rng=self.rng)
+        self.do = self._expand(mask_tensor(b.new_ones(self._ng(n)), p=self.p, rng=self.rng), n)
 
         if "flip_val" in kwargs:
             flip_val = kwargs["flip_val"].to(b.device, dtype=b.dtype, non_blocking=True)
@@ -81,19 +81,20 @@ class RandomRotate(BatchAugment):
 
     def before_call(self, b, **kwargs):
         n = b.shape[0] if (hasattr(b, "shape") and len(b.shape) == 4) else 1
-        self.do = mask_tensor(b.new_ones(n), p=self.p, rng=self.rng)
+        ng = self._ng(n)
+        self.do = self._expand(mask_tensor(b.new_ones(ng), p=self.p, rng=self.rng), n)
 
         if self.angles is not None:
             if self.angles.device != b.device:
                 self.angles = self.angles.to(b.device)
-            self.deg = self.angles[
-                torch.randint(0, len(self.angles), (n,), generator=self.rng, device=b.device)
-            ] * self.do
+            self.deg = self._expand(self.angles[
+                torch.randint(0, len(self.angles), (ng,), generator=self.rng, device=b.device)
+            ], n) * self.do
         else:
-            self.deg = b.new(n).uniform_(-self.max_deg, self.max_deg, generator=self.rng) * self.do
+            self.deg = self._expand(b.new(ng).uniform_(-self.max_deg, self.max_deg, generator=self.rng), n) * self.do
 
-        self.xs = b.new(n).uniform_(self.x_range[0], self.x_range[1], generator=self.rng)
-        self.ys = b.new(n).uniform_(self.y_range[0], self.y_range[1], generator=self.rng)
+        self.xs = self._expand(b.new(ng).uniform_(self.x_range[0], self.x_range[1], generator=self.rng), n)
+        self.ys = self._expand(b.new(ng).uniform_(self.y_range[0], self.y_range[1], generator=self.rng), n)
         self.mat = F._prepare_mat(b, F.rotate_mat(self.deg, self.xs, self.ys))
 
         if any(kwargs):
@@ -142,13 +143,14 @@ class RandomZoom(BatchAugment):
 
     def before_call(self, b, **kwargs):
         n = b.shape[0] if (hasattr(b, "shape") and len(b.shape) == 4) else 1
-        self.do = mask_tensor(b.new_ones(n), p=self.p, rng=self.rng)
+        ng = self._ng(n)
+        self.do = self._expand(mask_tensor(b.new_ones(ng), p=self.p, rng=self.rng), n)
         self.zoom = (
-            b.new(n).uniform_(self.zoom_range[0], self.zoom_range[1], generator=self.rng) * self.do
+            self._expand(b.new(ng).uniform_(self.zoom_range[0], self.zoom_range[1], generator=self.rng), n) * self.do
             + (1 - self.do)
         )
-        self.xs = b.new(n).uniform_(self.x_range[0], self.x_range[1], generator=self.rng)
-        self.ys = b.new(n).uniform_(self.y_range[0], self.y_range[1], generator=self.rng)
+        self.xs = self._expand(b.new(ng).uniform_(self.x_range[0], self.x_range[1], generator=self.rng), n)
+        self.ys = self._expand(b.new(ng).uniform_(self.y_range[0], self.y_range[1], generator=self.rng), n)
         self.mat = F._prepare_mat(b, F.zoom_mat(self.zoom, self.xs, self.ys))
 
         if any(kwargs):
@@ -200,13 +202,15 @@ class RandomRotateObject(BatchAugment):
 
     def before_call(self, b, **kwargs):
         n = b.shape[0] if (hasattr(b, "shape") and len(b.shape) == 4) else 1
-        self.do = mask_tensor(b.new_ones(n), p=self.p)
-        self.deg = b.new(n).uniform_(-self.max_deg, self.max_deg) * self.do
-        self.xs = b.new(n).uniform_(self.cx_range[0], self.cx_range[1]) * self.do + (1 - self.do) * 0.5
-        self.ys = b.new(n).uniform_(self.cy_range[0], self.cy_range[1]) * self.do + (1 - self.do) * 0.5
-        self.scale = b.new(n).uniform_(self.scale_range[0], self.scale_range[1]) * self.do + (1 - self.do)
-        self.dest_x = b.new(n).uniform_(self.destx_range[0], self.destx_range[1]) * self.do + (1 - self.do) * 0.5
-        self.dest_y = b.new(n).uniform_(self.desty_range[0], self.desty_range[1]) * self.do + (1 - self.do) * 0.5
+        ng = self._ng(n)
+        u = lambda lo, hi: self._expand(b.new(ng).uniform_(lo, hi, generator=self.rng), n)
+        self.do = self._expand(mask_tensor(b.new_ones(ng), p=self.p, rng=self.rng), n)
+        self.deg = u(-self.max_deg, self.max_deg) * self.do
+        self.xs = u(self.cx_range[0], self.cx_range[1]) * self.do + (1 - self.do) * 0.5
+        self.ys = u(self.cy_range[0], self.cy_range[1]) * self.do + (1 - self.do) * 0.5
+        self.scale = u(self.scale_range[0], self.scale_range[1]) * self.do + (1 - self.do)
+        self.dest_x = u(self.destx_range[0], self.destx_range[1]) * self.do + (1 - self.do) * 0.5
+        self.dest_y = u(self.desty_range[0], self.desty_range[1]) * self.do + (1 - self.do) * 0.5
 
         mat = F.rotate_object_mat(self.deg, self.xs, self.ys, self.scale, self.dest_x, self.dest_y)
         self.mat = F._prepare_mat(b, mat)

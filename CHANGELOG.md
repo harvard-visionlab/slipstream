@@ -4,6 +4,36 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.7.0] - 2026-09-16
+
+### Added
+
+- `SlipstreamLoader(window=(T, stride))`: sequence windows. `indices` are anchors; for each
+  anchor `a` the loader reads records `a, a+stride, ..., a+(T-1)*stride` and returns every
+  field folded to `[B, T, ...]` (tensors and arrays reshape, string lists nest, raw bytes
+  dicts fold `data`/`sizes`). `batch['_indices']` is `[B, T]`, `batch['_anchors']` is `[B]`.
+  Shuffle, distributed sharding and `drop_last` operate on anchors; `batch_size` counts
+  windows; `len(loader)` counts anchor batches. Prefetch banks hold `batch_size * T` rows.
+  `warmup_cache()` warms every record of every window. `window=None` / `(1, 1)` is the
+  previous behaviour exactly.
+- Window-consistent augmentation: every decoder and `BatchAugment` transform that draws
+  per-sample random parameters carries `seed_repeat` (set by the loader from `T`). Crop
+  params (`NumbaBatchDecoder`, `YUV420NumbaBatchDecoder`, GPU decoder, multi-crop wrappers)
+  and per-sample draws in flip / rotate / zoom / rotate-object / color jitter (HSV, YIQ) /
+  grayscale / blur / solarization / patch shuffle / brightness / contrast / erasing / embed
+  are drawn once per window and shared by its T frames, so a seeded run reproduces the
+  same anchor order and the same pixels. `slipstream.decoders._window` holds the helpers.
+- Fixed-shape array field types `"<dtype>[d0,d1,...]"` (e.g. `"float32[7]"`, `"int16[2,3]"`)
+  in writer, storage, parallel-build merge and `verify()`; stored as one `(N, d0, ...)`
+  `.npy`, returned as `[B, d0, ...]` (or `[B, T, d0, ...]`) tensors. Readers that report
+  `np.ndarray` values have the type inferred from the first sample.
+- `benchmarks/bench_window_loader.py`: windows/s and frames/s for a frame store.
+
+### Fixed
+
+- `SlipstreamLoader.shutdown()` / `__del__` no longer raise when `__init__` failed before
+  the prefetch worker state existed.
+
 ## [0.6.0] - 2026-09-12
 
 ### Added

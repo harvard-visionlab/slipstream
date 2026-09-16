@@ -57,7 +57,8 @@ class ColorJitter(BatchAugment):
     def before_call(self, b, **kwargs):
         self.do = any(kwargs) or self.p == 1.0 or torch.rand(1, generator=self.rng).item() < self.p
         n = b.shape[0] if len(b.shape) == 4 else 1
-        h, s, v, c = self.sample_params(b, n, self.hue, self.saturation, self.value, self.contrast, self.rng)
+        h, s, v, c = self.sample_params(b, self._ng(n), self.hue, self.saturation, self.value, self.contrast, self.rng)
+        h, s, v, c = (self._expand(x, n) if x is not None else None for x in (h, s, v, c))
         self.h = kwargs.get("h", h)
         self.s = kwargs.get("s", s)
         self.v = kwargs.get("v", v)
@@ -115,9 +116,10 @@ class RandomColorJitter(BatchAugment):
         return h, s, v, c
 
     def before_call(self, b, **kwargs):
-        self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng)
-        n = len(self.idx)
-        h, s, v, c = self.sample_params(b, n, self.hue, self.saturation, self.value, self.contrast, self.rng)
+        self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng, group=self.seed_repeat)
+        n = len(self.idx)      # selected samples come in whole windows (see mask_batch)
+        h, s, v, c = self.sample_params(b, self._ng(n), self.hue, self.saturation, self.value, self.contrast, self.rng)
+        h, s, v, c = (self._expand(x, n) if x is not None else None for x in (h, s, v, c))
         self.h = h.to(b.device, non_blocking=True) if h is not None else h
         self.s = s.to(b.device, non_blocking=True) if s is not None else s
         self.v = v.to(b.device, non_blocking=True) if v is not None else v
@@ -186,11 +188,11 @@ class RandomColorJitterYIQ(BatchAugment):
 
     def before_call(self, batch, **kwargs):
         self._init_rng(batch.device)
-        self.do, self.idx = mask_batch(batch, p=self.p, rng=self.rng)
+        self.do, self.idx = mask_batch(batch, p=self.p, rng=self.rng, group=self.seed_repeat)
         n = len(self.idx)
-        h, s, v, b, c = self.sample_params(
-            batch, n, self.hue, self.saturation, self.value, self.brightness, self.contrast
-        )
+        h, s, v, b, c = (self._expand(x, n) for x in self.sample_params(
+            batch, self._ng(n), self.hue, self.saturation, self.value, self.brightness, self.contrast
+        ))
         self.h = h
         self.s = s
         self.v = v

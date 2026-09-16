@@ -206,6 +206,7 @@ class SlipstreamLoader:
         verbose: bool = True,
         use_threading: bool = True,
         after_batch_transforms: list[Callable] | None = None,
+        window: int | tuple[int, int] | None = None,
     ) -> None:
         """Initialize SlipstreamLoader.
 
@@ -263,6 +264,18 @@ class SlipstreamLoader:
                 callable receives ``batch: dict`` and returns a (possibly
                 modified) ``batch: dict``. Use for batch-level ops that
                 consume multiple fields (e.g. Mixup / CutMix on image+label).
+                With ``window`` set, they see the folded ``[B, T, ...]`` batch.
+            window: Sequence windows ``(T, stride)`` (or ``T`` for stride 1).
+                ``indices`` are then *anchors*: for each anchor ``a`` the loader
+                reads records ``a, a+stride, ..., a+(T-1)*stride`` and returns
+                every field with a leading ``[B, T, ...]``. Shuffle, distributed
+                sharding and drop_last work on anchors; ``batch_size`` counts
+                windows. Per-sample augmentation parameters (crop, flip, color,
+                ...) are drawn once per window and shared by its T frames, so a
+                seeded run is reproducible pixel for pixel. If ``indices`` is
+                None, every record ``a`` with ``a+(T-1)*stride < len(cache)`` is
+                an anchor. ``batch['_indices']`` is ``[B, T]`` record indices and
+                ``batch['_anchors']`` the ``[B]`` anchors.
         """
         self.dataset = dataset
         self.batch_size = batch_size
@@ -271,6 +284,18 @@ class SlipstreamLoader:
         self.indices = np.asarray(indices, dtype=np.int64) if indices is not None else None
         self.drop_last = drop_last
         self._epoch = 0
+
+        # Window (sequence) sampling: T records per sample, `stride` apart
+        if window is None:
+            T, stride = 1, 1
+        elif isinstance(window, int):
+            T, stride = window, 1
+        else:
+            T, stride = int(window[0]), int(window[1])
+        if T < 1 or stride < 1:
+            raise ValueError(f"window must be (T >= 1, stride >= 1), got {window!r}")
+        self.window_size = T
+        self.window_stride = stride
 
         # Distributed setup — auto-detect if torch.distributed is initialized
         if not distributed:
@@ -561,6 +586,25 @@ class SlipstreamLoader:
             if f not in self.exclude_fields
         ]
 
+        # Windows: anchors must leave room for the whole window, and every
+        # random augmentation must draw its parameters once per window.
+        if self.window_size > 1:
+            span = (self.window_size - 1) * self.window_stride
+            if self.indices is not None:
+                bad = self.indices[(self.indices < 0) | (self.indices + span >= len(self.cache))]
+                if len(bad):
+                    raise ValueError(
+                        f"{len(bad)} anchor(s) leave no room for a window of {self.window_size} "
+                        f"records at stride {self.window_stride} (e.g. anchor {int(bad[0])}, "
+                        f"cache has {len(self.cache)} records)"
+                    )
+            elif len(self.cache) <= span:
+                raise ValueError(
+                    f"cache has {len(self.cache)} records, too few for a window of "
+                    f"{self.window_size} at stride {self.window_stride}"
+                )
+        self._propagate_seed_repeat(self.window_size)
+
         # Pre-allocate memory banks for prefetching (only for image field)
         self._setup_prefetch_banks()
 
@@ -586,7 +630,7 @@ class SlipstreamLoader:
             indices = self.indices.copy()
             n = len(indices)
         else:
-            n = len(self.cache)
+            n = self._num_anchors()
             indices = np.arange(n, dtype=np.int64)
 
         if self.shuffle:
@@ -601,6 +645,64 @@ class SlipstreamLoader:
             indices = indices[self.rank::self.world_size]
 
         return indices
+
+    def _num_anchors(self) -> int:
+        """Number of samples (anchors when windowed) before sharding."""
+        if self.indices is not None:
+            return len(self.indices)
+        return len(self.cache) - (self.window_size - 1) * self.window_stride
+
+    def _expand_window(self, anchors: np.ndarray) -> np.ndarray:
+        """Anchors [B] -> record indices [B*T] (anchor-major: window i is rows i*T .. i*T+T-1)."""
+        if self.window_size == 1:
+            return anchors
+        offsets = np.arange(self.window_size, dtype=np.int64) * self.window_stride
+        return (anchors[:, None] + offsets[None, :]).reshape(-1)
+
+    @staticmethod
+    def _walk_transforms(obj: Any):
+        """Yield obj and everything it wraps: pipeline lists, `.transforms`, `._decoder`, `._cpu_decoder`."""
+        if obj is None:
+            return
+        if isinstance(obj, (list, tuple)):
+            for o in obj:
+                yield from SlipstreamLoader._walk_transforms(o)
+            return
+        yield obj
+        for attr in ('transforms', '_decoder', '_cpu_decoder'):
+            inner = getattr(obj, attr, None)
+            if inner is not None and inner is not obj:
+                yield from SlipstreamLoader._walk_transforms(inner)
+
+    def _propagate_seed_repeat(self, T: int) -> None:
+        """Tell every decoder / augmentation in the pipelines to share random params across T frames."""
+        for obj in self._walk_transforms(list(self.pipelines.values())):
+            if hasattr(obj, 'seed_repeat'):
+                try:
+                    obj.seed_repeat = T
+                except AttributeError:
+                    pass
+
+    def _fold_window(self, batch: dict[str, Any], num_windows: int) -> dict[str, Any]:
+        """Reshape every per-record value [B*T, ...] into [B, T, ...] (lists -> nested lists)."""
+        T = self.window_size
+        keep = {'_indices', '_anchors'}
+
+        def fold(v: Any) -> Any:
+            if isinstance(v, torch.Tensor):
+                return v.reshape(num_windows, T, *v.shape[1:]) if v.ndim >= 1 and v.shape[0] == num_windows * T else v
+            if isinstance(v, np.ndarray):
+                return v.reshape(num_windows, T, *v.shape[1:]) if v.ndim >= 1 and v.shape[0] == num_windows * T else v
+            if isinstance(v, dict):
+                return {k: fold(x) for k, x in v.items()}
+            if isinstance(v, (list, tuple)):
+                if len(v) == num_windows * T and not any(isinstance(x, (torch.Tensor, np.ndarray)) and getattr(x, 'ndim', 0) >= 3 for x in v[:1]):
+                    out = [list(v[i * T:(i + 1) * T]) for i in range(num_windows)]
+                    return out if isinstance(v, list) else tuple(out)
+                return type(v)(fold(x) for x in v)      # e.g. multi-pipeline outputs, list of decoded frames
+            return v
+
+        return {k: (v if k in keep else fold(v)) for k, v in batch.items()}
 
     def set_epoch(self, epoch: int) -> None:
         """Set epoch for deterministic shuffle ordering.
@@ -641,21 +743,22 @@ class SlipstreamLoader:
         image_storage = self._image_storage
         if image_storage is not None:
             max_size = image_storage.max_size
+            rows = self.batch_size * self.window_size      # one row per record of the expanded batch
 
             self._data_banks = [
-                np.zeros((self.batch_size, max_size), dtype=np.uint8)
+                np.zeros((rows, max_size), dtype=np.uint8)
                 for _ in range(num_slots)
             ]
             self._size_banks = [
-                np.zeros(self.batch_size, dtype=np.uint64)
+                np.zeros(rows, dtype=np.uint64)
                 for _ in range(num_slots)
             ]
             self._height_banks = [
-                np.zeros(self.batch_size, dtype=np.uint32)
+                np.zeros(rows, dtype=np.uint32)
                 for _ in range(num_slots)
             ]
             self._width_banks = [
-                np.zeros(self.batch_size, dtype=np.uint32)
+                np.zeros(rows, dtype=np.uint32)
                 for _ in range(num_slots)
             ]
         else:
@@ -744,13 +847,12 @@ class SlipstreamLoader:
         for batch_idx in range(num_batches):
             start = batch_idx * self.batch_size
             end = min(start + self.batch_size, len(indices))
-            batch_indices = indices[start:end]
+            anchors = indices[start:end]
+            batch_indices = self._expand_window(anchors)     # records to read ([B*T] when windowed)
             actual_size = len(batch_indices)
 
             # Build output batch
-            batch = {
-                '_indices': torch.from_numpy(batch_indices).to(self._device_str),
-            }
+            batch = self._index_fields(anchors, batch_indices)
 
             # Load and add image data
             if has_image_field:
@@ -801,17 +903,29 @@ class SlipstreamLoader:
                 else:
                     batch[field_name] = field_data
 
+            if self.window_size > 1:
+                batch = self._fold_window(batch, len(anchors))
             for transform in self.after_batch_transforms:
                 batch = transform(batch)
 
             yield batch
 
+    def _index_fields(self, anchors: np.ndarray, batch_indices: np.ndarray) -> dict[str, Any]:
+        """The bookkeeping entries of a batch dict: '_indices' ([B] or [B, T] record indices), '_anchors' when windowed."""
+        if self.window_size == 1:
+            return {'_indices': torch.from_numpy(batch_indices).to(self._device_str)}
+        rec = torch.from_numpy(batch_indices.reshape(len(anchors), self.window_size)).to(self._device_str)
+        return {'_indices': rec, '_anchors': torch.from_numpy(anchors).to(self._device_str)}
+
     def _stop_worker(self) -> None:
         """Stop any running prefetch worker and wait for it to finish."""
-        if self._stop_event is not None:
-            self._stop_event.set()
-        if self._worker_thread is not None and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=5.0)
+        # getattr: shutdown()/__del__ may run on a loader whose __init__ raised early
+        ev = getattr(self, '_stop_event', None)
+        if ev is not None:
+            ev.set()
+        th = getattr(self, '_worker_thread', None)
+        if th is not None and th.is_alive():
+            th.join(timeout=5.0)
         self._worker_thread = None
         self._stop_event = None
 
@@ -852,7 +966,8 @@ class SlipstreamLoader:
 
                 start = batch_idx * self.batch_size
                 end = min(start + self.batch_size, len(indices))
-                batch_indices = indices[start:end]
+                anchors = indices[start:end]
+                batch_indices = self._expand_window(anchors)     # records to read ([B*T] when windowed)
                 actual_batch_size = len(batch_indices)
 
                 # Load image data directly into pre-allocated buffers (ZERO-COPY!)
@@ -898,6 +1013,7 @@ class SlipstreamLoader:
                 output_queue.put((
                     current_slot,
                     actual_batch_size,
+                    anchors,
                     batch_indices,
                     other_fields,
                 ))
@@ -915,12 +1031,10 @@ class SlipstreamLoader:
                 if result is None:
                     break
 
-                slot, actual_size, batch_indices, other_fields = result
+                slot, actual_size, anchors, batch_indices, other_fields = result
 
                 # Build output batch
-                batch = {
-                    '_indices': torch.from_numpy(batch_indices).to(self._device_str),
-                }
+                batch = self._index_fields(anchors, batch_indices)
 
                 # Access image data from pre-allocated banks using slot index
                 if has_image_field:
@@ -953,6 +1067,8 @@ class SlipstreamLoader:
                         # Strings or other types - keep as-is
                         batch[field_name] = field_data
 
+                if self.window_size > 1:
+                    batch = self._fold_window(batch, len(anchors))
                 for transform in self.after_batch_transforms:
                     batch = transform(batch)
 
@@ -969,8 +1085,8 @@ class SlipstreamLoader:
             self._worker_thread = None
 
     def __len__(self) -> int:
-        """Return number of batches per epoch."""
-        total = len(self.indices) if self.indices is not None else len(self.cache)
+        """Return number of batches per epoch (batches of anchors when windowed)."""
+        total = self._num_anchors()
         if self.distributed:
             per_rank = math.ceil(total / self.world_size)
         else:
@@ -982,7 +1098,7 @@ class SlipstreamLoader:
     def shutdown(self) -> None:
         """Release resources."""
         self._stop_worker()
-        for field_name, pipeline in self.pipelines.items():
+        for field_name, pipeline in getattr(self, 'pipelines', {}).items():
             if field_name in self._multi_pipeline_fields:
                 for sub_pipeline in pipeline:
                     for transform in sub_pipeline:
@@ -1044,7 +1160,8 @@ class SlipstreamLoader:
                 ``indices`` (the full subset, not this rank's shard); if the
                 loader has none, the whole cache is read. Pass
                 ``np.arange(len(loader.cache))`` to force a full read on a
-                subset loader.
+                subset loader. With ``window`` set these are anchors and every
+                record of every window is warmed.
 
         Returns:
             dict with: elapsed_sec, total_bytes, throughput_mb_s, cache_dir,
@@ -1060,7 +1177,12 @@ class SlipstreamLoader:
         if indices is None:
             indices = self.indices
         if indices is not None:
-            indices = np.unique(np.asarray(indices, dtype=np.int64))
+            indices = np.asarray(indices, dtype=np.int64)
+            if self.window_size > 1:                     # anchors -> every record of every window
+                indices = self._expand_window(indices)
+            indices = np.unique(indices)
+        elif self.window_size > 1:
+            indices = np.arange(len(self.cache), dtype=np.int64)   # windows over all anchors cover the whole cache
 
         if indices is None:
             # Full read: every data file in the cache dir
@@ -1200,6 +1322,10 @@ class SlipstreamLoader:
             f"    indices=subset ({len(self.indices):,} of {len(self.cache):,} total),\n"
             if self.indices is not None else ""
         )
+        window_str = (
+            f"    window=(T={self.window_size}, stride={self.window_stride}),\n"
+            if self.window_size > 1 else ""
+        )
         seed_str = f"    seed={self.seed},\n" if self.seed is not None else ""
         dist_str = (
             f"    distributed=True (rank={self.rank}, world_size={self.world_size}),\n"
@@ -1212,6 +1338,7 @@ class SlipstreamLoader:
             f"    batch_size={self.batch_size},\n"
             f"    shuffle={self.shuffle},\n"
             f"{indices_str}"
+            f"{window_str}"
             f"{seed_str}"
             f"{dist_str}"
             f"    pipelines={pipelines_str},\n"

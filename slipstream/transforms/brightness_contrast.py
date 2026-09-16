@@ -23,10 +23,10 @@ class RandomBrightness(BatchAugment):
             self.rng.manual_seed(self.seed)
 
     def before_call(self, b, **kwargs):
-        self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng)
-        self.sf = torch.empty(len(self.idx), device=b.device, dtype=b.dtype).uniform_(
+        self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng, group=self.seed_repeat)
+        self.sf = self._expand(torch.empty(self._ng(len(self.idx)), device=b.device, dtype=b.dtype).uniform_(
             self.scale_range[0], self.scale_range[1], generator=self.rng
-        )
+        ), len(self.idx))
 
     def last_params(self):
         return {"do": self.do, "idx": self.idx, "sf": self.sf}
@@ -39,13 +39,14 @@ class RandomBrightness(BatchAugment):
 
     def __call__(self, b, **kwargs):
         n = b.shape[0] if b.ndim == 4 else 1
-        sf = torch.empty(n, device=b.device, dtype=b.dtype).uniform_(
+        ng = self._ng(n)
+        sf = self._expand(torch.empty(ng, device=b.device, dtype=b.dtype).uniform_(
             self.scale_range[0], self.scale_range[1], generator=self.rng
-        )
+        ), n)
 
         if self.p < 1.0:
             # Partial application: mask unselected images to scale_factor=1.0
-            mask = torch.empty(n, device=b.device, dtype=b.dtype).bernoulli_(self.p, generator=self.rng)
+            mask = self._expand(torch.empty(ng, device=b.device, dtype=b.dtype).bernoulli_(self.p, generator=self.rng), n)
             sf = sf * mask + (1.0 - mask)
 
         # Store params for replay
@@ -84,10 +85,10 @@ class RandomContrast(BatchAugment):
             self.rng.manual_seed(self.seed)
 
     def before_call(self, b, **kwargs):
-        self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng)
-        self.sf = torch.empty(len(self.idx), device=b.device, dtype=b.dtype).uniform_(
+        self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng, group=self.seed_repeat)
+        self.sf = self._expand(torch.empty(self._ng(len(self.idx)), device=b.device, dtype=b.dtype).uniform_(
             self.scale_range[0], self.scale_range[1], generator=self.rng
-        )
+        ), len(self.idx))
 
     def last_params(self):
         return {"do": self.do, "idx": self.idx, "sf": self.sf}
@@ -100,12 +101,13 @@ class RandomContrast(BatchAugment):
 
     def __call__(self, b, **kwargs):
         n = b.shape[0] if b.ndim == 4 else 1
-        sf = torch.empty(n, device=b.device, dtype=b.dtype).uniform_(
+        ng = self._ng(n)
+        sf = self._expand(torch.empty(ng, device=b.device, dtype=b.dtype).uniform_(
             self.scale_range[0], self.scale_range[1], generator=self.rng
-        )
+        ), n)
 
         if self.p < 1.0:
-            mask = torch.empty(n, device=b.device, dtype=b.dtype).bernoulli_(self.p, generator=self.rng)
+            mask = self._expand(torch.empty(ng, device=b.device, dtype=b.dtype).bernoulli_(self.p, generator=self.rng), n)
             sf = sf * mask + (1.0 - mask)  # unselected → sf=1.0 → identity
 
         # Store params for replay

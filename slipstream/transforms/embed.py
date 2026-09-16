@@ -188,22 +188,23 @@ class RandomEmbed(BatchAugment):
         self._img_w = w
 
         # Per-image fade decision
+        ng = self._ng(n)
         if self.fade_radius is not None and self.p_fade < 1.0:
-            self._do_fade = torch.bernoulli(
-                torch.full((n,), self.p_fade), generator=self.rng,
-            ).bool()
+            self._do_fade = self._expand(torch.bernoulli(
+                torch.full((ng,), self.p_fade), generator=self.rng,
+            ).bool(), n)
         elif self.fade_radius is not None:
             self._do_fade = torch.ones(n, dtype=torch.bool)
         else:
             self._do_fade = torch.zeros(n, dtype=torch.bool)
 
         if self._position_mode == "range":
-            x_frac = torch.empty(n, device=b.device, dtype=b.dtype).uniform_(
+            x_frac = self._expand(torch.empty(ng, device=b.device, dtype=b.dtype).uniform_(
                 self.x_range[0], self.x_range[1], generator=self.rng,
-            )
-            y_frac = torch.empty(n, device=b.device, dtype=b.dtype).uniform_(
+            ), n)
+            y_frac = self._expand(torch.empty(ng, device=b.device, dtype=b.dtype).uniform_(
                 self.y_range[0], self.y_range[1], generator=self.rng,
-            )
+            ), n)
             slack_x = max(0, N - w)
             slack_y = max(0, M - h)
             self._xs = (x_frac * slack_x).long()
@@ -212,9 +213,9 @@ class RandomEmbed(BatchAugment):
             self._y_frac = y_frac
 
         elif self._position_mode == "coords":
-            indices = torch.randint(
-                0, len(self.coords), (n,), generator=self.rng,
-            )
+            indices = self._expand(torch.randint(
+                0, len(self.coords), (ng,), generator=self.rng,
+            ), n)
             centers = [self.coords[i.item()] for i in indices]
             cx = torch.tensor([c[0] for c in centers], dtype=torch.long)
             cy = torch.tensor([c[1] for c in centers], dtype=torch.long)
@@ -231,9 +232,9 @@ class RandomEmbed(BatchAugment):
                     f"Available sizes: {list(self.coords_dict.keys())}"
                 )
             valid = self.coords_dict[key]
-            indices = torch.randint(
-                0, len(valid), (n,), generator=self.rng,
-            )
+            indices = self._expand(torch.randint(
+                0, len(valid), (ng,), generator=self.rng,
+            ), n)
             centers = [valid[i.item()] for i in indices]
             cx = torch.tensor([c[0] for c in centers], dtype=torch.long)
             cy = torch.tensor([c[1] for c in centers], dtype=torch.long)

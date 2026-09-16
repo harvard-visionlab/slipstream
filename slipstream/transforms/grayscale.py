@@ -52,7 +52,7 @@ class RandomGrayscale(BatchAugment):
             self.rng.manual_seed(self.seed)
 
     def before_call(self, b, **kwargs):
-        self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng)
+        self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng, group=self.seed_repeat)
 
     def last_params(self):
         return {"do": self.do, "idx": self.idx}

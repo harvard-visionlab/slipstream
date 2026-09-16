@@ -15,6 +15,8 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+
+from slipstream.decoders._window import repeat_params
 import torch
 
 from slipstream.decoders.base import BatchTransform
@@ -447,6 +449,13 @@ class DecodeRandomResizeShortCropLong(BatchTransform):
             rng_i = np.random.RandomState((batch_seed + i) % 2147483647)
             x_pos[i] = rng_i.uniform(self.x_range[0], self.x_range[1])
             y_pos[i] = rng_i.uniform(self.y_range[0], self.y_range[1])
+
+        # --- Windows: one size / position per window, shared by its frames ---
+        T = getattr(self._decoder, 'seed_repeat', 1)
+        if T > 1:
+            target_sizes = repeat_params(target_sizes, T)
+            x_pos = repeat_params(x_pos, T)
+            y_pos = repeat_params(y_pos, T)
 
         # --- Decode ---
         result = self._decoder.decode_batch_resize_short_crop_long(

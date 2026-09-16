@@ -2,11 +2,17 @@
 
 import torch
 
+from slipstream.decoders._window import expand_groups, n_groups
 
-def mask_batch(b: torch.Tensor, p=0.5, rng=None):
-    """Return (do_mask, indices) for randomly selecting images in a batch."""
+
+def mask_batch(b: torch.Tensor, p=0.5, rng=None, group: int = 1):
+    """Return (do_mask, indices) for randomly selecting images in a batch.
+
+    With ``group > 1`` (window frames), one Bernoulli draw is shared by every
+    ``group`` consecutive samples, so whole windows are selected or skipped.
+    """
     n = b.shape[0] if (hasattr(b, "shape") and len(b.shape) == 4) else 1
-    do = mask_tensor(b.new_ones(n), p=p, rng=rng)
+    do = expand_groups(mask_tensor(b.new_ones(n_groups(n, group)), p=p, rng=rng), group, n)
     idx = torch.where(do)[0]
     return do, idx
 
