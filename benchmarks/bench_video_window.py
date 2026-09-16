@@ -44,14 +44,20 @@ def main() -> None:
     ap.add_argument("--max-batches", type=int, default=50)
     ap.add_argument("--warmup-batches", type=int, default=3)
     ap.add_argument("--warm", action="store_true", help="warmup_cache(indices) first")
+    ap.add_argument("--reuse-output", action="store_true", help="ring of output buffers instead of a fresh tensor per batch")
+    ap.add_argument("--switch-interval", type=float, default=None, help="sys.setswitchinterval (GIL handoff), e.g. 0.0005")
     a = ap.parse_args()
+    if a.switch_interval:
+        import sys
+        sys.setswitchinterval(a.switch_interval)
 
     ds = SlipstreamDataset(local_dir=a.cache)   # a prebuilt .slipstream cache dir
     indices = np.load(a.indices) if a.indices else None
     inner = [RandomResizedCropBatch(a.crop, seed=1), RandomHorizontalFlip(p=0.5, seed=2)] if a.crop else None
     devices = a.device.split(",") if "," in a.device else a.device
     stage = DecodeVideoWindow(T=a.T, rate_hz=a.rate, seed=0, device=devices, output_device=a.output_device,
-                              num_workers=a.workers, num_ffmpeg_threads=a.ffmpeg_threads, resize=a.resize, transforms=inner)
+                              num_workers=a.workers, num_ffmpeg_threads=a.ffmpeg_threads, resize=a.resize, transforms=inner,
+                              reuse_output=a.reuse_output, ring_size=(a.batches_ahead or max(3, -(-(a.workers or 32) // a.batch_size))) + 2)
     ahead = a.batches_ahead or max(3, -(-stage.num_workers // a.batch_size))
     loader = SlipstreamLoader(ds, batch_size=a.batch_size, shuffle=True, seed=0, drop_last=True, indices=indices,
                               batches_ahead=ahead, image_field=a.field, pipelines={a.field: [stage]}, verbose=False)
@@ -73,7 +79,7 @@ def main() -> None:
         if i + 1 >= a.max_batches + a.warmup_batches:
             break
     dt = time.perf_counter() - (t0 or time.perf_counter())
-    print(f"T={a.T} rate={a.rate:g} B={a.batch_size} device={a.device} workers={stage.num_workers} ahead={ahead} "
+    print(f"T={a.T} rate={a.rate:g} B={a.batch_size} device={a.device} workers={stage.num_workers} ahead={ahead} reuse={a.reuse_output} "
           f"resize={a.resize} crop={a.crop} shape={shape}: {n_win / dt:,.1f} windows/s, "
           f"{n_win * a.T / dt:,.0f} frames/s over {n_win} windows ({dt:.1f} s)")
     loader.shutdown()

@@ -109,6 +109,14 @@ class DecodeVideoWindow(BatchTransform):
             ``[B*T, 3, H, W]`` frames with ``seed_repeat = T``.
         end_margin_frames: Frames at the end of a clip never requested (default 2).
         cpu_fallback: Retry a failed CUDA decode on the CPU (default True).
+        reuse_output: Recycle the ``[B, T, 3, H, W]`` output tensors through a ring of
+            ``ring_size`` buffers instead of allocating one per batch. Avoids a
+            fresh multi-hundred-MB allocation (page faults + munmap under many
+            threads) per batch. The batch's frames are then only valid until
+            ``ring_size`` batches later, like the loader's own JPEG banks: do not
+            keep references across batches (or clone). Default False.
+        ring_size: Buffers in the ring (default 4; must exceed the loader's
+            ``batches_ahead`` + 1).
         name: Output key prefix when the batch does not carry the field name.
 
     Output (a dict merged into the batch by the loader):
@@ -136,6 +144,8 @@ class DecodeVideoWindow(BatchTransform):
         transforms: list[Any] | None = None,
         end_margin_frames: int = 2,
         cpu_fallback: bool = True,
+        reuse_output: bool = False,
+        ring_size: int = 4,
         name: str = "video",
     ) -> None:
         if T < 1 or rate_hz <= 0:
@@ -161,6 +171,11 @@ class DecodeVideoWindow(BatchTransform):
         self.transforms = list(transforms or [])
         self.end_margin_frames = int(end_margin_frames)
         self.cpu_fallback = cpu_fallback
+        self.reuse_output = reuse_output
+        self.ring_size = max(2, int(ring_size))
+        self._ring: list[torch.Tensor] = []
+        self._ring_pos = 0
+        self._ring_lock = threading.Lock()
         self.name = name
 
         self._seed_counter = 0
@@ -270,7 +285,7 @@ class DecodeVideoWindow(BatchTransform):
         data, pts, t0 = self._decode_one(raw, t0_given, seed_i)
         with pend.lock:
             if pend.out is None:
-                pend.out = torch.empty((pend.B, pend.T, *data.shape[1:]), dtype=data.dtype, device=self.output_device)
+                pend.out = self._output_buffer((pend.B, pend.T, *data.shape[1:]), data.dtype)
         if tuple(data.shape) != tuple(pend.out.shape[1:]):
             raise ValueError(
                 f"frame shape {tuple(data.shape[1:])} of record {i} differs from {tuple(pend.out.shape[2:])} in the "
@@ -279,6 +294,24 @@ class DecodeVideoWindow(BatchTransform):
         pend.out[i].copy_(data)
         pend.t_sec[i] = pts
         pend.t0[i] = float(t0)
+
+    def _output_buffer(self, shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+        """A [B, T, 3, H, W] output tensor: fresh, or the next slot of the reuse ring."""
+        if not self.reuse_output:
+            return torch.empty(shape, dtype=dtype, device=self.output_device)
+        with self._ring_lock:
+            if len(self._ring) < self.ring_size:
+                buf = torch.empty(shape, dtype=dtype, device=self.output_device)
+                self._ring.append(buf)
+                return buf
+            buf = self._ring[self._ring_pos]
+            self._ring_pos = (self._ring_pos + 1) % self.ring_size
+            if tuple(buf.shape) != tuple(shape) or buf.dtype != dtype:      # last partial batch etc.
+                if buf.numel() >= int(np.prod(shape)) and buf.dtype == dtype:
+                    return buf.flatten()[: int(np.prod(shape))].view(shape)
+                buf = torch.empty(shape, dtype=dtype, device=self.output_device)
+                self._ring[(self._ring_pos - 1) % self.ring_size] = buf
+            return buf
 
     # ------------------------------------------------------------- async API
     def submit(self, batch_data: dict[str, Any]) -> _PendingBatch:
