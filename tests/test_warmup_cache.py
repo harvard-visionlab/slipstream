@@ -269,3 +269,25 @@ class TestSubsetWarmup:
             assert len(list(loader)) == 1
         finally:
             loader.shutdown()
+
+
+class TestWarmupTouch:
+    def test_touch_walks_selected_ranges_and_reports_time(self, tmp_path):
+        ds = _BigBytesDataset(cache_path=tmp_path / "cache")
+        loader = SlipstreamLoader(ds, batch_size=2, shuffle=False, drop_last=False, indices=[1, 4], verbose=False)
+        try:
+            with_touch = loader.warmup_cache(verbose=False)
+            without = loader.warmup_cache(verbose=False, touch=False)
+            assert with_touch["touch_sec"] >= 0 and without["touch_sec"] == 0
+            assert with_touch["total_bytes"] == without["total_bytes"]
+            # output unaffected
+            b = next(iter(loader))
+            n = int(b["video"]["sizes"][0])
+            assert bytes(b["video"]["data"][0, :n]) == ds._blobs[1]
+        finally:
+            loader.shutdown()
+
+    def test_touch_helper_reads_every_page_once(self):
+        from slipstream.loader import _touch_mmap_ranges
+        arr = np.arange(3 * 4096 + 100, dtype=np.uint8)          # plain array stands in for the mmap
+        _touch_mmap_ranges(arr, [(10, 3 * 4096 + 50)])           # must not raise, covers partial pages

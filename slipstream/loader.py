@@ -105,6 +105,22 @@ def _coalesce_ranges(
     return out
 
 
+def _touch_mmap_ranges(arr: np.ndarray, ranges: list[tuple[int, int]], chunk: int = 64 * 1024 * 1024) -> None:
+    """Read one byte per page of every range through `arr` (an mmap-backed uint8 array).
+
+    Populates this process's page tables for pages that are (or become) resident in the
+    page cache; a strided read touches each 4 KB page once, so the cost is one minor fault per
+    page rather than a full memory copy.
+    """
+    page = 4096
+    for start, end in ranges:
+        pos = start
+        while pos < end:
+            stop = min(pos + chunk, end)
+            arr[pos:stop:page].sum(dtype=np.uint64)     # one load per page; result discarded
+            pos = stop
+
+
 def _madvise_willneed(fpath: Path, ranges: list[tuple[int, int]] | None) -> None:
     """Best-effort MADV_WILLNEED (+ MADV_SEQUENTIAL for whole files) on ``fpath``.
 
@@ -1224,10 +1240,21 @@ class SlipstreamLoader:
         self,
         verbose: bool = True,
         indices: Sequence[int] | np.ndarray | None = None,
+        touch: bool = True,
     ) -> dict:
         """Pre-read cache files to populate OS page cache. No decoding, no pipeline execution.
 
         This makes the first epoch fast by avoiding on-demand page faults during training.
+
+        Two phases. Phase 2 reads the bytes with ``read()`` (large sequential
+        requests: fills the page cache at the storage's streaming rate). Phase 3
+        (``touch``) then walks the same ranges through *this loader's own mmap*
+        of the primary field, so the pages are mapped into this process and the
+        prefetch thread later copies records without a fault per page. The
+        touch is cheap when the pages are already cached and is what a DDP rank
+        needs even when another rank already warmed the node's page cache; on a
+        network mount whose mmap fault path is slow it is the difference between
+        the warm and the cold epoch rate.
 
         When a subset is in play (``indices`` here, or the loader's own
         ``indices``), only the byte ranges of the selected records are read
@@ -1246,10 +1273,12 @@ class SlipstreamLoader:
                 ``np.arange(len(loader.cache))`` to force a full read on a
                 subset loader. With ``window`` set these are anchors and every
                 record of every window is warmed.
+            touch: Also fault the primary field's records through this process's
+                mmap (phase 3). Default True.
 
         Returns:
             dict with: elapsed_sec, total_bytes, throughput_mb_s, cache_dir,
-            num_files, subset (bool), num_records, num_ranges
+            num_files, subset (bool), num_records, num_ranges, touch_sec
         """
         import sys
         import time
@@ -1331,8 +1360,25 @@ class SlipstreamLoader:
                             remaining -= len(chunk)
                             pbar.update(len(chunk))
         pbar.close()
-
         elapsed = time.time() - t0
+
+        # Phase 3: map the primary field's pages into THIS process (page tables), through the loader's own mmap
+        touch_sec = 0.0
+        if touch and self._image_storage is not None and hasattr(self._image_storage, '_data_array'):
+            t1 = time.time()
+            arr = self._image_storage._data_array
+            bin_path = cache_dir / f"{self._image_storage.field_name}.bin"
+            ranges = None
+            for fpath, r in plan:
+                if fpath == bin_path:
+                    ranges = r if r is not None else [(0, arr.shape[0])]
+                    break
+            if ranges is None and indices is None:
+                ranges = [(0, arr.shape[0])]
+            if ranges:
+                _touch_mmap_ranges(arr, ranges)
+            touch_sec = time.time() - t1
+
         return dict(
             elapsed_sec=elapsed,
             total_bytes=total_bytes,
@@ -1342,6 +1388,7 @@ class SlipstreamLoader:
             subset=indices is not None,
             num_records=num_records,
             num_ranges=num_ranges,
+            touch_sec=touch_sec,
         )
 
     def _warmup_plan(

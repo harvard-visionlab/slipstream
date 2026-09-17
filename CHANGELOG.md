@@ -53,7 +53,11 @@ All notable changes to slipstream are documented here. Versions follow
   oversubscribe the cores (`torch.set_num_threads(1)` per process: +19 % in one process, 16x
   across N processes that each host a stage).
 - `SlipstreamLoader`: an exception in the prefetch thread (or in an async stage's `submit`)
-  is re-raised on the main thread instead of hanging the iterator. `loader.page_cache_residency()`
+  is re-raised on the main thread instead of hanging the iterator.
+- `warmup_cache(touch=True)`: after the `read()` pass, the primary field's records are also
+  faulted through the loader's own mmap (one load per page), so the pages are mapped into
+  this process. Needed per process (each DDP rank), not per node; on a CIFS mount the
+  in-process mapping is what separates the warm epoch rate from the cold one. `loader.page_cache_residency()`
   reports how much of an epoch's bytes are in the page cache; on a network mount cold reads
   serialize (2.4 windows/s cold vs 90+ warm), so `warmup_cache()` first.
 - `RandomResizedCropBatch`: per-image random resized crop on decoded tensors
