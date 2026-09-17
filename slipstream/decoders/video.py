@@ -105,8 +105,10 @@ class DecodeVideoWindow(BatchTransform):
             ``num_workers=56`` runs 40 CPU decoders and 8 NVDEC sessions per GPU.
         output_device: Where the ``[B, T, 3, H, W]`` batch lives (default: the
             first entry of ``device``).
-        num_workers: Decoder threads (default: CPU count, capped at 32;
-            4 per CUDA device).
+        num_workers: Decoder threads (default: ``os.cpu_count()`` hardware threads
+            for CPU decoding — SMT helps because decoders stall on memory — plus
+            4 per CUDA device). Measured on a 32-core/64-thread host: 64 workers
+            124 windows/s vs 48 workers 111 (T=120, resize 224).
         num_ffmpeg_threads: FFmpeg threads per decoder (default 1: parallelism
             comes from the pool).
         seek_mode: torchcodec seek mode, ``"exact"`` (default) or ``"approximate"``.
@@ -116,14 +118,13 @@ class DecodeVideoWindow(BatchTransform):
             ``[B*T, 3, H, W]`` frames with ``seed_repeat = T``.
         end_margin_frames: Frames at the end of a clip never requested (default 2).
         cpu_fallback: Retry a failed CUDA decode on the CPU (default True).
-        reuse_output: Recycle the ``[B, T, 3, H, W]`` output tensors through a ring of
-            ``ring_size`` buffers instead of allocating one per batch. Avoids a
-            fresh multi-hundred-MB allocation (page faults + munmap under many
-            threads) per batch. The batch's frames are then only valid until
-            ``ring_size`` batches later, like the loader's own JPEG banks: do not
-            keep references across batches (or clone). Default False.
-        ring_size: Buffers in the ring (default 4; must exceed the loader's
-            ``batches_ahead`` + 1).
+        reuse_output: Recycle the output tensors through a ring of buffers instead
+            of allocating a fresh multi-hundred-MB tensor per batch (default True,
+            +3 %). A batch's frames are then overwritten ``ring_size`` batches
+            later, like the loader's own JPEG banks: do not keep references
+            across batches without ``.clone()``. The loader sizes the ring to its
+            ``batches_ahead`` automatically (``set_batches_ahead``).
+        ring_size: Minimum buffers in the ring (default 6).
         name: Output key prefix when the batch does not carry the field name.
 
     Output (a dict merged into the batch by the loader):
@@ -157,8 +158,8 @@ class DecodeVideoWindow(BatchTransform):
         transforms: list[Any] | None = None,
         end_margin_frames: int = 2,
         cpu_fallback: bool = True,
-        reuse_output: bool = False,
-        ring_size: int = 4,
+        reuse_output: bool = True,
+        ring_size: int = 6,
         name: str = "video",
     ) -> None:
         if T < 1 or rate_hz <= 0:
@@ -176,8 +177,9 @@ class DecodeVideoWindow(BatchTransform):
         if num_workers is None:
             n_cuda = sum(d.type == "cuda" for d in self.devices)
             n_cpu = len(self.devices) - n_cuda
-            num_workers = 4 * n_cuda + (min(32, os.cpu_count() or 4) if n_cpu else 0)
+            num_workers = 4 * n_cuda + ((os.cpu_count() or 4) if n_cpu else 0)
         self.num_workers = max(1, int(num_workers))
+        self._omp_warned = False
         self.num_ffmpeg_threads = int(num_ffmpeg_threads)
         self.seek_mode = seek_mode
         self.resize = resize
@@ -199,6 +201,28 @@ class DecodeVideoWindow(BatchTransform):
         self._tls = threading.local()                      # per-worker device
         self._thread_counter = itertools.count()
         self._set_inner_seed_repeat()
+
+    def set_batches_ahead(self, n: int) -> None:
+        """Called by SlipstreamLoader: the output ring must outlive the loader's prefetch depth."""
+        self.ring_size = max(self.ring_size, int(n) + 2)
+
+    def _warn_omp_once(self) -> None:
+        """Torch intra-op threads inside torchcodec's ops oversubscribe the cores when many decoder
+        threads run: measured -19 % at 48 workers on a 32-core host. Process-global, so the user decides."""
+        if self._omp_warned:
+            return
+        self._omp_warned = True
+        n_cpu_workers = sum(d.type == "cpu" for d in self.devices) and self.num_workers
+        if n_cpu_workers >= 8 and torch.get_num_threads() > 1:
+            import warnings
+            warnings.warn(
+                f"DecodeVideoWindow: {self.num_workers} CPU decoder threads with torch.get_num_threads()="
+                f"{torch.get_num_threads()}: torchcodec's tensor ops use torch's intra-op thread pool, and the "
+                f"cores oversubscribe (~20 % slower in one process; in multi-process trainers N ranks decode at "
+                f"the speed of one). Call torch.set_num_threads(1) in every process that hosts this stage, or set "
+                f"OMP_NUM_THREADS=1 before torch is imported.",
+                stacklevel=3,
+            )
 
     def _init_thread(self) -> None:
         """Pin each pool thread to one device (round-robin over `devices`)."""
@@ -336,6 +360,7 @@ class DecodeVideoWindow(BatchTransform):
     def submit(self, batch_data: dict[str, Any]) -> _PendingBatch:
         """Queue the decodes for a batch (called by the loader's prefetch thread). Copies the bytes out."""
         pool = self._ensure_pool()
+        self._warn_omp_once()
         data, sizes = batch_data["data"], batch_data["sizes"]
         B = len(sizes)
         field = batch_data.get("field") or self.name

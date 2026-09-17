@@ -611,6 +611,8 @@ class SlipstreamLoader:
             if hasattr(first, 'submit') and hasattr(first, 'collect'):
                 self._async_stage = first
                 self._async_rest = list(prim[1:])
+                if hasattr(first, 'set_batches_ahead'):
+                    first.set_batches_ahead(self.batches_ahead)   # its output ring must outlive our prefetch depth
 
         # Determine which fields to load
         self._fields_to_load = [
@@ -1015,7 +1017,15 @@ class SlipstreamLoader:
             """Background thread for async batch loading.
 
             Mimics FFCV's EpochIterator: JIT runs with nogil=True, releasing GIL.
+            Any exception is handed to the consumer through the queue so the
+            main thread never blocks on a dead worker.
             """
+            try:
+                _prefetch_loop()
+            except BaseException as exc:          # noqa: BLE001 - re-raised on the main thread
+                output_queue.put(exc)
+
+        def _prefetch_loop():
             current_slot = 0
 
             for batch_idx in range(num_batches):
@@ -1097,6 +1107,8 @@ class SlipstreamLoader:
                 result = output_queue.get()
                 if result is None:
                     break
+                if isinstance(result, BaseException):
+                    raise result
 
                 slot, actual_size, anchors, batch_indices, other_fields, (start, end), pending = result
 

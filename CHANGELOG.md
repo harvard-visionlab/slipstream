@@ -43,7 +43,19 @@ All notable changes to slipstream are documented here. Versions follow
   `[B, T, 3, H, W]` output. `device` may be a list of CUDA devices (threads pinned per
   device, results gathered on `output_device`).
 - `SlipstreamLoader`: async stage protocol. If the primary field's pipeline starts with an
-  object exposing `submit`/`collect`, decoding is pipelined across `batches_ahead` batches.
+  object exposing `submit`/`collect`, decoding is pipelined across `batches_ahead` batches
+  (and `set_batches_ahead` is called so the stage can size its buffers).
+- Video stage tuning, measured on a 32-core/64-thread host at T=120, 15 Hz, resize 224:
+  default `num_workers = os.cpu_count()` (64 workers 124 windows/s vs 48 workers 111),
+  one ffmpeg thread per decoder, frames kept in native HWC memory with a CHW view (a
+  per-window transpose was 15x a memcpy), output buffers recycled through a ring
+  (`reuse_output=True`), and a one-time warning when torch's intra-op threads would
+  oversubscribe the cores (`torch.set_num_threads(1)` per process: +19 % in one process, 16x
+  across N processes that each host a stage).
+- `SlipstreamLoader`: an exception in the prefetch thread (or in an async stage's `submit`)
+  is re-raised on the main thread instead of hanging the iterator. `loader.page_cache_residency()`
+  reports how much of an epoch's bytes are in the page cache; on a network mount cold reads
+  serialize (2.4 windows/s cold vs 90+ warm), so `warmup_cache()` first.
 - `RandomResizedCropBatch`: per-image random resized crop on decoded tensors
   (uint8 or float), `seed_repeat`-aware, replayable.
 - `SlipstreamLoader(sample_data={name: array})`: per-sample side arrays aligned with

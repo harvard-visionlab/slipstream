@@ -251,7 +251,7 @@ class TestAsyncPipelining:
     def test_reuse_output_ring_gives_same_frames(self, tmp_path):
         ds = MockVideoStore(cache_path=tmp_path / "cache")
         def run(reuse):
-            stage = DecodeVideoWindow(T=4, rate_hz=10.0, seed=3, num_workers=3, reuse_output=reuse, ring_size=6)
+            stage = DecodeVideoWindow(T=4, rate_hz=10.0, seed=3, num_workers=3, reuse_output=reuse, ring_size=2)
             loader = SlipstreamLoader(ds, batch_size=2, shuffle=True, seed=1, drop_last=False, verbose=False,
                                       batches_ahead=2, pipelines={"video": [stage]})
             try:
@@ -260,3 +260,19 @@ class TestAsyncPipelining:
                 loader.shutdown()
         for (i0, f0), (i1, f1) in zip(run(False), run(True)):
             assert torch.equal(i0, i1) and torch.equal(f0, f1)
+
+
+class TestWorkerErrors:
+    def test_prefetch_thread_exception_reaches_main_thread(self, tmp_path):
+        """A stage raising inside submit() (prefetch thread) must surface, not hang the iterator."""
+        ds = MockVideoStore(cache_path=tmp_path / "cache")
+        stage = DecodeVideoWindow(T=4, rate_hz=10.0, seed=1, num_workers=2)
+        def boom(batch_data):
+            raise RuntimeError("submit failed")
+        stage.submit = boom
+        loader = SlipstreamLoader(ds, batch_size=2, shuffle=False, verbose=False, pipelines={"video": [stage]})
+        try:
+            with pytest.raises(RuntimeError, match="submit failed"):
+                next(iter(loader))
+        finally:
+            loader.shutdown()
