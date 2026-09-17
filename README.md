@@ -111,8 +111,10 @@ for batch in loader:
 
 Call `torch.set_num_threads(1)` in every process that hosts the stage (torchcodec's tensor
 ops use torch's intra-op pool; with many decoder threads the cores oversubscribe, and in a
-multi-process trainer N ranks otherwise decode at the speed of one), and call
-`loader.warmup_cache()` before an epoch when the store lives on a network mount.
+multi-process trainer N ranks otherwise decode at the speed of one). Train from a store on
+node-local disk: on a CIFS mount every process starts cold (the client drops cached pages on
+close) and the first pass runs at about half speed; `loader.warmup_cache()` moves that pass
+ahead of training.
 Fixed window starts come from per-sample side data aligned with `indices`:
 `SlipstreamLoader(indices=recs, sample_data={"t0": starts}, ...)` with
 `DecodeVideoWindow(..., t0_key="t0")`. Repeating a record index with different `t0` gives

@@ -55,9 +55,11 @@ All notable changes to slipstream are documented here. Versions follow
 - `SlipstreamLoader`: an exception in the prefetch thread (or in an async stage's `submit`)
   is re-raised on the main thread instead of hanging the iterator.
 - `warmup_cache(touch=True)`: after the `read()` pass, the primary field's records are also
-  faulted through the loader's own mmap (one load per page), so the pages are mapped into
-  this process. Needed per process (each DDP rank), not per node; on a CIFS mount the
-  in-process mapping is what separates the warm epoch rate from the cold one. `loader.page_cache_residency()`
+  faulted through the loader's own mmap (one load per page) so they are mapped into this
+  process; milliseconds when cached. Measured on a CIFS mount (`cache=strict`): the client
+  drops cached pages when the last holder closes the file, so every process starts cold
+  and the first pass costs about half the warm rate; later epochs in the same process are
+  warm regardless. Stage stores on node-local disk for training. `loader.page_cache_residency()`
   reports how much of an epoch's bytes are in the page cache; on a network mount cold reads
   serialize (2.4 windows/s cold vs 90+ warm), so `warmup_cache()` first.
 - `RandomResizedCropBatch`: per-image random resized crop on decoded tensors

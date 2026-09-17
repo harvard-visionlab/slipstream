@@ -1246,15 +1246,22 @@ class SlipstreamLoader:
 
         This makes the first epoch fast by avoiding on-demand page faults during training.
 
-        Two phases. Phase 2 reads the bytes with ``read()`` (large sequential
-        requests: fills the page cache at the storage's streaming rate). Phase 3
-        (``touch``) then walks the same ranges through *this loader's own mmap*
-        of the primary field, so the pages are mapped into this process and the
-        prefetch thread later copies records without a fault per page. The
-        touch is cheap when the pages are already cached and is what a DDP rank
-        needs even when another rank already warmed the node's page cache; on a
-        network mount whose mmap fault path is slow it is the difference between
-        the warm and the cold epoch rate.
+        Three phases: madvise hints, a ``read()`` pass in large sequential requests
+        (fills the page cache at the storage's streaming rate), and ``touch``: one
+        load per page through *this loader's own mmap* of the primary field, so
+        the pages are mapped into this process's page tables. The touch is cheap
+        when the pages are cached (milliseconds) and is a no-op in effect on a
+        local filesystem.
+
+        Network mounts (measured on CIFS ``vers=3.1.1 cache=strict``): the client
+        drops a file's cached pages when the last process holding it open exits,
+        so *every process* starts cold even if another process just read the
+        same records; within one process, epoch 2 onwards is warm with or without
+        this call. The cost is the first pass per process (the prefetch thread's
+        coalesced sequential reads, roughly half the warm epoch rate), and
+        ``warmup_cache()`` simply moves that pass ahead of training. The real fix
+        is to stage the store on node-local disk (``SLIPSTREAM_CACHE_DIR`` /
+        ``remote_cache``) rather than train off the mount.
 
         When a subset is in play (``indices`` here, or the loader's own
         ``indices``), only the byte ranges of the selected records are read
@@ -1274,7 +1281,7 @@ class SlipstreamLoader:
                 subset loader. With ``window`` set these are anchors and every
                 record of every window is warmed.
             touch: Also fault the primary field's records through this process's
-                mmap (phase 3). Default True.
+                mmap (phase 3, milliseconds when cached). Default True.
 
         Returns:
             dict with: elapsed_sec, total_bytes, throughput_mb_s, cache_dir,
