@@ -137,6 +137,31 @@ class DecodeVideoWindow(BatchTransform):
     copying it as-is is a memcpy, transposing it per window is 15x slower).
     Call ``.contiguous()`` if a consumer needs CHW memory order; ``transforms``
     output whatever their ops produce (usually contiguous).
+
+    Writing a transform for ``transforms`` (the shared-per-window contract):
+        Each transform sees the flat batch ``[B*T, 3, H, W]`` in anchor-major
+        order: rows ``i*T .. i*T+T-1`` are the T frames of window ``i``. The stage
+        sets ``t.seed_repeat = T`` on every transform (and on anything reachable
+        through ``t.transforms``) before each call. A ``BatchAugment`` subclass
+        must therefore draw one parameter set per window and expand it to the
+        frames::
+
+            def before_call(self, b, **kwargs):
+                n = b.shape[0]                       # B*T
+                ng = self._ng(n)                     # number of windows (ceil(n / seed_repeat))
+                p = torch.empty(ng).uniform_(lo, hi, generator=self.rng)
+                self.p = self._expand(p, n)          # [n], frame j uses p[j // T]
+
+        For ``(do, idx)`` selections use ``mask_batch(b, p, rng, group=self.seed_repeat)``
+        (``slipstream.transforms._compat``): whole windows are selected or skipped
+        and ``idx`` lists complete windows in order, so per-selected-sample
+        parameters are drawn with ``self._ng(len(idx))`` and expanded to
+        ``len(idx)``. Anything drawn per frame instead (e.g. a per-pixel noise
+        fill) is deliberately per frame and should say so. Transforms that pair
+        samples across the batch (Mixup, SideBySide) are not window-aware. The
+        frame times for pose interpolation are ``batch[field + "_t_sec"]``
+        (``[B, T]``), not visible inside ``transforms``; apply pose-dependent logic
+        in ``after_batch_transforms`` on the folded ``[B, T, ...]`` batch instead.
     """
 
     #: the stage manages `seed_repeat` of its own `transforms`; the loader must not descend into them
