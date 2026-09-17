@@ -1259,9 +1259,12 @@ class SlipstreamLoader:
         same records; within one process, epoch 2 onwards is warm with or without
         this call. The cost is the first pass per process (the prefetch thread's
         coalesced sequential reads, roughly half the warm epoch rate), and
-        ``warmup_cache()`` simply moves that pass ahead of training. The real fix
-        is to stage the store on node-local disk (``SLIPSTREAM_CACHE_DIR`` /
-        ``remote_cache``) rather than train off the mount.
+        ``warmup_cache()`` simply moves that pass ahead of training. A process
+        that keeps the store open keeps its pages cached for every other process
+        on the node (measured: residency 1.0 while a holder is alive, 0.0 two
+        seconds after it exits), so with DDP either keep one long-lived opener per
+        node or, better, stage the store on node-local disk
+        (``SLIPSTREAM_CACHE_DIR`` / ``remote_cache``) rather than train off the mount.
 
         When a subset is in play (``indices`` here, or the loader's own
         ``indices``), only the byte ranges of the selected records are read
