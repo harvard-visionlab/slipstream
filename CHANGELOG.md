@@ -4,6 +4,19 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.9.1] - 2026-09-29
+
+### Fixed
+
+- Decoders with `seed=None` are now non-reproducible, as documented: their per-sample draws come
+  from fresh OS entropy. Before, `seed=None` was keyed like a fixed seed, so every unseeded run got
+  the same crops, positions and embed placements. Seeded streams are unchanged from 0.9.0.
+
+### Documentation
+
+- `FFCVFilePrefetchingDataLoader`, `FFCVStyleDataLoader` and `PrefetchingDataLoader` are marked
+  development / benchmarking only. `SlipstreamLoader` is the supported training loader.
+
 ## [0.9.0] - 2026-09-29
 
 ### Changed (seeded streams differ from 0.8.0)

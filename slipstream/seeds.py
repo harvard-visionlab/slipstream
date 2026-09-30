@@ -19,7 +19,8 @@ batches and sample positions give unrelated streams.
   seed with :func:`derive_seed` (``derive_seed(base, offset, view)``) instead of
   adding offsets, which made base ``b`` view ``k+1`` equal base ``b+1`` view ``k``.
 
-Objects used outside a loader behave as rank 0, epoch 0.
+Objects used outside a loader behave as rank 0, epoch 0. Decoders with ``seed=None``
+draw from fresh OS entropy (not reproducible), as documented on each decoder.
 """
 
 from __future__ import annotations
@@ -54,8 +55,12 @@ def derive_seed(base: int, *parts: int) -> int:
 
 
 def sample_seeds(seed: int | None, counter: int, n: int, *stream: int, key: tuple = DEFAULT_KEY) -> np.ndarray:
-    """``n`` per-sample uint32 seeds (as int64 [n]) for batch ``counter`` of ``seed`` under ``key``."""
-    state = np.random.SeedSequence(_key(seed, *key, counter, *stream)).generate_state(max(int(n), 1), np.uint32)
+    """``n`` per-sample uint32 seeds (as int64 [n]) for batch ``counter`` of ``seed`` under ``key``.
+
+    ``seed=None`` means non-reproducible: the seeds come from fresh OS entropy on every call.
+    """
+    ss = np.random.SeedSequence() if seed is None else np.random.SeedSequence(_key(seed, *key, counter, *stream))
+    state = ss.generate_state(max(int(n), 1), np.uint32)
     return state[:n].astype(np.int64)
 
 

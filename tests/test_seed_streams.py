@@ -107,3 +107,22 @@ def test_multicrop_views_independent_and_yoked():
     v0, v1, yoke = (np.asarray(b[k]) for k in ("v0", "v1", "yoke"))
     assert np.array_equal(v0, yoke)                              # same seed -> same crops
     assert not np.array_equal(v1[: B - 1], v0[1:])               # view k+1 != view k of the next sample
+
+
+def test_unseeded_is_not_reproducible():
+    # seed=None is documented as non-reproducible: fresh entropy per call (0.9.1).
+    assert not np.array_equal(sample_seeds(None, 1, B), sample_seeds(None, 1, B))
+    assert np.array_equal(sample_seeds(0, 1, B), sample_seeds(0, 1, B))
+
+
+def test_unseeded_decoder_differs_across_runs():
+    from slipstream.decoders.crop import DecodeRandomResizedCrop
+    from slipstream.loader import SlipstreamLoader
+
+    cache = Path.home() / ".slipstream" / "imagenet10-s256_l512-jpeg-val"
+    if not cache.exists():
+        pytest.skip(f"{cache} not present")
+    mk = lambda: SlipstreamLoader(SimpleNamespace(cache_path=cache, remote_dir=None), batch_size=B, shuffle=False,
+                                  verbose=False, pipelines={"image": [DecodeRandomResizedCrop(48)]})
+    a, b = np.asarray(next(iter(mk()))["image"]), np.asarray(next(iter(mk()))["image"])
+    assert not np.array_equal(a, b)

@@ -737,7 +737,11 @@ class FFCVStyleDataset:
 # =============================================================================
 
 class FFCVStyleDataLoader:
-    """Simple batch iterator for FFCVStyleDataset."""
+    """Simple batch iterator for FFCVStyleDataset.
+
+    Development / benchmarking only, not a supported training loader: no seed, ``set_epoch``,
+    distributed sharding or augmentation pipelines (shuffle uses NumPy's global RNG).
+    Use :class:`slipstream.SlipstreamLoader` for training."""
 
     def __init__(
         self,
@@ -780,6 +784,10 @@ class FFCVStyleDataLoader:
 
 class PrefetchingDataLoader:
     """Data loader with background prefetching using threading.
+
+    Development / benchmarking only, not a supported training loader: no seed, ``set_epoch``,
+    distributed sharding or augmentation pipelines (shuffle uses NumPy's global RNG).
+    Use :class:`slipstream.SlipstreamLoader` for training.
 
     This mimics FFCV's EpochIterator approach:
     - Background thread runs batch loading with Numba (releases GIL)

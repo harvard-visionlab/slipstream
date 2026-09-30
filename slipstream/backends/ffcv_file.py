@@ -477,6 +477,10 @@ class FFCVFileDataset:
 class FFCVFilePrefetchingDataLoader:
     """DataLoader for FFCVFileDataset with background prefetching.
 
+    Development / benchmarking only, not a supported training loader: no seed, ``set_epoch``,
+    distributed sharding or augmentation pipelines (shuffle uses NumPy's global RNG).
+    Use :class:`slipstream.SlipstreamLoader` for training.
+
     This is optimized for FFCVFileDataset and includes image dimensions
     in each batch for zero-overhead decode.
 
