@@ -348,3 +348,24 @@ Best of 3 × 60 batches of 512 (after 5 warmup batches), imagenet1k val slipcach
 | yuv420 | E | + Normalize fp32 | 32,412 | 32,433 | 1.00x |
 | yuv420 | F | ToTorchImage/Normalize bf16 | 32,502 | 32,575 | 1.00x |
 | yuv420 | G | + RandomHorizontalFlip | 28,202 | 27,934 | 0.99x |
+
+### v0.10.0 (d184180), machina, 2026-09-30: PASS
+
+64 CPUs, numba 0.67.0, torch 2.14.0+cu126, NVIDIA RTX A6000; load before: load1=1.1 gpu%=[0, 0]
+
+| fmt | step | pipeline | v0.9.6 | v0.10.0 | ratio |
+| --- | --- | --- | ---: | ---: | ---: |
+| jpeg | A | RRC only, uint8 CPU, sequential, simple | 38,763 | 38,481 | 0.99x |
+| jpeg | B | + threaded prefetch | 41,043 | 41,348 | 1.01x |
+| jpeg | C | + shuffle | 42,056 | 42,252 | 1.00x |
+| jpeg | D | + ToTorchImage fp32 | 27,838 | 27,750 | 1.00x |
+| jpeg | E | + Normalize fp32 | 27,784 | 27,741 | 1.00x |
+| jpeg | F | ToTorchImage/Normalize bf16 | 27,775 | 27,746 | 1.00x |
+| jpeg | G | + RandomHorizontalFlip | 24,351 | 24,255 | 1.00x |
+| yuv420 | A | RRC only, uint8 CPU, sequential, simple | 45,698 | 45,953 | 1.01x |
+| yuv420 | B | + threaded prefetch | 44,028 | 43,736 | 0.99x |
+| yuv420 | C | + shuffle | 40,423 | 40,098 | 0.99x |
+| yuv420 | D | + ToTorchImage fp32 | 32,557 | 32,748 | 1.01x |
+| yuv420 | E | + Normalize fp32 | 32,433 | 32,510 | 1.00x |
+| yuv420 | F | ToTorchImage/Normalize bf16 | 32,575 | 32,661 | 1.00x |
+| yuv420 | G | + RandomHorizontalFlip | 27,934 | 28,101 | 1.01x |
