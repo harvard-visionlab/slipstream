@@ -4,6 +4,16 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.9.4] - 2026-09-30
+
+### Fixed
+
+- The decoder loader now prefers the libslipstream build for the running interpreter
+  (`_libslipstream<EXT_SUFFIX>`). Before, it took the first `_libslipstream*.so` in directory
+  order, so a stale build for another Python version left in the same checkout could be loaded,
+  along with the older libturbojpeg it linked. It still falls back to another build, with a
+  `RuntimeWarning`. `slipstream status` flags a decoder built for another Python.
+
 ## [0.9.3] - 2026-09-30
 
 ### Fixed

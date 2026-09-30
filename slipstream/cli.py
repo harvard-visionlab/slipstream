@@ -364,6 +364,10 @@ def check_decoder() -> dict[str, Any]:
         except RuntimeError:
             return {"available": False, "path": None, "error": "not built (no libslipstream/_libslipstream*.so)"}
         load_library()
+        import sysconfig
+        if not path.name.endswith(sysconfig.get_config_var("EXT_SUFFIX") or ".so"):
+            return {"available": True, "path": str(path),
+                    "error": f"built for another Python ({path.name}); reinstall slipstream to rebuild"}
         return {"available": True, "path": str(path), "error": None}
     except Exception as exc:  # noqa: BLE001 - reported, not raised
         return {"available": False, "path": None, "error": str(exc).splitlines()[0]}
@@ -414,6 +418,8 @@ def problems(status: dict[str, Any]) -> list[str]:
                 "existing caches are usable but new ones cannot be written."
             )
     dec = status.get("decoder")
+    if dec and dec["available"] and dec["error"]:
+        out.append(f"libslipstream decoder {dec['error']}.")
     if dec and not dec["available"]:
         out.append(
             f"libslipstream decoder {dec['error']}: JPEG/YUV decode pipelines will fail. "
@@ -453,7 +459,10 @@ def print_status(status: dict[str, Any]) -> None:
     p(f"{status['user']}@{status['host']}")
     dec = status.get("decoder")
     if dec:
-        p(f"decoder  {OK}  {dec['path']}" if dec["available"] else f"decoder  {BAD}  {dec['error']}")
+        if dec["available"]:
+            p(f"decoder  {OK}  {dec['path']}" + (f"  ({dec['error']})" if dec["error"] else ""))
+        else:
+            p(f"decoder  {BAD}  {dec['error']}")
     p()
 
     p("Cache directory")

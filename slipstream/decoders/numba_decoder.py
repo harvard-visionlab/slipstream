@@ -75,11 +75,23 @@ def _find_library() -> Path:
     # Look in libslipstream directory relative to this file
     module_dir = Path(__file__).parent.parent.parent / "libslipstream"
 
-    # Look for .so or .dylib files matching our pattern
-    for so_file in module_dir.glob("_libslipstream*.so"):
-        return so_file
-    for so_file in module_dir.glob("_libslipstream*.dylib"):
-        return so_file
+    # Prefer the build for this interpreter: stale builds for other Python versions can sit next
+    # to it (e.g. a reused checkout) and may link an older libturbojpeg.
+    import sysconfig
+
+    exact = module_dir / f"_libslipstream{sysconfig.get_config_var('EXT_SUFFIX') or '.so'}"
+    if exact.exists():
+        return exact
+    candidates = sorted(module_dir.glob("_libslipstream*.so")) + sorted(module_dir.glob("_libslipstream*.dylib"))
+    if candidates:
+        import warnings
+
+        warnings.warn(
+            f"libslipstream: no build for this interpreter ({exact.name}); using {candidates[-1].name}. "
+            "Reinstall slipstream to rebuild it.",
+            RuntimeWarning, stacklevel=2,
+        )
+        return candidates[-1]
 
     raise RuntimeError(
         "libslipstream library not found. Build it with:\n"

@@ -96,3 +96,27 @@ def test_build_hook_always_relinks(monkeypatch):
     monkeypatch.delenv("SLIPSTREAM_SKIP_EXT", raising=False)
     mod.LibslipstreamBuildHook().initialize("standard", {})
     assert calls and calls[0][-3:] == ["build_ext", "--inplace", "--force"]
+
+
+def test_loader_prefers_this_interpreters_build():
+    # 0.9.4: with stale builds for other Pythons next to ours, the loader picked the first glob match.
+    import shutil
+    import sysconfig
+    from pathlib import Path
+
+    import pytest
+
+    from slipstream.decoders.numba_decoder import _find_library
+
+    libdir = Path(__file__).resolve().parents[1] / "libslipstream"
+    own = libdir / f"_libslipstream{sysconfig.get_config_var('EXT_SUFFIX')}"
+    if not own.exists():
+        pytest.skip("decoder not built for this interpreter")
+    stale = [libdir / f"_libslipstream.cpython-{v}-stale-test.so" for v in ("30", "99", "0")]
+    try:
+        for p in stale:
+            shutil.copy(own, p)
+        assert _find_library() == own
+    finally:
+        for p in stale:
+            p.unlink(missing_ok=True)
