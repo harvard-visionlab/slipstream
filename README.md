@@ -39,7 +39,9 @@ uv add git+https://github.com/harvard-visionlab/slipstream
 # brew install libjpeg-turbo              # macOS
 # apt install libturbojpeg0-dev           # Ubuntu/Debian
 # conda install -c conda-forge libjpeg-turbo  # no root (clusters); or cmake-install into ~/.local
-# TURBOJPEG_ROOT=<prefix> for any other install prefix.
+# TURBOJPEG_ROOT=<prefix> for any other install prefix. The decoder is rpath-linked to that
+# prefix, so use a permanent location (not purgeable scratch). A cmake build without nasm
+# (-DWITH_SIMD=0) works but decodes much slower; prefer conda-forge or install nasm first.
 # The install fails if the decoder can't be built; SLIPSTREAM_SKIP_EXT=1 installs without it
 # (CLI-only use). `uv run slipstream status` shows whether the decoder is available.
 
