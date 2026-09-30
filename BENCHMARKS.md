@@ -281,3 +281,49 @@ The fix: return `dest_buffer[:batch_size]` (view) instead of `dest_buffer[:batch
 - **Experiment B — LZ4+YUV420: eliminated.** Per-image `lz4.block.decompress()` in Python reintroduces the serial bottleneck. Storage improved to 5.63 GB (1.49x JPEG), but throughput collapsed to **1.06-1.10x JPEG** — nearly all YUV420 advantage lost. Would require C-level LZ4 decompression inside the prange loop to be viable, adding `liblz4` dependency for marginal storage savings (1.49x vs 1.73x JPEG). Not worth the complexity.
 
 - **Conclusion (round 2):** Raw YUV420 is the optimal format for decode-bound workloads. 1.68-1.91x JPEG throughput at 1.73x storage with zero new dependencies. ✅ **Integrated** as `SlipstreamLoader(dataset, image_format="yuv420")` — see Phase 3 item 9.
+
+## Release gate
+
+Best of 3 × 60 batches of 512 (after 5 warmup batches), imagenet1k val slipcache on machina's local NVMe (page-cache warm), `benchmarks/release_gate.py` (steps: `benchmarks/loader_ablation.py`). Steps B–G use `use_threading=True`; D–G move to the GPU (RTX A6000) and synchronize before stopping the clock.
+
+### v0.9.4 (ffde4da-dirty), machina, 2026-09-30: FAIL: jpeg: threaded B 3,878 < 75% of simple A 38,629; yuv420: threaded B 2,298 < 75% of simple A 45,776
+
+64 CPUs, numba 0.67.0, torch 2.14.0+cu126, NVIDIA RTX A6000; load before: load1=1.9 gpu%=[0, 0]
+
+| fmt | step | pipeline | baseline | v0.9.4 | ratio |
+| --- | --- | --- | ---: | ---: | ---: |
+| jpeg | A | RRC only, uint8 CPU, sequential, simple | — | 38,629 | — |
+| jpeg | B | + threaded prefetch | — | 3,878 | — |
+| jpeg | C | + shuffle | — | 3,881 | — |
+| jpeg | D | + ToTorchImage fp32 | — | 3,878 | — |
+| jpeg | E | + Normalize fp32 | — | 3,876 | — |
+| jpeg | F | ToTorchImage/Normalize bf16 | — | 3,869 | — |
+| jpeg | G | + RandomHorizontalFlip | — | 3,874 | — |
+| yuv420 | A | RRC only, uint8 CPU, sequential, simple | — | 45,776 | — |
+| yuv420 | B | + threaded prefetch | — | 2,298 | — |
+| yuv420 | C | + shuffle | — | 2,259 | — |
+| yuv420 | D | + ToTorchImage fp32 | — | 2,261 | — |
+| yuv420 | E | + Normalize fp32 | — | 2,259 | — |
+| yuv420 | F | ToTorchImage/Normalize bf16 | — | 2,294 | — |
+| yuv420 | G | + RandomHorizontalFlip | — | 2,286 | — |
+
+### v0.9.5 (d4a7be9), machina, 2026-09-30: PASS
+
+64 CPUs, numba 0.67.0, torch 2.14.0+cu126, NVIDIA RTX A6000; load before: load1=1.7 gpu%=[0, 0]
+
+| fmt | step | pipeline | v0.9.4 | v0.9.5 | ratio |
+| --- | --- | --- | ---: | ---: | ---: |
+| jpeg | A | RRC only, uint8 CPU, sequential, simple | 38,629 | 38,331 | 0.99x |
+| jpeg | B | + threaded prefetch | 3,878 | 41,370 | 10.67x |
+| jpeg | C | + shuffle | 3,881 | 42,112 | 10.85x |
+| jpeg | D | + ToTorchImage fp32 | 3,878 | 27,881 | 7.19x |
+| jpeg | E | + Normalize fp32 | 3,876 | 27,661 | 7.14x |
+| jpeg | F | ToTorchImage/Normalize bf16 | 3,869 | 27,708 | 7.16x |
+| jpeg | G | + RandomHorizontalFlip | 3,874 | 24,229 | 6.25x |
+| yuv420 | A | RRC only, uint8 CPU, sequential, simple | 45,776 | 45,862 | 1.00x |
+| yuv420 | B | + threaded prefetch | 2,298 | 44,047 | 19.17x |
+| yuv420 | C | + shuffle | 2,259 | 40,125 | 17.76x |
+| yuv420 | D | + ToTorchImage fp32 | 2,261 | 32,677 | 14.45x |
+| yuv420 | E | + Normalize fp32 | 2,259 | 32,412 | 14.35x |
+| yuv420 | F | ToTorchImage/Normalize bf16 | 2,294 | 32,502 | 14.17x |
+| yuv420 | G | + RandomHorizontalFlip | 2,286 | 28,202 | 12.33x |

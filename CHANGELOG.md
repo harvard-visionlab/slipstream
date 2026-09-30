@@ -16,6 +16,15 @@ All notable changes to slipstream are documented here. Versions follow
   use explicit byte loops: serial reads went from 22k to 447k img/s (jpeg) and from 13k to 305k
   (yuv420) on an M4 Pro. Output bytes are identical. Regression tests in
   `tests/test_cache_copy_kernels.py`.
+  machina release gate against v0.9.4: threaded jpeg 3.9k → 41.4k img/s, yuv420 2.3k → 44.0k. The full
+  GPU pipeline (ToTorchImage + Normalize bf16 + flip) went from 3.9k → 24.2k (jpeg) and 2.3k → 28.2k (yuv420).
+
+### Added
+
+- Release gate: `benchmarks/loader_ablation.py` (steps A-G, from bare decode to a GPU training pipeline)
+  and `benchmarks/release_gate.py`. It runs on machina before every tag, refuses to start on a busy
+  machine, saves `benchmarks/results/gate/<host>/v<version>.json`, appends to BENCHMARKS.md, and fails
+  on a >10% drop vs the previous version or when threaded prefetch is below 75% of simple.
 
 ## [0.9.4] - 2026-09-30
 
