@@ -369,3 +369,28 @@ Best of 3 × 60 batches of 512 (after 5 warmup batches), imagenet1k val slipcach
 | yuv420 | E | + Normalize fp32 | 32,433 | 32,595 | 1.00x |
 | yuv420 | F | ToTorchImage/Normalize bf16 | 32,575 | 32,534 | 1.00x |
 | yuv420 | G | + RandomHorizontalFlip | 27,934 | 28,050 | 1.00x |
+
+### v0.11.0 (a12f2c8), machina, 2026-09-30: PASS
+
+64 CPUs, numba 0.67.0, torch 2.14.0+cu126, NVIDIA RTX A6000; load before: load1=1.3 gpu%=[0, 0]
+
+| fmt | step | pipeline | v0.10.0 | v0.11.0 | ratio |
+| --- | --- | --- | ---: | ---: | ---: |
+| jpeg | A | RRC only, uint8 CPU, sequential, simple | 38,314 | 38,517 | 1.01x |
+| jpeg | B | + threaded prefetch | 40,573 | 41,462 | 1.02x |
+| jpeg | C | + shuffle | 42,318 | 41,770 | 0.99x |
+| jpeg | D | + ToTorchImage fp32 | 27,982 | 27,950 | 1.00x |
+| jpeg | E | + Normalize fp32 | 27,865 | 27,715 | 0.99x |
+| jpeg | F | ToTorchImage/Normalize bf16 | 27,262 | 27,759 | 1.02x |
+| jpeg | G | + RandomHorizontalFlip | 24,260 | 24,025 | 0.99x |
+| jpeg | G@160 | + RandomHorizontalFlip @ 160px | — | 30,678 | — |
+| jpeg | G@192 | + RandomHorizontalFlip @ 192px | — | 27,757 | — |
+| yuv420 | A | RRC only, uint8 CPU, sequential, simple | 45,421 | 45,939 | 1.01x |
+| yuv420 | B | + threaded prefetch | 44,048 | 43,904 | 1.00x |
+| yuv420 | C | + shuffle | 40,275 | 40,087 | 1.00x |
+| yuv420 | D | + ToTorchImage fp32 | 32,838 | 32,857 | 1.00x |
+| yuv420 | E | + Normalize fp32 | 32,595 | 32,663 | 1.00x |
+| yuv420 | F | ToTorchImage/Normalize bf16 | 32,534 | 31,858 | 0.98x |
+| yuv420 | G | + RandomHorizontalFlip | 28,050 | 27,733 | 0.99x |
+| yuv420 | G@160 | + RandomHorizontalFlip @ 160px | — | 37,951 | — |
+| yuv420 | G@192 | + RandomHorizontalFlip @ 192px | — | 32,330 | — |
