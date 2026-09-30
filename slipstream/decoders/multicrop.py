@@ -15,6 +15,7 @@ import copy
 import numpy as np
 
 from slipstream.decoders._window import repeat_params
+from slipstream.decoders._seeds import sample_seeds, STREAM_SIZE, STREAM_EMBED
 import torch
 
 from numba import njit
@@ -28,7 +29,7 @@ def _embed_batch_rgba(
     crop: np.ndarray,       # [B, crop_h, crop_w, 3] uint8
     canvas: np.ndarray,     # [B, cs, cs, 4] uint8 (zeros, modified in-place)
     rects: np.ndarray,      # [B, 4] int32 (output: x0, y0, copy_w, copy_h)
-    seed: int,
+    seeds: NDArray[np.int64],   # per-sample, from _seeds.sample_seeds
     x_range_min: float,
     x_range_max: float,
     y_range_min: float,
@@ -41,7 +42,7 @@ def _embed_batch_rgba(
     cs = canvas.shape[1]
 
     for i in range(B):
-        np.random.seed((seed + i) % 2147483647)
+        np.random.seed(seeds[i])
         x_frac = np.random.uniform(x_range_min, x_range_max)
         y_frac = np.random.uniform(y_range_min, y_range_max)
 
@@ -312,16 +313,14 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
             log_ratio_min = math.log(ratio[0])
             log_ratio_max = math.log(ratio[1])
 
-            if seed is not None:
-                batch_seed = (seed + batch_size * batch_offset) % 2147483647
-            else:
-                batch_seed = (batch_size * (batch_offset * num_crops + c)) % 2147483647
+            # Same seed -> same draws (yoked crops); unseeded crops get their own stream.
+            batch_seeds = sample_seeds(seed, batch_offset, batch_size, *(() if seed is not None else (c,)))
 
             params = _generate_fn(
                 widths_i32, heights_i32,
                 scale[0], scale[1],
                 log_ratio_min, log_ratio_max,
-                batch_seed,
+                batch_seeds,
             )
             crop_params_list.append(repeat_params(params, self._decoder.seed_repeat))
 
@@ -507,11 +506,9 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
             y_range = self._crop_y_ranges[c]
             seed = self._crop_seeds[c]
 
-            # Compute per-image seed (same formula as DecodeMultiRandomResizedCrop)
-            if seed is not None:
-                batch_seed = (seed + batch_size * batch_offset) % 2147483647
-            else:
-                batch_seed = (batch_size * (batch_offset * num_crops + c)) % 2147483647
+            # Per-image seeds (same keys as DecodeMultiRandomResizedCrop)
+            crop_key = () if seed is not None else (c,)
+            pos_seeds = sample_seeds(seed, batch_offset, batch_size, *crop_key)
 
             # Determine target size for this crop
             crop_size_mode = self._crop_size_modes[c]
@@ -520,9 +517,7 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                 target_size = size_range[0]
             elif crop_size_mode == "per_batch":
                 # One random size for the whole batch
-                rng = np.random.RandomState(
-                    (batch_seed + batch_size) % 2147483647
-                )
+                rng = np.random.RandomState(sample_seeds(seed, batch_offset, 1, STREAM_SIZE, *crop_key)[0])
                 target_size = int(rng.randint(size_range[0], size_range[1] + 1))
             else:
                 target_size = None  # per_image — handled in slow path
@@ -536,7 +531,7 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                     target_size,
                     x_range[0], x_range[1],
                     y_range[0], y_range[1],
-                    batch_seed,
+                    pos_seeds,
                     x_pos, y_pos,
                 )
                 target_sizes_arr = np.full(batch_size, target_size, dtype=np.int32)
@@ -547,7 +542,7 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                 x_pos = np.empty(batch_size, dtype=np.float64)
                 y_pos = np.empty(batch_size, dtype=np.float64)
                 for i in range(batch_size):
-                    rng_i = np.random.RandomState((batch_seed + i) % 2147483647)
+                    rng_i = np.random.RandomState(pos_seeds[i])
                     x_pos[i] = rng_i.uniform(x_range[0], x_range[1])
                     y_pos[i] = rng_i.uniform(y_range[0], y_range[1])
 
@@ -556,10 +551,9 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                 else:
                     # Per-image random sizes
                     target_sizes_arr = np.empty(batch_size, dtype=np.int32)
+                    size_seeds = sample_seeds(seed, batch_offset, batch_size, STREAM_SIZE, *crop_key)
                     for i in range(batch_size):
-                        rng_i = np.random.RandomState(
-                            (batch_seed + batch_size + i) % 2147483647
-                        )
+                        rng_i = np.random.RandomState(size_seeds[i])
                         target_sizes_arr[i] = int(
                             rng_i.randint(size_range[0], size_range[1] + 1)
                         )
@@ -939,16 +933,8 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
             rects = np.zeros((batch_size, 4), dtype=np.int32)
 
             # Compute embed seed for this crop
-            crop_embed_seed = self._embed_seeds[c]
-            if crop_embed_seed is not None:
-                embed_batch_seed = (
-                    crop_embed_seed + batch_size * self._embed_seed_counter
-                    + c * 7919  # prime offset per crop for independence
-                ) % 2147483647
-            else:
-                embed_batch_seed = (
-                    batch_size * self._embed_seed_counter + c * 7919
-                ) % 2147483647
+            # Per-image placement seeds; the crop index keeps crops independent.
+            embed_seeds = sample_seeds(self._embed_seeds[c], self._embed_seed_counter, batch_size, STREAM_EMBED, c)
 
             embed_coords = self._embed_coords[c]
 
@@ -962,7 +948,7 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
                         _embed_at_center(img, canvas, rects, i, cx, cy, cs)
                 else:
                     # Multiple coords → random choice per image
-                    rng = np.random.RandomState(embed_batch_seed)
+                    rng = np.random.RandomState(embed_seeds[0])
                     for i in range(batch_size):
                         idx = rng.randint(0, len(embed_coords))
                         cx, cy = embed_coords[idx]
@@ -972,7 +958,7 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
                 # Fast path: stacked [B, h, w, 3] — use Numba JIT
                 _embed_batch_rgba(
                     crop_data, canvas, rects,
-                    embed_batch_seed,
+                    embed_seeds,
                     self._embed_x_ranges[c][0], self._embed_x_ranges[c][1],
                     self._embed_y_ranges[c][0], self._embed_y_ranges[c][1],
                 )
@@ -982,9 +968,7 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
                     img = crop_data[i]  # [h, w, 3]
                     h, w = img.shape[0], img.shape[1]
 
-                    rng_i = np.random.RandomState(
-                        (embed_batch_seed + i) % 2147483647
-                    )
+                    rng_i = np.random.RandomState(embed_seeds[i])
                     x_frac = rng_i.uniform(self._embed_x_ranges[c][0], self._embed_x_ranges[c][1])
                     y_frac = rng_i.uniform(self._embed_y_ranges[c][0], self._embed_y_ranges[c][1])
 

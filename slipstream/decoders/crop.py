@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 
 from slipstream.decoders._window import repeat_params
+from slipstream.decoders._seeds import sample_seeds, STREAM_SIZE
 import torch
 
 from slipstream.decoders.base import BatchTransform
@@ -413,40 +414,23 @@ class DecodeRandomResizeShortCropLong(BatchTransform):
             target_sizes = np.full(batch_size, self.size_range[0], dtype=np.int32)
         elif self.size_mode == "per_batch":
             # One random size for the whole batch
-            if self.seed is not None:
-                rng = np.random.RandomState(
-                    (self.seed + batch_offset) % 2147483647
-                )
-            else:
-                rng = np.random.RandomState(
-                    (batch_offset * 7919) % 2147483647
-                )
+            rng = np.random.RandomState(sample_seeds(self.seed, batch_offset, 1, STREAM_SIZE)[0])
             s = int(rng.randint(self.size_range[0], self.size_range[1] + 1))
             target_sizes = np.full(batch_size, s, dtype=np.int32)
         else:
             # Per-image random sizes
             target_sizes = np.empty(batch_size, dtype=np.int32)
+            size_seeds = sample_seeds(self.seed, batch_offset, batch_size, STREAM_SIZE)
             for i in range(batch_size):
-                if self.seed is not None:
-                    rng_i = np.random.RandomState(
-                        (self.seed + batch_size * batch_offset + i) % 2147483647
-                    )
-                else:
-                    rng_i = np.random.RandomState(
-                        (batch_size * batch_offset + i) % 2147483647
-                    )
+                rng_i = np.random.RandomState(size_seeds[i])
                 target_sizes[i] = int(rng_i.randint(self.size_range[0], self.size_range[1] + 1))
 
         # --- Sample crop positions [B] ---
-        if self.seed is not None:
-            batch_seed = (self.seed + batch_size * batch_offset) % 2147483647
-        else:
-            batch_seed = (batch_size * batch_offset) % 2147483647
-
+        pos_seeds = sample_seeds(self.seed, batch_offset, batch_size)
         x_pos = np.empty(batch_size, dtype=np.float64)
         y_pos = np.empty(batch_size, dtype=np.float64)
         for i in range(batch_size):
-            rng_i = np.random.RandomState((batch_seed + i) % 2147483647)
+            rng_i = np.random.RandomState(pos_seeds[i])
             x_pos[i] = rng_i.uniform(self.x_range[0], self.x_range[1])
             y_pos[i] = rng_i.uniform(self.y_range[0], self.y_range[1])
 

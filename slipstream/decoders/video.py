@@ -58,9 +58,8 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 
+from slipstream.decoders._seeds import sample_seeds
 from slipstream.decoders.base import BatchTransform
-
-_MOD = 2147483647
 
 
 def _load_torchcodec():
@@ -399,8 +398,7 @@ class DecodeVideoWindow(BatchTransform):
             if len(t0_given) != B:
                 raise ValueError(f"sample_data[{self.t0_key!r}] has {len(t0_given)} entries for a batch of {B}")
         self._seed_counter += 1
-        base = (self.seed if self.seed is not None else 0) + B * self._seed_counter
-        seeds = [(base + i) % _MOD for i in range(B)]
+        seeds = sample_seeds(self.seed, self._seed_counter, B).tolist()
 
         pend = _PendingBatch(B, self.T, field, None if indices is None else np.asarray(indices, dtype=np.int64).copy())
         for i in range(B):

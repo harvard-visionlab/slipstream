@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 
 from slipstream.decoders._window import repeat_params
+from slipstream.decoders._seeds import sample_seeds
 from numpy.typing import NDArray
 
 from slipstream.decoders.numba_decoder import (
@@ -583,16 +584,13 @@ class YUV420NumbaBatchDecoder:
         log_ratio_max = math.log(ratio[1])
 
         self._seed_counter += 1
-        if seed is not None:
-            batch_seed = (seed + batch_size * self._seed_counter) % 2147483647
-        else:
-            batch_seed = (batch_size * self._seed_counter) % 2147483647
+        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size)
 
         crop_params = repeat_params(_generate_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
-            batch_seed,
+            batch_seeds,
         ), self.seed_repeat)
 
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
@@ -633,16 +631,13 @@ class YUV420NumbaBatchDecoder:
         log_ratio_max = math.log(ratio[1])
 
         self._seed_counter += 1
-        if seed is not None:
-            batch_seed = (seed + batch_size * self._seed_counter) % 2147483647
-        else:
-            batch_seed = (batch_size * self._seed_counter) % 2147483647
+        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size)
 
         crop_params = repeat_params(_generate_direct_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
-            batch_seed,
+            batch_seeds,
         ), self.seed_repeat)
 
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
@@ -781,18 +776,14 @@ class YUV420NumbaBatchDecoder:
 
         all_crop_params = np.zeros((num_crops, batch_size, 4), dtype=np.int32)
         for c in range(num_crops):
-            if seeds is not None and seeds[c] is not None:
-                self._seed_counter += 1
-                batch_seed = (seeds[c] + batch_size * self._seed_counter) % 2147483647
-            else:
-                self._seed_counter += 1
-                batch_seed = (batch_size * self._seed_counter) % 2147483647
+            self._seed_counter += 1
+            batch_seeds = sample_seeds(seeds[c] if seeds is not None else None, self._seed_counter, batch_size)
 
             all_crop_params[c] = repeat_params(_generate_random_crop_params_batch(
                 widths_i32, heights_i32,
                 scale[0], scale[1],
                 log_ratio_min, log_ratio_max,
-                batch_seed,
+                batch_seeds,
             ), self.seed_repeat)
 
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
@@ -1071,16 +1062,13 @@ class YUV420NumbaBatchDecoder:
         log_ratio_max = math.log(ratio[1])
 
         self._seed_counter += 1
-        if seed is not None:
-            batch_seed = (seed + batch_size * self._seed_counter) % 2147483647
-        else:
-            batch_seed = (batch_size * self._seed_counter) % 2147483647
+        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size)
 
         crop_params = repeat_params(_generate_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
-            batch_seed,
+            batch_seeds,
         ), self.seed_repeat)
 
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)

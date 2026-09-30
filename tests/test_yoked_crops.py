@@ -4,6 +4,7 @@ import math
 import numpy as np
 import pytest
 
+from slipstream.decoders._seeds import sample_seeds
 from slipstream.decoders.numba_decoder import (
     _generate_random_crop_params_batch,
     _generate_direct_random_crop_params_batch,
@@ -39,10 +40,10 @@ class TestYokedCropsStandardRRC:
         """Same seed + same scale → identical params."""
         widths, heights = image_dims
         p1 = _generate_random_crop_params_batch(
-            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seed=42
+            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
         p2 = _generate_random_crop_params_batch(
-            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seed=42
+            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
         np.testing.assert_array_equal(p1, p2)
 
@@ -50,10 +51,10 @@ class TestYokedCropsStandardRRC:
         """Different seeds → different params."""
         widths, heights = image_dims
         p1 = _generate_random_crop_params_batch(
-            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seed=42
+            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
         p2 = _generate_random_crop_params_batch(
-            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seed=99
+            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seeds=sample_seeds(99, 0, len(heights))
         )
         assert not np.array_equal(p1, p2)
 
@@ -70,10 +71,10 @@ class TestYokedCropsStandardRRC:
         """
         widths, heights = image_dims
         p_wide = _generate_random_crop_params_batch(
-            widths, heights, 0.4, 1.0, LOG_RATIO_SQUARE_MIN, LOG_RATIO_SQUARE_MAX, seed=42
+            widths, heights, 0.4, 1.0, LOG_RATIO_SQUARE_MIN, LOG_RATIO_SQUARE_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
         p_narrow = _generate_random_crop_params_batch(
-            widths, heights, 0.05, 0.4, LOG_RATIO_SQUARE_MIN, LOG_RATIO_SQUARE_MAX, seed=42
+            widths, heights, 0.05, 0.4, LOG_RATIO_SQUARE_MIN, LOG_RATIO_SQUARE_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
 
         cx_w, cy_w = crop_centers(p_wide)
@@ -108,12 +109,12 @@ class TestYokedCropsStandardRRC:
         """Changing one image's dimensions doesn't affect other samples' crops."""
         widths, heights = image_dims
         p1 = _generate_random_crop_params_batch(
-            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seed=42
+            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
         widths2 = widths.copy()
         widths2[3] = 200
         p2 = _generate_random_crop_params_batch(
-            widths2, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seed=42
+            widths2, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
         for i in range(len(widths)):
             if i != 3:
@@ -127,10 +128,10 @@ class TestYokedCropsDirectRRC:
         """Same seed + same scale → identical params."""
         widths, heights = image_dims
         p1 = _generate_direct_random_crop_params_batch(
-            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seed=42
+            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
         p2 = _generate_direct_random_crop_params_batch(
-            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seed=42
+            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
         np.testing.assert_array_equal(p1, p2)
 
@@ -138,10 +139,10 @@ class TestYokedCropsDirectRRC:
         """Same seed + different scale → centers should be close."""
         widths, heights = image_dims
         p_wide = _generate_direct_random_crop_params_batch(
-            widths, heights, 0.4, 1.0, LOG_RATIO_SQUARE_MIN, LOG_RATIO_SQUARE_MAX, seed=42
+            widths, heights, 0.4, 1.0, LOG_RATIO_SQUARE_MIN, LOG_RATIO_SQUARE_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
         p_narrow = _generate_direct_random_crop_params_batch(
-            widths, heights, 0.05, 0.4, LOG_RATIO_SQUARE_MIN, LOG_RATIO_SQUARE_MAX, seed=42
+            widths, heights, 0.05, 0.4, LOG_RATIO_SQUARE_MIN, LOG_RATIO_SQUARE_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
 
         cx_w, cy_w = crop_centers(p_wide)
@@ -176,12 +177,12 @@ class TestYokedCropsDirectRRC:
         """Changing one image's dimensions doesn't affect other samples' crops."""
         widths, heights = image_dims
         p1 = _generate_direct_random_crop_params_batch(
-            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seed=42
+            widths, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
         widths2 = widths.copy()
         widths2[3] = 200
         p2 = _generate_direct_random_crop_params_batch(
-            widths2, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seed=42
+            widths2, heights, 0.4, 1.0, LOG_RATIO_MIN, LOG_RATIO_MAX, seeds=sample_seeds(42, 0, len(heights))
         )
         for i in range(len(widths)):
             if i != 3:

@@ -36,6 +36,7 @@ from typing import Any
 import numpy as np
 
 from slipstream.decoders._window import repeat_params
+from slipstream.decoders._seeds import sample_seeds
 from numba import njit, prange, set_num_threads
 from numpy.typing import NDArray
 
@@ -534,7 +535,7 @@ def _generate_random_crop_params_batch(
     scale_max: float,
     log_ratio_min: float,
     log_ratio_max: float,
-    seed: int,
+    seeds: NDArray[np.int64],   # per-sample, from _seeds.sample_seeds
 ) -> NDArray[np.int32]:
     """Generate random crop parameters for a batch using Numba.
 
@@ -545,7 +546,7 @@ def _generate_random_crop_params_batch(
     params = np.zeros((batch_size, 4), dtype=np.int32)
 
     for i in range(batch_size):
-        np.random.seed((seed + i) % 2147483647)
+        np.random.seed(seeds[i])
         w = widths[i]
         h = heights[i]
         area = w * h
@@ -624,7 +625,7 @@ def _generate_direct_random_crop_params_batch(
     scale_max: float,
     log_ratio_min: float,
     log_ratio_max: float,
-    seed: int,
+    seeds: NDArray[np.int64],   # per-sample, from _seeds.sample_seeds
 ) -> NDArray[np.int32]:
     """Generate random crop parameters using analytic (direct) sampling.
 
@@ -644,7 +645,7 @@ def _generate_direct_random_crop_params_batch(
     ratio_max = np.exp(log_ratio_max)
 
     for i in range(batch_size):
-        np.random.seed((seed + i) % 2147483647)
+        np.random.seed(seeds[i])
         w = widths[i]
         h = heights[i]
         area = float(w * h)
@@ -788,7 +789,7 @@ def _generate_resize_short_crop_long_params_batch(
     x_range_max: float,
     y_range_min: float,
     y_range_max: float,
-    seed: int,
+    seeds: NDArray[np.int64],   # per-sample, from _seeds.sample_seeds
     x_pos_out: NDArray[np.float64],
     y_pos_out: NDArray[np.float64],
 ) -> NDArray[np.int32]:
@@ -808,7 +809,7 @@ def _generate_resize_short_crop_long_params_batch(
     params = np.zeros((batch_size, 4), dtype=np.int32)
 
     for i in range(batch_size):
-        np.random.seed((seed + i) % 2147483647)
+        np.random.seed(seeds[i])
         x_pos_i = np.random.uniform(x_range_min, x_range_max)
         y_pos_i = np.random.uniform(y_range_min, y_range_max)
         x_pos_out[i] = x_pos_i
@@ -1379,20 +1380,14 @@ class NumbaBatchDecoder:
         log_ratio_min = math.log(ratio[0])
         log_ratio_max = math.log(ratio[1])
 
-        if seed is not None:
-            # Reproducible: per-sample seed = (seed + batch_size * counter + i) % 2^31-1
-            self._seed_counter += 1
-            batch_seed = (seed + batch_size * self._seed_counter) % 2147483647
-        else:
-            # Non-reproducible: use auto-incrementing counter
-            self._seed_counter += 1
-            batch_seed = (batch_size * self._seed_counter) % 2147483647
+        self._seed_counter += 1
+        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size)
 
         crop_params = repeat_params(_generate_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
-            batch_seed,
+            batch_seeds,
         ), self.seed_repeat)
 
         # Allocate buffers
@@ -1456,18 +1451,14 @@ class NumbaBatchDecoder:
         log_ratio_min = math.log(ratio[0])
         log_ratio_max = math.log(ratio[1])
 
-        if seed is not None:
-            self._seed_counter += 1
-            batch_seed = (seed + batch_size * self._seed_counter) % 2147483647
-        else:
-            self._seed_counter += 1
-            batch_seed = (batch_size * self._seed_counter) % 2147483647
+        self._seed_counter += 1
+        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size)
 
         crop_params = repeat_params(_generate_direct_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
-            batch_seed,
+            batch_seeds,
         ), self.seed_repeat)
 
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
@@ -1531,18 +1522,14 @@ class NumbaBatchDecoder:
         # Generate crop params for each crop view
         all_crop_params = np.zeros((num_crops, batch_size, 4), dtype=np.int32)
         for c in range(num_crops):
-            if seeds is not None and seeds[c] is not None:
-                self._seed_counter += 1
-                batch_seed = (seeds[c] + batch_size * self._seed_counter) % 2147483647
-            else:
-                self._seed_counter += 1
-                batch_seed = (batch_size * self._seed_counter) % 2147483647
+            self._seed_counter += 1
+            batch_seeds = sample_seeds(seeds[c] if seeds is not None else None, self._seed_counter, batch_size)
 
             all_crop_params[c] = repeat_params(_generate_random_crop_params_batch(
                 widths_i32, heights_i32,
                 scale[0], scale[1],
                 log_ratio_min, log_ratio_max,
-                batch_seed,
+                batch_seeds,
             ), self.seed_repeat)
 
         # Allocate buffers

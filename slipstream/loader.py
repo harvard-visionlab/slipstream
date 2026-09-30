@@ -57,6 +57,7 @@ import numpy as np
 import torch
 
 from slipstream.cache import MANIFEST_FILE, OptimizedCache
+from slipstream.decoders._seeds import epoch_rng
 
 if TYPE_CHECKING:
     from slipstream.dataset import SlipstreamDataset
@@ -232,7 +233,8 @@ class SlipstreamLoader:
             batch_size: Number of samples per batch
             shuffle: Shuffle indices each epoch
             seed: Random seed for deterministic shuffle. If None, shuffle is
-                non-deterministic. When set, epoch N uses seed (seed + N).
+                non-deterministic. When set, epoch N's order is drawn from
+                SeedSequence([seed, N]) (independent across seeds and epochs).
             distributed: Enable distributed training partitioning. Requires
                 torch.distributed to be initialized. Each rank gets a
                 disjoint strided subset of the shuffled indices.
@@ -680,8 +682,7 @@ class SlipstreamLoader:
         pos = np.arange(n, dtype=np.int64)          # positions into self.indices (or the anchor range)
 
         if self.shuffle:
-            rng_seed = (self.seed + epoch) if self.seed is not None else None
-            rng = np.random.default_rng(rng_seed)
+            rng = epoch_rng(self.seed, epoch)
             rng.shuffle(pos)
 
         if self.distributed:

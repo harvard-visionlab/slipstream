@@ -4,6 +4,23 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.8.0] - 2026-09-29
+
+### Changed (seeded streams differ from 0.7.x)
+
+- Seeds are now hashed instead of added. Every seeded per-sample draw in the decoders (RRC /
+  direct RRC crops, multi-crop views, resize-short-crop-long sizes and positions, embed placement,
+  `DecodeVideoWindow` t0) uses `SeedSequence([seed, counter, *stream])` through
+  `slipstream.decoders._seeds.sample_seeds`, and the loader's epoch shuffle uses
+  `SeedSequence([seed, epoch])`. Previously the per-sample seed was `seed + B*counter + i` and the
+  shuffle seed was `seed + epoch`. That made seed `s+1` replay seed `s` shifted by one sample (or
+  one epoch), gave SSL view `k+1` of sample `i` the draws of view `k` of sample `i+1`, and made
+  some size draws reuse the position seed of the same or the next batch. Same seed + same
+  version is still bit-reproducible, `set_epoch` resume is unchanged, and crops that share a seed
+  are still yoked. **A given seed now produces different crops and orders than 0.7.x.**
+- Private Numba crop kernels (`_generate_*_params_batch`, `_embed_batch_rgba`) take a per-sample
+  `seeds` array instead of a scalar `seed`.
+
 ## [0.7.1] - 2026-09-29
 
 ### Fixed
