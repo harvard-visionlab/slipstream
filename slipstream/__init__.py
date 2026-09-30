@@ -108,7 +108,7 @@ from slipstream.pipelines import (
 )
 
 # Readers (dataset format adapters)
-from slipstream.readers import FFCVFileReader, SlipstreamImageFolder, StreamingReader, open_imagefolder
+from slipstream.readers import FFCVFileReader, StreamingReader
 
 # Visualization
 from slipstream.vis import show_batch, show_rgba
@@ -229,3 +229,15 @@ __all__ = [
     # Dataset preparation
     "prep",
 ]
+
+
+# SlipstreamImageFolder subclasses torchvision's ImageFolder; importing torchvision costs seconds
+# (models, torch._dynamo), so the imagefolder module loads on first use (PEP 562).
+_LAZY_IMAGEFOLDER = ("SlipstreamImageFolder", "open_imagefolder")
+
+
+def __getattr__(name):
+    if name in _LAZY_IMAGEFOLDER:
+        from slipstream.readers import imagefolder  # noqa: PLC0415
+        return getattr(imagefolder, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

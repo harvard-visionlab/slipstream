@@ -56,6 +56,15 @@ elif sys.platform == "darwin":
     ])
     extra_link_args = [f"-Wl,-rpath,{homebrew_prefix}/lib"]
 
+# User / environment prefixes (checked first): $TURBOJPEG_ROOT, an active conda env
+# ($CONDA_PREFIX, e.g. conda-forge libjpeg-turbo), and ~/.local (cmake installs use lib64).
+prefixes = [os.environ.get("TURBOJPEG_ROOT"), os.environ.get("CONDA_PREFIX"), f"{home}/.local"]
+for prefix in reversed([p for p in prefixes if p]):
+    include_dirs.insert(0, f"{prefix}/include")
+    for sub in ("lib", "lib64"):
+        library_dirs.insert(0, f"{prefix}/{sub}")
+        extra_link_args.append(f"-Wl,-rpath,{prefix}/{sub}")
+
 # Define the C++ extension
 libslipstream = Extension(
     "_libslipstream",

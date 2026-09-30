@@ -4,6 +4,29 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.9.2] - 2026-09-30
+
+### Changed
+
+- `import slipstream` no longer imports torchvision (it pulled in torchvision.models and
+  torch._dynamo: ~2.6 s of a 7.9 s cold import on FASRC, 0.5 s locally). `decode_image` imports
+  it on first call, and `SlipstreamImageFolder` / `open_imagefolder` load on first access
+  (`from slipstream import SlipstreamImageFolder` still works). No API change.
+- The build hook now fails the install when the libslipstream C++ extension can't be built,
+  instead of warning and producing a slipstream whose decode pipelines fail at the first batch.
+  `SLIPSTREAM_SKIP_EXT=1` installs without it on purpose (e.g. CLI-only machines).
+
+### Fixed
+
+- `libslipstream/setup.py` also searches `$TURBOJPEG_ROOT`, `$CONDA_PREFIX` and `~/.local`
+  (`include`, `lib` and `lib64`, with rpaths). A cmake install of libjpeg-turbo into ~/.local
+  (lib64) or a conda-forge install was not found before.
+
+### Added
+
+- `slipstream status` reports whether the decoder is built and loadable, and lists a missing
+  decoder under Problems. There is a new `decoder` key in `--json`, and `slipstream.cli.check_decoder()`.
+
 ## [0.9.1] - 2026-09-29
 
 ### Fixed

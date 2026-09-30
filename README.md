@@ -35,8 +35,13 @@ _Full benchmarks: [BENCHMARKS.md](BENCHMARKS.md)_
 ```bash
 uv add git+https://github.com/harvard-visionlab/slipstream
 
-# Required: libturbojpeg
-# apt install libturbojpeg  # Ubuntu/Debian
+# Required: the TurboJPEG API library (libturbojpeg + turbojpeg.h), needed to build the decoder
+# brew install libjpeg-turbo              # macOS
+# apt install libturbojpeg0-dev           # Ubuntu/Debian
+# conda install -c conda-forge libjpeg-turbo  # no root (clusters); or cmake-install into ~/.local
+# TURBOJPEG_ROOT=<prefix> for any other install prefix.
+# The install fails if the decoder can't be built; SLIPSTREAM_SKIP_EXT=1 installs without it
+# (CLI-only use). `uv run slipstream status` shows whether the decoder is available.
 
 # Optional: S3 remote cache support
 uv tool install s5cmd

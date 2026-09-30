@@ -17,6 +17,11 @@ uv run pytest tests/ -v          # Run tests
 uv run python libslipstream/setup.py build_ext --inplace
 ```
 
+The hatch build hook (`hatch_build.py`) fails the install when this build fails (0.9.2+);
+`SLIPSTREAM_SKIP_EXT=1` skips it deliberately. `setup.py` also searches `$TURBOJPEG_ROOT`,
+`$CONDA_PREFIX` and `~/.local` (`lib` and `lib64`). Keep `import slipstream` free of torchvision
+(it costs seconds on cluster filesystems): import it inside functions or lazily via `__getattr__`.
+
 **CLI** (`slipstream/cli.py`, entry point `slipstream` / `python -m slipstream`):
 
 ```bash

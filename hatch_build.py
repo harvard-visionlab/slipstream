@@ -7,6 +7,12 @@ a manual `python libslipstream/setup.py build_ext --inplace` step.
 Requires system libturbojpeg:
   - macOS: brew install libjpeg-turbo
   - Ubuntu: apt-get install libturbojpeg0-dev
+  - no root (e.g. a cluster): conda-forge libjpeg-turbo, or a cmake install into ~/.local;
+    point TURBOJPEG_ROOT at a non-standard prefix.
+
+A failed build fails the install (a slipstream without the decoder only breaks later, at the first
+batch). Set SLIPSTREAM_SKIP_EXT=1 to install without it on purpose, e.g. on a machine that
+only uses the CLI helpers; `slipstream status` reports whether the decoder is available.
 """
 
 import os
@@ -32,6 +38,13 @@ class LibslipstreamBuildHook(BuildHookInterface):
             )
             return
 
+        if os.environ.get("SLIPSTREAM_SKIP_EXT", "").strip().lower() in ("1", "true", "yes"):
+            self.app.display_warning(
+                "SLIPSTREAM_SKIP_EXT is set: skipping the libslipstream C++ build. "
+                "NumbaBatchDecoder and every JPEG/YUV decode pipeline will be unavailable."
+            )
+            return
+
         self.app.display_info("Building libslipstream C++ extension...")
 
         try:
@@ -40,17 +53,16 @@ class LibslipstreamBuildHook(BuildHookInterface):
                 cwd=str(libdir),
                 env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
             )
-            self.app.display_success("libslipstream C++ extension built successfully")
-        except subprocess.CalledProcessError as e:
-            self.app.display_warning(
-                f"Failed to build libslipstream C++ extension (exit code {e.returncode}). "
-                "The NumbaBatchDecoder will not be available. "
-                "Ensure libturbojpeg is installed:\n"
-                "  macOS: brew install libjpeg-turbo\n"
-                "  Ubuntu: apt-get install libturbojpeg0-dev"
-            )
-        except FileNotFoundError:
-            self.app.display_warning(
-                "Python executable not found for C++ extension build. "
-                "Run manually: uv run python libslipstream/setup.py build_ext --inplace"
-            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            detail = f"exit code {e.returncode}" if isinstance(e, subprocess.CalledProcessError) else str(e)
+            raise RuntimeError(
+                f"Failed to build the libslipstream C++ extension ({detail}); without it "
+                "NumbaBatchDecoder and every decode pipeline fail. It needs the TurboJPEG API "
+                "library (libturbojpeg + turbojpeg.h), not just libjpeg:\n"
+                "  macOS:  brew install libjpeg-turbo\n"
+                "  Ubuntu: apt-get install libturbojpeg0-dev\n"
+                "  no root (cluster): conda install -c conda-forge libjpeg-turbo (in an active env), "
+                "or build libjpeg-turbo with cmake into ~/.local, or set TURBOJPEG_ROOT=<prefix>\n"
+                "To install without the decoder on purpose (CLI-only machines): SLIPSTREAM_SKIP_EXT=1"
+            ) from e
+        self.app.display_success("libslipstream C++ extension built successfully")

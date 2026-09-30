@@ -355,6 +355,21 @@ def remote_listing(
 # --------------------------------------------------------------------------- #
 
 
+def check_decoder() -> dict[str, Any]:
+    """Whether the libslipstream C++ decoder (TurboJPEG) is built and loadable."""
+    try:
+        from slipstream.decoders.numba_decoder import _find_library, load_library
+
+        try:
+            path = _find_library()
+        except RuntimeError:
+            return {"available": False, "path": None, "error": "not built (no libslipstream/_libslipstream*.so)"}
+        load_library()
+        return {"available": True, "path": str(path), "error": None}
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        return {"available": False, "path": None, "error": str(exc).splitlines()[0]}
+
+
 def collect_status(
     *, check_remote_access: bool = True, endpoint_url: str | None = None
 ) -> dict[str, Any]:
@@ -371,6 +386,7 @@ def collect_status(
         "cache": asdict(cache),
         "s3": asdict(s3),
         "caches": [{"name": n, "bytes": b} for n, b in caches],
+        "decoder": check_decoder(),
     }
 
 
@@ -398,6 +414,13 @@ def problems(status: dict[str, Any]) -> list[str]:
                 f"No write access to cache dir {cache_path}; "
                 "existing caches are usable but new ones cannot be written."
             )
+    dec = status.get("decoder")
+    if dec and not dec["available"]:
+        out.append(
+            f"libslipstream decoder {dec['error']}: JPEG/YUV decode pipelines will fail. "
+            "Install the TurboJPEG API library (libturbojpeg + turbojpeg.h; TURBOJPEG_ROOT for a "
+            "custom prefix) and reinstall."
+        )
     s3 = status["s3"]
     if s3["s5cmd_error"]:
         out.append(f"s5cmd not usable: {s3['s5cmd_error']}  (fix: uv tool install s5cmd)")
@@ -429,6 +452,9 @@ def print_status(status: dict[str, Any]) -> None:
 
     p(f"slipstream {status['slipstream_version']}  ·  python {status['python']}")
     p(f"{status['user']}@{status['host']}")
+    dec = status.get("decoder")
+    if dec:
+        p(f"decoder  {OK}  {dec['path']}" if dec["available"] else f"decoder  {BAD}  {dec['error']}")
     p()
 
     p("Cache directory")

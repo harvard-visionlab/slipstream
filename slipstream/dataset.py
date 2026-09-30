@@ -32,9 +32,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 from PIL import Image
-from torchvision.io import ImageReadMode
-from torchvision.io import decode_image as tv_decode_image
-from torchvision.transforms import functional as tvf
+
+# torchvision is imported inside decode_image: importing it pulls in torchvision.models and
+# torch._dynamo (seconds on a network filesystem), which `import slipstream` should not pay.
 
 if TYPE_CHECKING:
     from litdata.streaming.resolver import Dir
@@ -310,6 +310,10 @@ def decode_image(image_data: bytes | dict | np.ndarray | torch.Tensor | Image.Im
                 image_data = f.read()
         else:
             raise ValueError(f"Unsupported image dict format: {list(image_data.keys())}")
+
+    from torchvision.io import ImageReadMode
+    from torchvision.io import decode_image as tv_decode_image
+    from torchvision.transforms import functional as tvf
 
     # Already a tensor - return as-is or convert to PIL
     if isinstance(image_data, torch.Tensor):

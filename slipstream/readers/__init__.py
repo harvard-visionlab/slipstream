@@ -5,7 +5,6 @@ Readers provide a uniform interface for accessing data from various formats
 """
 
 from slipstream.readers.ffcv import FFCVFileReader
-from slipstream.readers.imagefolder import SlipstreamImageFolder, open_imagefolder
 from slipstream.readers.streaming import StreamingReader
 
 __all__ = [
@@ -14,3 +13,15 @@ __all__ = [
     "StreamingReader",
     "open_imagefolder",
 ]
+
+
+# SlipstreamImageFolder subclasses torchvision's ImageFolder; importing torchvision costs seconds
+# (models, torch._dynamo), so the imagefolder module loads on first use (PEP 562).
+_LAZY_IMAGEFOLDER = ("SlipstreamImageFolder", "open_imagefolder")
+
+
+def __getattr__(name):
+    if name in _LAZY_IMAGEFOLDER:
+        from slipstream.readers import imagefolder
+        return getattr(imagefolder, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
