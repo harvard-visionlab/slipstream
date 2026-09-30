@@ -20,7 +20,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from slipstream.cache import MANIFEST_FILE
+from slipstream.utils.cache_dir import MANIFEST_FILE
 
 
 def _resolve_cache_dir(source) -> Path:

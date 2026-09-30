@@ -57,7 +57,7 @@ DatasetLike = Any  # Using Any since Protocol requires runtime_checkable for isi
 # Constants
 # =============================================================================
 
-MANIFEST_FILE = "manifest.json"
+from slipstream.utils.cache_dir import MANIFEST_FILE  # noqa: E402  (defined there so the CLI needs no numba)
 CACHE_VERSION = 1
 
 # Metadata dtype for variable-size fields (images, bytes, strings)

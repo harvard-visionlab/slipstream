@@ -18,6 +18,9 @@ Usage on cluster:
 import os
 from pathlib import Path
 
+# Name of a slipcache's manifest (re-exported by slipstream.cache).
+MANIFEST_FILE = "manifest.json"
+
 # Environment variable name for cache directory override
 CACHE_DIR_ENV_VAR = "SLIPSTREAM_CACHE_DIR"
 

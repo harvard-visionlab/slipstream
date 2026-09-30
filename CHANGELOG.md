@@ -8,10 +8,14 @@ All notable changes to slipstream are documented here. Versions follow
 
 ### Changed
 
-- `import slipstream` no longer imports torchvision (it pulled in torchvision.models and
-  torch._dynamo: ~2.6 s of a 7.9 s cold import on FASRC, 0.5 s locally). `decode_image` imports
-  it on first call, and `SlipstreamImageFolder` / `open_imagefolder` load on first access
-  (`from slipstream import SlipstreamImageFolder` still works). No API change.
+- `import slipstream` is lazy (PEP 562): every public name, and submodules such as
+  `slipstream.decoders`, loads on first access. The import no longer pulls in torch, numba,
+  litdata or torchvision: it now takes ~10 ms, down from 7.9 s cold on FASRC with 0.9.0 (3.3 s with
+  only torchvision made lazy) and 1.2 s locally. `from slipstream import X`, `slipstream.X`,
+  `from slipstream import *` and type checkers (via a `TYPE_CHECKING` block) work as before.
+  `decode_image` imports torchvision on first call. `slipstream.cli` no longer loads numba
+  (`MANIFEST_FILE` now lives in `slipstream.utils.cache_dir`; `slipstream.cache` re-exports it).
+  No API change.
 - The build hook now fails the install when the libslipstream C++ extension can't be built,
   instead of warning and producing a slipstream whose decode pipelines fail at the first batch.
   `SLIPSTREAM_SKIP_EXT=1` installs without it on purpose (e.g. CLI-only machines).

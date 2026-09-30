@@ -32,8 +32,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from slipstream.cache import MANIFEST_FILE
-from slipstream.utils.cache_dir import CACHE_DIR_ENV_VAR, DEFAULT_CACHE_DIR
+from slipstream.utils.cache_dir import CACHE_DIR_ENV_VAR, DEFAULT_CACHE_DIR, MANIFEST_FILE
 from slipstream.version import __version__
 
 # S3 location of the lab caches; used for the bucket read test.

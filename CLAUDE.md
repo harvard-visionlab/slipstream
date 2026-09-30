@@ -19,8 +19,9 @@ uv run python libslipstream/setup.py build_ext --inplace
 
 The hatch build hook (`hatch_build.py`) fails the install when this build fails (0.9.2+);
 `SLIPSTREAM_SKIP_EXT=1` skips it deliberately. `setup.py` also searches `$TURBOJPEG_ROOT`,
-`$CONDA_PREFIX` and `~/.local` (`lib` and `lib64`). Keep `import slipstream` free of torchvision
-(it costs seconds on cluster filesystems): import it inside functions or lazily via `__getattr__`.
+`$CONDA_PREFIX` and `~/.local` (`lib` and `lib64`). `slipstream/__init__.py` is a lazy namespace (PEP 562 `_LAZY` map): add new
+public names to `_LAZY`, `__all__` and the `TYPE_CHECKING` block, never as eager imports. Keep
+`slipstream.cli` free of torch/numba (visionlab-datasets imports it): test_import_and_build.py guards both.
 
 **CLI** (`slipstream/cli.py`, entry point `slipstream` / `python -m slipstream`):
 

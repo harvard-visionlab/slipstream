@@ -15,6 +15,22 @@ def test_import_does_not_load_torchvision():
     assert _run("import sys, slipstream; print('torchvision' in sys.modules)") == "False"
 
 
+def test_import_loads_no_heavy_dependency():
+    # Whole namespace is lazy (PEP 562): names load on first access.
+    out = _run("import sys, slipstream; print([m for m in ('torch', 'numba', 'litdata', 'torchvision') if m in sys.modules])")
+    assert out == "[]"
+
+
+def test_every_public_name_resolves():
+    out = _run(
+        "import slipstream\n"
+        "bad = [n for n in slipstream.__all__ if getattr(slipstream, n, None) is None and n != 'prep']\n"
+        "import slipstream.decoders as d\n"
+        "print(bad, slipstream.decoders is d, slipstream.prep.__name__, 'SlipstreamLoader' in dir(slipstream))"
+    )
+    assert out == "[] True slipstream.prep True"
+
+
 def test_lazy_imagefolder_exports_resolve():
     out = _run(
         "import sys, slipstream\n"
@@ -44,3 +60,9 @@ def test_decoder_status_reported():
     assert not any("decoder" in m for m in cli.problems(status))
     del status["decoder"]                          # dicts built by other tools (no decoder key) still work
     assert cli.problems(status) == []
+
+
+def test_cli_import_is_light():
+    # visionlab-datasets imports slipstream.cli for `visionlab-datasets status`.
+    out = _run("import sys, slipstream.cli; print([m for m in ('torch', 'numba', 'litdata', 'torchvision') if m in sys.modules])")
+    assert out == "[]"
