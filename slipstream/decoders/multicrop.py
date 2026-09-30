@@ -15,7 +15,7 @@ import copy
 import numpy as np
 
 from slipstream.decoders._window import repeat_params
-from slipstream.decoders._seeds import sample_seeds, STREAM_SIZE, STREAM_EMBED
+from slipstream.seeds import DEFAULT_KEY, sample_seeds, STREAM_SIZE, STREAM_EMBED
 import torch
 
 from numba import njit
@@ -314,7 +314,7 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
             log_ratio_max = math.log(ratio[1])
 
             # Same seed -> same draws (yoked crops); unseeded crops get their own stream.
-            batch_seeds = sample_seeds(seed, batch_offset, batch_size, *(() if seed is not None else (c,)))
+            batch_seeds = sample_seeds(seed, batch_offset, batch_size, *(() if seed is not None else (c,)), key=self._decoder._seed_key)
 
             params = _generate_fn(
                 widths_i32, heights_i32,
@@ -508,7 +508,7 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
 
             # Per-image seeds (same keys as DecodeMultiRandomResizedCrop)
             crop_key = () if seed is not None else (c,)
-            pos_seeds = sample_seeds(seed, batch_offset, batch_size, *crop_key)
+            pos_seeds = sample_seeds(seed, batch_offset, batch_size, *crop_key, key=self._decoder._seed_key)
 
             # Determine target size for this crop
             crop_size_mode = self._crop_size_modes[c]
@@ -517,7 +517,7 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                 target_size = size_range[0]
             elif crop_size_mode == "per_batch":
                 # One random size for the whole batch
-                rng = np.random.RandomState(sample_seeds(seed, batch_offset, 1, STREAM_SIZE, *crop_key)[0])
+                rng = np.random.RandomState(sample_seeds(seed, batch_offset, 1, STREAM_SIZE, *crop_key, key=self._decoder._seed_key)[0])
                 target_size = int(rng.randint(size_range[0], size_range[1] + 1))
             else:
                 target_size = None  # per_image — handled in slow path
@@ -551,7 +551,7 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                 else:
                     # Per-image random sizes
                     target_sizes_arr = np.empty(batch_size, dtype=np.int32)
-                    size_seeds = sample_seeds(seed, batch_offset, batch_size, STREAM_SIZE, *crop_key)
+                    size_seeds = sample_seeds(seed, batch_offset, batch_size, STREAM_SIZE, *crop_key, key=self._decoder._seed_key)
                     for i in range(batch_size):
                         rng_i = np.random.RandomState(size_seeds[i])
                         target_sizes_arr[i] = int(
@@ -877,6 +877,7 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
         )
         self.embed_seed = embed_seed
         self._embed_seed_counter = 0
+        self._seed_key = DEFAULT_KEY   # (rank, epoch), set by slipstream.seeds.reseed
 
         # Inner decoder — always HWC, no permute/tensor (we handle that)
         self._inner = DecodeMultiRandomResizeShortCropLong(
@@ -934,7 +935,8 @@ class DecodeMultiResizeCropEmbed(BatchTransform):
 
             # Compute embed seed for this crop
             # Per-image placement seeds; the crop index keeps crops independent.
-            embed_seeds = sample_seeds(self._embed_seeds[c], self._embed_seed_counter, batch_size, STREAM_EMBED, c)
+            embed_seeds = sample_seeds(self._embed_seeds[c], self._embed_seed_counter, batch_size, STREAM_EMBED, c,
+                                       key=self._seed_key)
 
             embed_coords = self._embed_coords[c]
 

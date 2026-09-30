@@ -58,7 +58,7 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 
-from slipstream.decoders._seeds import sample_seeds
+from slipstream.seeds import DEFAULT_KEY, sample_seeds
 from slipstream.decoders.base import BatchTransform
 
 
@@ -218,6 +218,7 @@ class DecodeVideoWindow(BatchTransform):
         self.name = name
 
         self._seed_counter = 0
+        self._seed_key = DEFAULT_KEY   # (rank, epoch), set by slipstream.seeds.reseed
         self._pool: ThreadPoolExecutor | None = None
         self._pool_lock = threading.Lock()
         self._VideoDecoder = None
@@ -398,7 +399,7 @@ class DecodeVideoWindow(BatchTransform):
             if len(t0_given) != B:
                 raise ValueError(f"sample_data[{self.t0_key!r}] has {len(t0_given)} entries for a batch of {B}")
         self._seed_counter += 1
-        seeds = sample_seeds(self.seed, self._seed_counter, B).tolist()
+        seeds = sample_seeds(self.seed, self._seed_counter, B, key=self._seed_key).tolist()
 
         pend = _PendingBatch(B, self.T, field, None if indices is None else np.asarray(indices, dtype=np.int64).copy())
         for i in range(B):

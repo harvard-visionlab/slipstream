@@ -92,4 +92,6 @@ def test_embed_set_epoch_resumes(fmt):
         assert np.array_equal(ai, bi)
         assert np.array_equal(a, b)
     resumed_loader.set_epoch(5)
-    assert dec2._embed_seed_counter == dec2._inner._decoder._seed_counter == 5 * len(resumed_loader)
+    # 0.9.0: set_epoch restarts streams at (rank, epoch) with counters back at 0.
+    assert dec2._embed_seed_counter == dec2._inner._decoder._seed_counter == 0
+    assert dec2._seed_key == dec2._inner._decoder._seed_key == (0, 5)

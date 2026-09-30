@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+from slipstream.seeds import stream_seed
 
 
 def _derangement(n: int, rng: np.random.Generator) -> np.ndarray:
@@ -142,7 +143,7 @@ class SideBySideSearchPair:
         self.require_different_class = bool(require_different_class)
         self.p_left = float(p_left)
         self.seed = seed
-        self.rng = np.random.default_rng(seed)
+        self.rng = np.random.default_rng(None if seed is None else stream_seed(self))
 
         # Last-call params (useful for testing / visualization).
         self.last_target_side: np.ndarray | None = None

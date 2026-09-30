@@ -7,6 +7,7 @@ https://arxiv.org/pdf/1708.04896.pdf
 import math
 import torch
 from .base import BatchAugment
+from slipstream.seeds import stream_seed
 
 
 _VALID_MODES = ("zeros", "random_color_uniform", "random_color_pixel")
@@ -78,7 +79,7 @@ class RandomErasing(BatchAugment):
         self._rng_device = device
         if self.seed is not None and device is not None:
             self.rng = torch.Generator(device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
         self.do = None
         self.top = None
@@ -91,7 +92,7 @@ class RandomErasing(BatchAugment):
     def _init_rng(self, device):
         if self.seed is not None and self.rng is None:
             self.rng = torch.Generator(device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     def _sample_fill(self, shape, dtype, device):
         """Draw a fill tensor of `shape` matching input dtype/device."""

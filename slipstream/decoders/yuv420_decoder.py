@@ -19,7 +19,7 @@ from typing import Any
 import numpy as np
 
 from slipstream.decoders._window import repeat_params
-from slipstream.decoders._seeds import sample_seeds
+from slipstream.seeds import DEFAULT_KEY, sample_seeds
 from numpy.typing import NDArray
 
 from slipstream.decoders.numba_decoder import (
@@ -476,6 +476,7 @@ class YUV420NumbaBatchDecoder:
         self._yuv_crop_fn = _get_yuv420_yuv_crop()
         self._extract_planes_fn = _get_yuv420_extract_planes()
         self._seed_counter = 0
+        self._seed_key = DEFAULT_KEY   # (rank, epoch), set by slipstream.seeds.reseed
         self.seed_repeat = 1   # window support, see slipstream.decoders._window
 
         self._temp_buffer: np.ndarray | None = None
@@ -584,7 +585,7 @@ class YUV420NumbaBatchDecoder:
         log_ratio_max = math.log(ratio[1])
 
         self._seed_counter += 1
-        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size)
+        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size, key=self._seed_key)
 
         crop_params = repeat_params(_generate_random_crop_params_batch(
             widths_i32, heights_i32,
@@ -631,7 +632,7 @@ class YUV420NumbaBatchDecoder:
         log_ratio_max = math.log(ratio[1])
 
         self._seed_counter += 1
-        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size)
+        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size, key=self._seed_key)
 
         crop_params = repeat_params(_generate_direct_random_crop_params_batch(
             widths_i32, heights_i32,
@@ -777,7 +778,7 @@ class YUV420NumbaBatchDecoder:
         all_crop_params = np.zeros((num_crops, batch_size, 4), dtype=np.int32)
         for c in range(num_crops):
             self._seed_counter += 1
-            batch_seeds = sample_seeds(seeds[c] if seeds is not None else None, self._seed_counter, batch_size)
+            batch_seeds = sample_seeds(seeds[c] if seeds is not None else None, self._seed_counter, batch_size, key=self._seed_key)
 
             all_crop_params[c] = repeat_params(_generate_random_crop_params_batch(
                 widths_i32, heights_i32,
@@ -1062,7 +1063,7 @@ class YUV420NumbaBatchDecoder:
         log_ratio_max = math.log(ratio[1])
 
         self._seed_counter += 1
-        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size)
+        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size, key=self._seed_key)
 
         crop_params = repeat_params(_generate_random_crop_params_batch(
             widths_i32, heights_i32,

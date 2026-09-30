@@ -6,6 +6,7 @@ from .base import BatchAugment
 from . import functional as F
 from . import functional_tensor as FT
 from ._compat import mask_batch
+from slipstream.seeds import stream_seed
 
 
 def _check_input(value, name, center=1, bound=(0, float("inf")), clip_first_on_zero=True):
@@ -44,7 +45,7 @@ class ColorJitter(BatchAugment):
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     @staticmethod
     def sample_params(b, n, hue, saturation, value, contrast, generator):
@@ -105,7 +106,7 @@ class RandomColorJitter(BatchAugment):
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     @staticmethod
     def sample_params(b, n, hue, saturation, value, contrast, generator):
@@ -176,7 +177,7 @@ class RandomColorJitterYIQ(BatchAugment):
     def _init_rng(self, device):
         if self.seed is not None and device is not None and self.rng is None:
             self.rng = torch.Generator(device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     def sample_params(self, b, n, hue, saturation, value, brightness, contrast):
         h = b.new_zeros(n).uniform_(hue[0], hue[1], generator=self.rng) if hue is not None else b.new_zeros(n)

@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from slipstream.decoders._seeds import sample_seeds
+from slipstream.seeds import sample_seeds
 from slipstream.decoders.numba_decoder import (
     _generate_direct_random_crop_params_batch,
     _generate_random_crop_params_batch,

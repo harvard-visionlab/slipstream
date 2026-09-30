@@ -36,7 +36,7 @@ def estimate_rejection_fallback_rate(
         - ``"recommend_direct"``: True if fallback_rate > 5%
     """
     import math
-    from slipstream.decoders._seeds import sample_seeds
+    from slipstream.seeds import sample_seeds
     from slipstream.decoders.numba_decoder import _generate_random_crop_params_batch
 
     widths = np.asarray(widths, dtype=np.int32)

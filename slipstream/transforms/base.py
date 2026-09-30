@@ -3,6 +3,7 @@
 import torch
 
 from slipstream.decoders._window import expand_groups, n_groups
+from slipstream.seeds import stream_seed
 
 
 class BatchAugment:
@@ -85,7 +86,7 @@ class RandomApply:
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     def before_call(self, b, **kwargs):
         self.do = self.p == 1.0 or torch.rand(1, generator=self.rng).item() < self.p

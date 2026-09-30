@@ -36,7 +36,7 @@ from typing import Any
 import numpy as np
 
 from slipstream.decoders._window import repeat_params
-from slipstream.decoders._seeds import sample_seeds
+from slipstream.seeds import DEFAULT_KEY, sample_seeds
 from numba import njit, prange, set_num_threads
 from numpy.typing import NDArray
 
@@ -998,6 +998,7 @@ class NumbaBatchDecoder:
 
         # Seed counter for random crops
         self._seed_counter = 0
+        self._seed_key = DEFAULT_KEY   # (rank, epoch), set by slipstream.seeds.reseed
         # Window support: repeat per-sample crop params across groups of `seed_repeat`
         # consecutive samples (set by SlipstreamLoader(window=...); 1 = independent samples)
         self.seed_repeat = 1
@@ -1381,7 +1382,7 @@ class NumbaBatchDecoder:
         log_ratio_max = math.log(ratio[1])
 
         self._seed_counter += 1
-        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size)
+        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size, key=self._seed_key)
 
         crop_params = repeat_params(_generate_random_crop_params_batch(
             widths_i32, heights_i32,
@@ -1452,7 +1453,7 @@ class NumbaBatchDecoder:
         log_ratio_max = math.log(ratio[1])
 
         self._seed_counter += 1
-        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size)
+        batch_seeds = sample_seeds(seed, self._seed_counter, batch_size, key=self._seed_key)
 
         crop_params = repeat_params(_generate_direct_random_crop_params_batch(
             widths_i32, heights_i32,
@@ -1523,7 +1524,7 @@ class NumbaBatchDecoder:
         all_crop_params = np.zeros((num_crops, batch_size, 4), dtype=np.int32)
         for c in range(num_crops):
             self._seed_counter += 1
-            batch_seeds = sample_seeds(seeds[c] if seeds is not None else None, self._seed_counter, batch_size)
+            batch_seeds = sample_seeds(seeds[c] if seeds is not None else None, self._seed_counter, batch_size, key=self._seed_key)
 
             all_crop_params[c] = repeat_params(_generate_random_crop_params_batch(
                 widths_i32, heights_i32,

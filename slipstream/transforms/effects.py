@@ -7,6 +7,7 @@ from torch.nn.modules.utils import _pair
 from .base import BatchAugment
 from . import functional as F
 from ._compat import mask_batch, mask_tensor
+from slipstream.seeds import stream_seed
 
 
 class RandomGaussianBlur(BatchAugment):
@@ -33,7 +34,7 @@ class RandomGaussianBlur(BatchAugment):
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     def _get_gaussian_kernel1d(self, kernel_size, sigma):
         ksize_half = (kernel_size - 1) * 0.5
@@ -95,7 +96,7 @@ class RandomSolarization(BatchAugment):
     def _init_rng(self, device):
         if self.seed is not None and device is not None and self.rng is None:
             self.rng = torch.Generator(device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     def before_call(self, b, **kwargs):
         self._init_rng(b.device)
@@ -149,7 +150,7 @@ class RandomPatchShuffle(BatchAugment):
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
         self.base_grids = {}
         self.patches = {}
         self._init_grid_patches(img_size)

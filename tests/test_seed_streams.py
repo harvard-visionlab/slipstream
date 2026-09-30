@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from slipstream.decoders._seeds import STREAM_SIZE, epoch_rng, sample_seeds
+from slipstream.seeds import STREAM_SIZE, epoch_rng, sample_seeds
 from slipstream.decoders.numba_decoder import (
     _generate_random_crop_params_batch,
     _generate_resize_short_crop_long_params_batch,
@@ -24,7 +24,7 @@ B = 16
 
 def test_sample_seeds_pinned():
     # Changing these values changes every seeded augmentation stream: bump the minor version.
-    pinned = [1501029259, 415423813, 425966647, 3516250141]
+    pinned = [1454127163, 941260221, 3081047910, 3224389247]   # (seed 0, rank 0, epoch 0, counter 1)
     assert sample_seeds(0, 1, 4).tolist() == pinned
     assert sample_seeds(0, 1, 8)[:4].tolist() == pinned        # prefix-stable in n
 

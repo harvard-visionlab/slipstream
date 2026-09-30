@@ -57,7 +57,7 @@ import numpy as np
 import torch
 
 from slipstream.cache import MANIFEST_FILE, OptimizedCache
-from slipstream.decoders._seeds import epoch_rng
+from slipstream.seeds import epoch_rng, reseed
 
 if TYPE_CHECKING:
     from slipstream.dataset import SlipstreamDataset
@@ -715,21 +715,47 @@ class SlipstreamLoader:
         return (anchors[:, None] + offsets[None, :]).reshape(-1)
 
     @staticmethod
-    def _walk_transforms(obj: Any):
-        """Yield obj and everything it wraps: pipeline lists, `.transforms`, `._decoder`, `._cpu_decoder`, `._inner`."""
+    def _walk_transforms(obj: Any, include_owned: bool = False):
+        """Yield obj and everything it wraps: lists, dicts, `.transforms`, `.pipelines`, `._decoder`,
+        `._cpu_decoder`, `._inner`. Transforms an object owns (``owns_transforms``) are skipped
+        unless ``include_owned``."""
         if obj is None:
             return
         if isinstance(obj, (list, tuple)):
             for o in obj:
-                yield from SlipstreamLoader._walk_transforms(o)
+                yield from SlipstreamLoader._walk_transforms(o, include_owned)
+            return
+        if isinstance(obj, dict):
+            for o in obj.values():
+                yield from SlipstreamLoader._walk_transforms(o, include_owned)
             return
         yield obj
-        for attr in ('transforms', '_decoder', '_cpu_decoder', '_inner'):
-            if attr == 'transforms' and getattr(obj, 'owns_transforms', False):
+        for attr in ('transforms', 'pipelines', '_decoder', '_cpu_decoder', '_inner'):
+            if attr == 'transforms' and getattr(obj, 'owns_transforms', False) and not include_owned:
                 continue                      # e.g. DecodeVideoWindow manages its inner transforms itself
             inner = getattr(obj, attr, None)
             if inner is not None and inner is not obj:
-                yield from SlipstreamLoader._walk_transforms(inner)
+                yield from SlipstreamLoader._walk_transforms(inner, include_owned)
+
+    def _seed_rank(self) -> int:
+        """Global torch.distributed rank (0 when not initialized): part of every augmentation seed key."""
+        if self.distributed:
+            return int(self.rank)
+        try:
+            import torch.distributed as dist
+            return int(dist.get_rank()) if dist.is_available() and dist.is_initialized() else 0
+        except Exception:                     # noqa: BLE001 - no distributed backend
+            return 0
+
+    def _reseed_epoch(self, epoch: int) -> None:
+        """Restart every augmentation stream at ``(seed, rank, epoch)`` (see slipstream.seeds)."""
+        key = (self._seed_rank(), int(epoch))
+        seen: set[int] = set()
+        roots = [list(self.pipelines.values()), list(self.after_batch_transforms)]
+        for obj in self._walk_transforms(roots, include_owned=True):
+            if id(obj) not in seen:
+                seen.add(id(obj))
+                reseed(obj, key)
 
     def _propagate_seed_repeat(self, T: int) -> None:
         """Tell every decoder / augmentation in the pipelines to share random params across T frames."""
@@ -768,24 +794,13 @@ class SlipstreamLoader:
         different shuffle orderings across epochs while keeping all
         ranks synchronized.
 
-        Also resets seed counters on all decoders used by pipelines so that
-        augmentations are reproducible from any epoch (e.g., checkpoint resume).
+        Also restarts every seeded decoder and transform (pipelines and
+        ``after_batch_transforms``) at ``(seed, rank, epoch)``, so a run resumed at
+        this epoch reproduces the fresh run exactly. Iterating does the same at the
+        start of each epoch, so calling ``set_epoch`` is optional for reproducibility.
         """
         self._epoch = epoch
-
-        # Reset seed counters on decoders to epoch * batches_per_epoch
-        # so augmentations resume deterministically from this epoch.
-        batches_per_epoch = len(self)
-        target_counter = epoch * batches_per_epoch
-
-        seen: set[int] = set()
-        for obj in self._walk_transforms(list(self.pipelines.values())):
-            if id(obj) in seen:
-                continue
-            seen.add(id(obj))
-            for attr in ('_seed_counter', '_embed_seed_counter'):   # _embed_*: DecodeMultiResizeCropEmbed
-                if hasattr(obj, attr):
-                    setattr(obj, attr, target_counter)
+        self._reseed_epoch(epoch)
 
     def _setup_prefetch_banks(self) -> None:
         """Set up pre-allocated memory banks for async prefetching."""
@@ -894,6 +909,7 @@ class SlipstreamLoader:
 
     def _iter_simple(self):
         """Simple iteration without threading (for debugging/profiling)."""
+        self._reseed_epoch(self._epoch)
         indices = self._generate_indices(self._epoch)
         self._epoch += 1
 
@@ -1015,6 +1031,7 @@ class SlipstreamLoader:
         # one — otherwise two workers write to the same prefetch banks.
         self._stop_worker()
 
+        self._reseed_epoch(self._epoch)
         indices = self._generate_indices(self._epoch)
         self._epoch += 1
 

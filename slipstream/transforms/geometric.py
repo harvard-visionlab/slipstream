@@ -4,6 +4,7 @@ import torch
 from .base import BatchAugment
 from . import functional as F
 from ._compat import mask_tensor
+from slipstream.seeds import stream_seed
 
 
 class RandomHorizontalFlip(BatchAugment):
@@ -21,7 +22,7 @@ class RandomHorizontalFlip(BatchAugment):
         self.device = device
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if self.device is None else self.device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     def before_call(self, b, **kwargs):
         n = b.shape[0] if (hasattr(b, "shape") and len(b.shape) == 4) else 1
@@ -77,7 +78,7 @@ class RandomRotate(BatchAugment):
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     def before_call(self, b, **kwargs):
         n = b.shape[0] if (hasattr(b, "shape") and len(b.shape) == 4) else 1
@@ -139,7 +140,7 @@ class RandomZoom(BatchAugment):
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     def before_call(self, b, **kwargs):
         n = b.shape[0] if (hasattr(b, "shape") and len(b.shape) == 4) else 1
@@ -198,7 +199,7 @@ class RandomRotateObject(BatchAugment):
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     def before_call(self, b, **kwargs):
         n = b.shape[0] if (hasattr(b, "shape") and len(b.shape) == 4) else 1
@@ -270,7 +271,7 @@ class RandomResizedCropBatch(BatchAugment):
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     def before_call(self, b, **kwargs):
         n = b.shape[0] if b.ndim == 4 else 1

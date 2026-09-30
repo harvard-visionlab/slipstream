@@ -72,9 +72,18 @@ Tests requiring S3 access must be marked `@pytest.mark.s3`.
 
 Numba's workqueue threading layer is NOT reentrant. The prefetch worker thread must use `parallel=False` for ALL Numba calls (both `load_batch` for image bytes and other fields). Only the main thread may use `parallel=True` (for decoders).
 
-### Pipeline seed conventions (must match lrm-ssl yaml)
+### Seeding (0.9.0+, see `slipstream/seeds.py`)
 
-Seed offsets defined in `pipelines/_common.py`:
+Every seeded stream is a pure function of `(seed, rank, epoch)`. The loader calls `seeds.reseed` on every
+decoder / transform / after_batch_transform at each epoch start and in `set_epoch`; decoders key per-sample
+draws with `sample_seeds(..., key=self._seed_key)`, transforms seed their generator with `stream_seed(self)`.
+New seeded code must follow this (never `seed + offset` arithmetic, never a raw `manual_seed(self.seed)`).
+The rank is the global rank and is never part of the shuffle seed.
+
+### Pipeline seed conventions
+
+Seed stream labels in `pipelines/_common.py` (values from lrm-ssl; hashed with the base seed via
+`derive_seed(base, offset, view)`, no longer added):
 
 - crop=1234, flip=1111, color/jitter=2222, gray=3333, solar=4444, blur=5555
 - Global crops: scale=(0.30, 1.0), size=224

@@ -4,6 +4,7 @@ import torch
 from .base import BatchAugment
 from . import functional as F
 from ._compat import mask_batch
+from slipstream.seeds import stream_seed
 
 
 class RandomBrightness(BatchAugment):
@@ -20,7 +21,7 @@ class RandomBrightness(BatchAugment):
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     def before_call(self, b, **kwargs):
         self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng, group=self.seed_repeat)
@@ -82,7 +83,7 @@ class RandomContrast(BatchAugment):
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
     def before_call(self, b, **kwargs):
         self.do, self.idx = mask_batch(b, p=self.p, rng=self.rng, group=self.seed_repeat)

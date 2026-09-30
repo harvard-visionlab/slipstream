@@ -4,6 +4,36 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.9.0] - 2026-09-29
+
+### Changed (seeded streams differ from 0.8.0)
+
+- Every seeded stream is now a pure function of `(seed, rank, epoch)` (`slipstream.seeds`). The
+  loader reseeds all decoders, seeded transforms (`BatchAugment`s, `RandomApply`) and
+  `after_batch_transforms` (`Mixup`, `CutMixClutter`, `SideBySideSearchPair`) at the start of every
+  epoch and in `set_epoch`. That includes objects nested in `MultiCropPipeline` / `Compose` /
+  `RandomApply` / wrappers and `DecodeVideoWindow`'s inner transforms.
+  - Fixes: seeded transforms were seeded once at construction and never reset, so a run resumed
+    at epoch N replayed epoch 0's flips / jitter / rotations / mixup.
+  - Fixes: decoders that advance their counter more than once per batch (e.g.
+    `DecodeUniformMultiRandomResizedCrop`) resumed from the wrong counter.
+  - Resume no longer depends on `set_epoch`'s counter arithmetic or on what else ran in between.
+- The global `torch.distributed` rank is part of every augmentation key, so DDP ranks no longer
+  draw identical crop boxes / flip masks at the same batch position. The epoch shuffle still
+  excludes the rank (one shared permutation, strided per rank).
+- Pipeline presets derive per-view / per-transform seeds with `derive_seed(base, offset, view)`
+  (hashed) instead of `base + offset + view`. The sum made base `b` view `k+1` identical to base
+  `b+1` view `k`.
+- Decoder `_seed_counter` now counts batches within the current epoch; the epoch and rank live in
+  `_seed_key`.
+
+### Added
+
+- `slipstream.derive_seed(base, *parts)`: 63-bit hashed seed for configs (use instead of
+  adding offsets to a base seed).
+- `slipstream.seeds`: `derive_seed`, `sample_seeds`, `stream_seed`, `epoch_rng`, `reseed`.
+  Objects used outside a loader behave as rank 0, epoch 0.
+
 ## [0.8.0] - 2026-09-29
 
 ### Changed (seeded streams differ from 0.7.x)

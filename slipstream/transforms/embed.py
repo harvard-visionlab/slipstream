@@ -4,6 +4,7 @@ import torch
 from torch.nn.modules.utils import _pair
 
 from .base import BatchAugment
+from slipstream.seeds import stream_seed
 
 
 def _even_ceil(n: int) -> int:
@@ -164,7 +165,7 @@ class RandomEmbed(BatchAugment):
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
         # ── stored params (set by before_call) ──
         self._xs = None
@@ -575,7 +576,7 @@ class RandomBackgroundBlend(BatchAugment):
         self.rng = None
         if self.seed is not None:
             self.rng = torch.Generator("cpu" if device is None else device)
-            self.rng.manual_seed(self.seed)
+            self.rng.manual_seed(stream_seed(self))
 
         self._do_fade = None
         self._do_background = None

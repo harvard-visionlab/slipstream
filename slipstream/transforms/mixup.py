@@ -19,6 +19,7 @@ import warnings
 
 import numpy as np
 import torch
+from slipstream.seeds import stream_seed
 
 
 def one_hot(target: torch.Tensor, num_classes: int, on_value: float = 1.0,
@@ -195,7 +196,7 @@ class Mixup:
         self.label_key = label_key
         self.mixed_label_key = mixed_label_key
         self.seed = seed
-        self.rng = np.random.default_rng(seed)
+        self.rng = np.random.default_rng(None if seed is None else stream_seed(self))
 
         # Last-call params (useful for testing / visualization).
         self.last_lam: torch.Tensor | None = None

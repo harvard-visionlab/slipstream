@@ -117,6 +117,9 @@ from slipstream.vis import show_batch, show_rgba
 from slipstream.s3_sync import sync_s3_dataset
 from slipstream.stats import compute_normalization_stats
 
+# Seed derivation
+from slipstream.seeds import derive_seed
+
 # Crop utilities
 from slipstream.utils.crop import (
     CropParams,
@@ -191,6 +194,8 @@ __all__ = [
     # Optimized cache (advanced)
     "OptimizedCache",
     "write_index",
+    # Seeds
+    "derive_seed",
     # Crop utilities
     "CropParams",
     "align_to_mcu",
