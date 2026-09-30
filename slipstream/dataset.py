@@ -705,6 +705,16 @@ class SlipstreamDataset(torch.utils.data.Dataset):
         if source is not None and _is_prebuilt_cache(str(source)):
             return _PrebuiltCacheReader(pathlib.Path(source))
 
+        # A slipcache that lost its manifest (e.g. a scratch purge) is not a raw data source:
+        # say so instead of handing it to another reader.
+        if source is not None and not str(source).startswith(("s3://", "gs://", "http://", "https://", "hf://")):
+            from slipstream.cache import CacheIntegrityError, _looks_like_slipcache
+            if _looks_like_slipcache(pathlib.Path(str(source))):
+                raise CacheIntegrityError(
+                    f"{source} holds slipcache data files but no manifest.json (deleted or purged?). "
+                    "Restore the cache from a trusted copy; slipstream will not rebuild it in place."
+                )
+
         # Check for FFCV .beton/.ffcv files
         if source is not None and _is_ffcv_source(str(source)):
             from slipstream.readers.ffcv import FFCVFileReader

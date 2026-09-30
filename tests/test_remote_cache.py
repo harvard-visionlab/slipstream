@@ -395,7 +395,8 @@ class TestCommandGeneration:
         )
         i = cmd.index("cp")
         # tuning flags must come after `cp` and before src/dst
-        assert cmd[i + 1 :][:5] == ["--show-progress", "--concurrency", "1", "--part-size", "64"]
+        assert cmd[i + 1 :][:7] == ["--show-progress", "--exclude", "manifest.json",
+                                    "--concurrency", "1", "--part-size", "64"]
         assert cmd[-2:] == ["s3://b/c/slipcache-x/*", str(tmp_path) + "/"]
 
     def test_upload_concurrency(self, tmp_path):
@@ -404,7 +405,8 @@ class TestCommandGeneration:
         (tmp_path / "manifest.json").write_text("{}")
         cmd = self._capture(upload_s3_cache, tmp_path, "s3://b/c/slipcache-x", concurrency=2)
         i = cmd.index("cp")
-        assert cmd[i + 1 : i + 5] == ["--show-progress", "--if-size-differ", "--concurrency", "2"]
+        assert cmd[i + 1 : i + 7] == ["--show-progress", "--if-size-differ", "--exclude", "manifest.json",
+                                      "--concurrency", "2"]
         assert cmd[-2:] == [str(tmp_path) + "/*", "s3://b/c/slipcache-x/"]
 
     def test_download_command_format(self, tmp_path):

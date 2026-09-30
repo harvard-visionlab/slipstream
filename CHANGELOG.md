@@ -4,6 +4,32 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.10.0] - 2026-09-30
+
+### Added
+
+- `SlipstreamLoader(on_invalid_cache="rebuild" | "raise")`. `"rebuild"` (default) keeps the old
+  behaviour. `"raise"` raises `CacheIntegrityError` (new, `slipstream.CacheIntegrityError`) listing the
+  problems, and never deletes or rebuilds: use it for shared read-only caches. It is automatic when the
+  dataset reads the cache directly (`SlipstreamDataset(input_dir=<cache>)`). Before, a failed check
+  wiped the only copy and then tried to rebuild it from that same, deleted, directory.
+- Content hashes: builds record `"file_sha256": {fname: sha256 hex}` next to `file_sizes` (same files:
+  every field storage file, not manifest.json or derived index files).
+  `OptimizedCache.check_integrity(cache_dir, deep=True, workers=None)` also hashes (in parallel), and
+  reports `no file_sha256 in manifest` on older caches. The `(ok, problems)` return is unchanged.
+  `OptimizedCache.add_hashes(cache_dir)` and `slipstream hash <cache_dir>` add hashes to an existing
+  cache (run on a trusted copy; refuses a copy that fails the cheap check).
+
+### Fixed
+
+- A directory with slipcache data files but no manifest.json (e.g. purged by scratch cleanup) is no
+  longer rebuilt in place by the loader, or handed to another reader by `SlipstreamDataset`: both
+  raise `CacheIntegrityError`. Use `force_rebuild=True` to rebuild on purpose.
+- manifest.json is written last and atomically: builds fsync the data files, then write a temp file,
+  fsync it and rename it. `download_s3_cache` removes a stale local manifest, copies the data, then
+  fetches the manifest last. `upload_s3_cache` uploads the data before the manifest. An interrupted
+  build or copy no longer looks complete.
+
 ## [0.9.6] - 2026-09-30
 
 ### Fixed

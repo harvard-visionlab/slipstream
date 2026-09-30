@@ -3,6 +3,7 @@
     slipstream status     # cache dir + permissions, s5cmd, AWS credentials/identity,
                           # S3 bucket read, slipstream caches found on disk
     slipstream config     # alias for status
+    slipstream hash DIR   # record per-file sha256 in DIR's manifest (run on a trusted copy)
 
 Also runnable as ``python -m slipstream status``.
 
@@ -541,6 +542,28 @@ def cmd_status(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 
 
+def cmd_hash(args: argparse.Namespace) -> int:
+    """Add file_sha256 to an existing cache's manifest (numba/torch load only here)."""
+    import time
+
+    from slipstream.cache import CacheIntegrityError, OptimizedCache
+
+    cache_dir = Path(args.cache_dir).expanduser()
+    if not (cache_dir / MANIFEST_FILE).exists():
+        print_line(f"{BAD} no {MANIFEST_FILE} in {cache_dir}")
+        return 1
+    t = time.perf_counter()
+    try:
+        hashes = OptimizedCache.add_hashes(cache_dir, workers=args.workers)
+    except CacheIntegrityError as exc:
+        print_line(f"{BAD} {exc}")
+        return 1
+    total = sum((cache_dir / f).stat().st_size for f in hashes)
+    print_line(f"{OK} hashed {len(hashes)} files ({fmt_bytes(total)}) in {time.perf_counter() - t:.1f} s; "
+               f"file_sha256 written to {cache_dir / MANIFEST_FILE}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="slipstream",
@@ -565,6 +588,15 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--json", action="store_true", help="Machine-readable output")
         sp.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
         sp.set_defaults(func=cmd_status)
+
+    sp = sub.add_parser(
+        "hash",
+        help="Record per-file sha256 (file_sha256) in a cache's manifest; run it on a trusted copy",
+    )
+    sp.add_argument("cache_dir", help="slipcache directory (contains manifest.json)")
+    sp.add_argument("--workers", type=int, default=None, help="Hashing threads (default: up to 16)")
+    sp.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
+    sp.set_defaults(func=cmd_hash)
     return parser
 
 

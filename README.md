@@ -155,6 +155,26 @@ uv run visionlab-datasets status
 uv run visionlab-datasets sync imagenet100 --fmt yuv420
 ```
 
+## Shared, read-only caches (cluster scratch)
+
+When many jobs read one copy of a cache (e.g. a lab copy on FASRC netscratch), never let a job
+repair it:
+
+```python
+loader = SlipstreamLoader(dataset, ..., on_invalid_cache="raise")   # never wipes or rebuilds
+```
+
+- `on_invalid_cache="raise"` raises `slipstream.CacheIntegrityError` listing the problems (missing file,
+  size mismatch, load failure) and leaves the directory untouched. It is automatic when the dataset
+  reads the cache directly (`SlipstreamDataset(input_dir=<cache>)`), and a directory holding data files
+  but no `manifest.json` (e.g. purged by scratch cleanup) is never rebuilt in place.
+- Integrity: `OptimizedCache.check_integrity(cache_dir)` checks files and sizes (cheap, run per job);
+  `check_integrity(cache_dir, deep=True)` also verifies each file's sha256 against `file_sha256` in the
+  manifest (run after every copy/sync). Builds record the hashes; for an existing cache, run
+  `slipstream hash <cache_dir>` once on a trusted copy (e.g. lab_storage or S3) and sync from it.
+- Writers (build, S3 download/upload) write `manifest.json` last and atomically, so an interrupted
+  copy never looks complete.
+
 ## More Examples
 
 See **[Advanced Usage](docs/ADVANCED.md)** for:

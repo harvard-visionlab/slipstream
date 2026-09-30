@@ -225,6 +225,7 @@ class SlipstreamLoader:
         after_batch_transforms: list[Callable] | None = None,
         window: int | tuple[int, int] | None = None,
         sample_data: dict[str, Any] | None = None,
+        on_invalid_cache: str = "rebuild",
     ) -> None:
         """Initialize SlipstreamLoader.
 
@@ -259,6 +260,14 @@ class SlipstreamLoader:
                 Auto-adjusted if cache stores images in a different format.
                 Ignored when the primary field is a raw ``bytes`` field.
             exclude_fields: List of field names to exclude from loading
+            on_invalid_cache: What to do when the cache fails its integrity check or fails to
+                load: ``"rebuild"`` (default) wipes and rebuilds it from the dataset's source;
+                ``"raise"`` raises :class:`slipstream.cache.CacheIntegrityError` listing the
+                problems and never deletes or writes anything. Use ``"raise"`` for shared
+                read-only caches (e.g. one lab copy on scratch). It is always ``"raise"`` when the
+                dataset reads the cache directly (``SlipstreamDataset(input_dir=<cache>)``): there is
+                no other source to rebuild from. A directory with data files but no manifest.json
+                is never rebuilt in place (raises unless ``force_rebuild=True``).
             force_rebuild: Force rebuilding the optimized cache
             presync_s3: If True, use s5cmd to sync the dataset's S3 remote
                 directory to local disk before building the optimized cache.
@@ -417,6 +426,23 @@ class SlipstreamLoader:
             )
 
         # Remote cache discovery and download
+        if on_invalid_cache not in ("rebuild", "raise"):
+            raise ValueError(f"on_invalid_cache must be 'rebuild' or 'raise', got {on_invalid_cache!r}")
+        from slipstream.cache import CacheIntegrityError, _looks_like_slipcache
+        from slipstream.dataset import _PrebuiltCacheReader
+        reads_cache_directly = isinstance(getattr(dataset, "_reader", None), _PrebuiltCacheReader)
+        if reads_cache_directly and force_rebuild:
+            raise ValueError(f"force_rebuild=True on {cache_dir}: the dataset reads this cache directly, "
+                             "so there is no source to rebuild it from")
+        may_rebuild = on_invalid_cache == "rebuild" and not reads_cache_directly
+
+        def invalid(problems: list[str] | str, cause: Exception | None = None):
+            why = "the dataset reads this cache directly (no other source)" if reads_cache_directly \
+                else "on_invalid_cache='raise'"
+            msg = (f"slipcache at {cache_dir} is invalid: {problems}. Not deleting or rebuilding it ({why}). "
+                   "Restore it from a trusted copy, verify with OptimizedCache.check_integrity(deep=True).")
+            raise CacheIntegrityError(msg) from cause
+
         cache_downloaded = False
         remote_cache_full: str | None = None
         if remote_cache is not None:
@@ -450,6 +476,8 @@ class SlipstreamLoader:
                         if not is_valid:
                             if verbose:
                                 print(f"  Downloaded cache is incomplete: {problems}")
+                            if not may_rebuild:
+                                invalid(problems)
                             OptimizedCache._wipe_cache(cache_dir, "; ".join(problems))
                             cache_downloaded = False
                     elif verbose:
@@ -468,10 +496,16 @@ class SlipstreamLoader:
                 if not is_valid:
                     if verbose:
                         print(f"Cache integrity check failed: {problems}")
+                    if not may_rebuild:
+                        invalid(problems)
                     OptimizedCache._wipe_cache(cache_dir, "; ".join(problems))
                     needs_build = True
                 else:
                     needs_build = False
+            elif _looks_like_slipcache(cache_dir):
+                # Data files without a manifest (e.g. scratch purge removed it): never build over
+                # them -- another job may be reading them.
+                invalid(["manifest.json missing but slipcache data files are present"])
             else:
                 needs_build = True
 
@@ -500,6 +534,8 @@ class SlipstreamLoader:
             except Exception as e:
                 # Safety net: if load fails despite integrity check passing
                 # (e.g., race condition, corrupt mmap), wipe and rebuild
+                if not may_rebuild:
+                    invalid(f"load failed: {e}", e)
                 if verbose:
                     print(f"Cache load failed ({e}), rebuilding...")
                 OptimizedCache._wipe_cache(cache_dir, str(e))

@@ -1074,6 +1074,86 @@ def get_storage_class(field_type: str) -> type[FieldStorage]:
         return NumpyStorage
 
 
+class CacheIntegrityError(RuntimeError):
+    """A slipcache is incomplete or corrupt and may not be rebuilt in place (see ``on_invalid_cache``)."""
+
+
+def _looks_like_slipcache(cache_dir: Path) -> bool:
+    """Directory holds slipcache storage files (``*.meta.npy`` / ``*.offsets.npy``), manifest or not."""
+    d = Path(cache_dir)
+    return d.is_dir() and (any(d.glob("*.meta.npy")) or any(d.glob("*.offsets.npy")))
+
+
+def _data_files(cache_dir: Path, field_metadata: dict) -> list[str]:
+    """Storage files of every field that exist in ``cache_dir`` (the files file_sizes/file_sha256 cover)."""
+    return [fname for name, meta in field_metadata.items()
+            for fname in _get_expected_files(name, meta.get("type", ""))
+            if (Path(cache_dir) / fname).exists()]
+
+
+def _sha256_file(path: Path, chunk: int = 8 << 20) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb", buffering=0) as f:
+        while block := f.read(chunk):
+            h.update(block)
+    return h.hexdigest()
+
+
+def compute_file_hashes(cache_dir: Path, fnames: list[str], workers: int | None = None) -> dict[str, str]:
+    """sha256 (lowercase hex) of each file, hashed in parallel threads (hashlib releases the GIL)."""
+    import os
+
+    cache_dir = Path(cache_dir)
+    workers = workers or min(16, max(1, len(fnames)), (os.cpu_count() or 4))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        digests = pool.map(lambda f: _sha256_file(cache_dir / f), fnames)
+        return dict(zip(fnames, digests))
+
+
+def _fsync_path(path: Path) -> None:
+    import os
+
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError:              # e.g. directories on some filesystems
+        pass
+    finally:
+        os.close(fd)
+
+
+def write_manifest_atomic(cache_dir: Path, manifest: dict) -> None:
+    """Write manifest.json atomically: temp file, fsync, rename, fsync the directory.
+
+    Readers treat a present manifest as "cache complete", so it must never be visible half-written.
+    """
+    import os
+
+    cache_dir = Path(cache_dir)
+    tmp = cache_dir / f".{MANIFEST_FILE}.tmp-{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(manifest, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, cache_dir / MANIFEST_FILE)
+    _fsync_path(cache_dir)
+
+
+def _finalize_manifest(cache_dir: Path, manifest: dict, *, hash_files: bool = True) -> dict:
+    """Fsync every data file, record file_sizes (+ file_sha256), then write the manifest last."""
+    import os
+
+    cache_dir = Path(cache_dir)
+    fnames = _data_files(cache_dir, manifest["fields"])
+    for fname in fnames:
+        _fsync_path(cache_dir / fname)
+    manifest["file_sizes"] = {f: os.path.getsize(cache_dir / f) for f in fnames}
+    if hash_files:
+        manifest["file_sha256"] = compute_file_hashes(cache_dir, fnames)
+    write_manifest_atomic(cache_dir, manifest)
+    return manifest
+
+
 def _get_expected_files(field_name: str, field_type: str) -> list[str]:
     """Return the list of storage filenames expected for a given field.
 
@@ -1711,7 +1791,9 @@ class OptimizedCache:
         return (Path(cache_dir) / MANIFEST_FILE).exists()
 
     @classmethod
-    def check_integrity(cls, cache_dir: Path) -> tuple[bool, list[str]]:
+    def check_integrity(
+        cls, cache_dir: Path, deep: bool = False, workers: int | None = None,
+    ) -> tuple[bool, list[str]]:
         """Check whether an existing cache has all expected files intact.
 
         Reads the manifest and verifies that every storage file exists and
@@ -1719,8 +1801,15 @@ class OptimizedCache:
         size.  This catches partial deletions caused by cluster garbage
         collection or interrupted downloads.
 
+        With ``deep=True`` it also hashes every storage file (sha256, in parallel) and
+        compares with ``file_sha256`` in the manifest. A manifest without hashes fails the
+        deep check ("no file_sha256 in manifest"); add them with ``slipstream hash`` on a
+        trusted copy.
+
         Args:
             cache_dir: Cache directory containing manifest.json and data files.
+            deep: Also verify content hashes (reads every file).
+            workers: Hashing threads for ``deep`` (default: up to 16).
 
         Returns:
             ``(is_valid, problems)`` where *is_valid* is True when the cache
@@ -1744,6 +1833,7 @@ class OptimizedCache:
         field_metadata = manifest.get("fields", {})
         file_sizes: dict[str, int] = manifest.get("file_sizes", {})
         problems: list[str] = []
+        bad: set[str] = set()                      # missing or wrong size: not worth hashing
 
         for field_name, meta in field_metadata.items():
             field_type = meta.get("type", "")
@@ -1752,17 +1842,55 @@ class OptimizedCache:
             for fname in expected_files:
                 fpath = cache_dir / fname
                 if not fpath.exists():
+                    bad.add(fname)
                     problems.append(f"missing: {fname}")
                 elif fname in file_sizes:
                     actual = os.path.getsize(fpath)
                     expected = file_sizes[fname]
                     if actual != expected:
+                        bad.add(fname)
                         problems.append(
                             f"size mismatch: {fname} "
                             f"(expected {expected}, got {actual})"
                         )
 
+        if deep:
+            hashes: dict[str, str] = manifest.get("file_sha256") or {}
+            if not hashes:
+                problems.append("no file_sha256 in manifest (deep check unavailable; run `slipstream hash` on a trusted copy)")
+            else:
+                todo = [f for f in _data_files(cache_dir, field_metadata) if f not in bad]
+                for fname in todo:
+                    if fname not in hashes:
+                        problems.append(f"no sha256 recorded: {fname}")
+                actual = compute_file_hashes(cache_dir, [f for f in todo if f in hashes], workers=workers)
+                for fname, digest in actual.items():
+                    if digest != hashes[fname]:
+                        problems.append(f"sha256 mismatch: {fname}")
+
         return (len(problems) == 0, problems)
+
+    @classmethod
+    def add_hashes(cls, cache_dir: Path, workers: int | None = None) -> dict[str, str]:
+        """Record ``file_sha256`` (and ``file_sizes``) in an existing cache's manifest.
+
+        Run it on a trusted copy (the one you sync from): the hashes then certify every copy
+        made from it. Refuses if the cheap check fails (missing files / size mismatch).
+        Returns the recorded hashes.
+        """
+        import os
+
+        cache_dir = Path(cache_dir)
+        ok, problems = cls.check_integrity(cache_dir)
+        if not ok:
+            raise CacheIntegrityError(f"{cache_dir} is not intact, refusing to hash it: {problems}")
+        with open(cache_dir / MANIFEST_FILE) as f:
+            manifest = json.load(f)
+        fnames = _data_files(cache_dir, manifest["fields"])
+        manifest.setdefault("file_sizes", {}).update({f: os.path.getsize(cache_dir / f) for f in fnames})
+        manifest["file_sha256"] = compute_file_hashes(cache_dir, fnames, workers=workers)
+        write_manifest_atomic(cache_dir, manifest)
+        return manifest["file_sha256"]
 
     @classmethod
     def _wipe_cache(cls, cache_dir: Path, reason: str) -> None:
@@ -1917,26 +2045,13 @@ class OptimizedCache:
                 if image_format == "yuv420":
                     print(f"  {field_name}: Non-JPEG images → converted to YUV420 format")
 
-        # Record actual file sizes for integrity checking
-        import os
-        file_sizes: dict[str, int] = {}
-        for field_name, meta in field_metadata.items():
-            field_type = meta.get('type', '')
-            for fname in _get_expected_files(field_name, field_type):
-                fpath = cache_dir / fname
-                if fpath.exists():
-                    file_sizes[fname] = os.path.getsize(fpath)
-
-        # Write manifest
-        manifest = {
+        # Manifest last: fsync the data files, record file_sizes + file_sha256, then write
+        # manifest.json atomically, so an interrupted build never looks complete.
+        _finalize_manifest(cache_dir, {
             'version': CACHE_VERSION,
             'num_samples': num_samples,
             'fields': field_metadata,
-            'file_sizes': file_sizes,
-        }
-        manifest_path = cache_dir / MANIFEST_FILE
-        with open(manifest_path, 'w') as f:
-            json.dump(manifest, f, indent=2)
+        })
 
         # Free ALL writer state before loading — this is the key to avoiding
         # OOM: writers held file handles + metadata arrays during streaming,
@@ -2088,25 +2203,13 @@ class OptimizedCache:
             num_samples, verbose=verbose,
         )
 
-        # Record file sizes for integrity checking
-        import os
-        file_sizes: dict[str, int] = {}
-        for field_name, meta in field_metadata.items():
-            field_type = meta.get('type', '')
-            for fname in _get_expected_files(field_name, field_type):
-                fpath = cache_dir / fname
-                if fpath.exists():
-                    file_sizes[fname] = os.path.getsize(fpath)
-
-        # Write manifest
-        manifest = {
+        # Manifest last: fsync the data files, record file_sizes + file_sha256, then write
+        # manifest.json atomically, so an interrupted build never looks complete.
+        _finalize_manifest(cache_dir, {
             'version': CACHE_VERSION,
             'num_samples': num_samples,
             'fields': field_metadata,
-            'file_sizes': file_sizes,
-        }
-        with open(cache_dir / MANIFEST_FILE, 'w') as f:
-            json.dump(manifest, f, indent=2)
+        })
 
         # Clean up shard directories
         for shard_dir in shard_dirs:

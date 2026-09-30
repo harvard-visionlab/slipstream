@@ -41,6 +41,7 @@ if TYPE_CHECKING:  # eager imports for type checkers / IDEs
         FFCVFilePrefetchingDataLoader,
     )
     from slipstream.cache import (
+        CacheIntegrityError,
         OptimizedCache,
         write_index,
     )
@@ -150,6 +151,7 @@ _LAZY: dict[str, str] = {
     'FFCVFileDataset': 'slipstream.backends.ffcv_file',
     'FFCVFilePrefetchingDataLoader': 'slipstream.backends.ffcv_file',
     'OptimizedCache': 'slipstream.cache',
+    'CacheIntegrityError': 'slipstream.cache',
     'write_index': 'slipstream.cache',
     'SlipstreamDataset': 'slipstream.dataset',
     'decode_image': 'slipstream.dataset',
@@ -281,6 +283,7 @@ __all__ = [
     "multicrop",
     # Optimized cache (advanced)
     "OptimizedCache",
+    "CacheIntegrityError",
     "write_index",
     # Seeds
     "derive_seed",

@@ -457,10 +457,14 @@ def download_s3_cache(
     remote = remote_cache_path.rstrip("/") + "/*"
     local = str(local_dir) + "/"
 
+    # manifest.json marks a cache complete: drop any stale one first, copy the data without it,
+    # then fetch the manifest last (to a temp name, renamed into place), so an interrupted
+    # download never looks complete.
+    (local_dir / MANIFEST_FILE).unlink(missing_ok=True)
     cmd = ["s5cmd"]
     if endpoint_url:
         cmd += ["--endpoint-url", endpoint_url]
-    cmd += ["--numworkers", str(numworkers), "cp", "--show-progress"]
+    cmd += ["--numworkers", str(numworkers), "cp", "--show-progress", "--exclude", MANIFEST_FILE]
     cmd += _cp_tuning_flags(concurrency, part_size_mb)
     cmd += [remote, local]
 
@@ -468,6 +472,13 @@ def download_s3_cache(
         print(f"Downloading cache from S3: {remote_cache_path}")
 
     returncode = run_s5cmd_with_progress(cmd, verbose=verbose)
+    if returncode == 0:
+        tmp = local_dir / f".{MANIFEST_FILE}.download"
+        mcmd = ["s5cmd"] + (["--endpoint-url", endpoint_url] if endpoint_url else [])
+        mcmd += ["cp", f"{remote_cache_path.rstrip('/')}/{MANIFEST_FILE}", str(tmp)]
+        returncode = subprocess.run(mcmd, capture_output=True).returncode
+        if returncode == 0:
+            os.replace(tmp, local_dir / MANIFEST_FILE)
     success = returncode == 0
 
     if not success and verbose:
@@ -521,10 +532,11 @@ def upload_s3_cache(
     local = str(local_dir) + "/*"
     remote = remote_cache_path.rstrip("/") + "/"
 
+    # Data first, manifest.json last: readers of the remote treat the manifest as "complete".
     cmd = ["s5cmd"]
     if endpoint_url:
         cmd += ["--endpoint-url", endpoint_url]
-    cmd += ["--numworkers", str(numworkers), "cp", "--show-progress", "--if-size-differ"]
+    cmd += ["--numworkers", str(numworkers), "cp", "--show-progress", "--if-size-differ", "--exclude", MANIFEST_FILE]
     cmd += _cp_tuning_flags(concurrency, part_size_mb)
     cmd += [local, remote]
 
@@ -537,6 +549,10 @@ def upload_s3_cache(
 
     # Run with PTY-based progress
     returncode = run_s5cmd_with_progress(cmd, verbose=verbose)
+    if returncode == 0 and (local_dir / MANIFEST_FILE).exists():
+        mcmd = ["s5cmd"] + (["--endpoint-url", endpoint_url] if endpoint_url else [])
+        mcmd += ["cp", str(local_dir / MANIFEST_FILE), remote + MANIFEST_FILE]
+        returncode = subprocess.run(mcmd, capture_output=True).returncode
     success = returncode == 0
 
     if not success and verbose:
