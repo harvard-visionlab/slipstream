@@ -65,6 +65,11 @@ for prefix in reversed([p for p in prefixes if p]):
         library_dirs.insert(0, f"{prefix}/{sub}")
         extra_link_args.append(f"-Wl,-rpath,{prefix}/{sub}")
 
+# Report which libturbojpeg the linker will pick (first library dir that has one).
+_libnames = ("libturbojpeg.so", "libturbojpeg.dylib", "libturbojpeg.a")
+_found = next((f"{d}/{n}" for d in library_dirs for n in _libnames if os.path.exists(f"{d}/{n}")), None)
+print(f"libslipstream: linking {_found or 'libturbojpeg (not found in the searched dirs; relying on the default linker path)'}")
+
 # Define the C++ extension
 libslipstream = Extension(
     "_libslipstream",

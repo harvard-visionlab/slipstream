@@ -49,7 +49,10 @@ class LibslipstreamBuildHook(BuildHookInterface):
 
         try:
             subprocess.check_call(
-                [sys.executable, str(setup_py), "build_ext", "--inplace"],
+                # --force: always recompile and relink. Otherwise setuptools sees an up-to-date .so
+                # (e.g. in uv's cached git checkout) and keeps the rpath / libturbojpeg of an earlier
+                # build, silently ignoring a changed TURBOJPEG_ROOT.
+                [sys.executable, str(setup_py), "build_ext", "--inplace", "--force"],
                 cwd=str(libdir),
                 env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
             )

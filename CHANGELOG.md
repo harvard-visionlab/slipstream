@@ -4,6 +4,16 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.9.3] - 2026-09-30
+
+### Fixed
+
+- The build hook now always recompiles and relinks libslipstream (`build_ext --force`). Before,
+  setuptools skipped the build when an up-to-date `.so` was already in the source tree (e.g. uv's
+  cached git checkout of a rev), so the decoder kept the rpath and libturbojpeg of the first
+  build and ignored a changed `TURBOJPEG_ROOT`, even after `uv cache clean` + `--reinstall-package`.
+  `setup.py` also prints which libturbojpeg it links.
+
 ## [0.9.2] - 2026-09-30
 
 ### Changed

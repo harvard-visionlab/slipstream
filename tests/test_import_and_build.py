@@ -66,3 +66,33 @@ def test_cli_import_is_light():
     # visionlab-datasets imports slipstream.cli for `visionlab-datasets status`.
     out = _run("import sys, slipstream.cli; print([m for m in ('torch', 'numba', 'litdata', 'torchvision') if m in sys.modules])")
     assert out == "[]"
+
+
+def test_build_hook_always_relinks(monkeypatch):
+    # 0.9.3: setuptools skipped relinking an up-to-date .so (uv's cached git checkout), keeping an
+    # earlier TURBOJPEG_ROOT's rpath. The hook must force a rebuild every time.
+    import importlib.util
+    import types
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+
+    class _Hook:                                  # stand-in for hatchling's BuildHookInterface
+        def __init__(self):
+            self.root = str(root)
+            quiet = lambda *a, **k: None
+            self.app = types.SimpleNamespace(display_info=quiet, display_success=quiet, display_warning=quiet)
+
+    for name in ("hatchling", "hatchling.builders", "hatchling.builders.hooks",
+                 "hatchling.builders.hooks.plugin", "hatchling.builders.hooks.plugin.interface"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    sys.modules["hatchling.builders.hooks.plugin.interface"].BuildHookInterface = _Hook
+    spec = importlib.util.spec_from_file_location("hatch_build", root / "hatch_build.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    calls = []
+    monkeypatch.setattr(mod.subprocess, "check_call", lambda cmd, **kw: calls.append(cmd))
+    monkeypatch.delenv("SLIPSTREAM_SKIP_EXT", raising=False)
+    mod.LibslipstreamBuildHook().initialize("standard", {})
+    assert calls and calls[0][-3:] == ["build_ext", "--inplace", "--force"]
