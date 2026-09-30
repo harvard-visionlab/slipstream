@@ -96,9 +96,12 @@ path = "slipstream/version.py"
 [tool.hatch.metadata]
 allow-direct-references = true
 
-[tool.hatch.build]
-# Include compiled C extensions even though *.so is in .gitignore
-artifacts = ["libslipstream/_libslipstream*"]
+# The compiled extension (gitignored) is added by hatch_build.py: only this interpreter's
+# _libslipstream<EXT_SUFFIX>, and the wheel is tagged per interpreter.
+
+[tool.hatch.build.targets.sdist]
+# .devcontainer/cache holds a local uv cache (ignored by a nested .gitignore, which hatch does not read)
+exclude = [".devcontainer/cache", "libslipstream/build", "libslipstream/_libslipstream*", "notebooks", "dataprep/notebooks"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["slipstream", "libslipstream"]

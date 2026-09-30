@@ -94,8 +94,13 @@ def test_build_hook_always_relinks(monkeypatch):
     calls = []
     monkeypatch.setattr(mod.subprocess, "check_call", lambda cmd, **kw: calls.append(cmd))
     monkeypatch.delenv("SLIPSTREAM_SKIP_EXT", raising=False)
-    mod.LibslipstreamBuildHook().initialize("standard", {})
+    build_data = {"force_include": {}}
+    mod.LibslipstreamBuildHook().initialize("standard", build_data)
     assert calls and calls[0][-3:] == ["build_ext", "--inplace", "--force"]
+    # 0.9.6: the wheel is tagged per interpreter and ships only this interpreter's build.
+    import sysconfig
+    assert build_data["pure_python"] is False and build_data["infer_tag"] is True
+    assert list(build_data["force_include"].values()) == [f"libslipstream/_libslipstream{sysconfig.get_config_var('EXT_SUFFIX')}"]
 
 
 def test_loader_prefers_this_interpreters_build():

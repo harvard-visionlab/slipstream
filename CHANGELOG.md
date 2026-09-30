@@ -4,6 +4,18 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.9.6] - 2026-09-30
+
+### Fixed
+
+- The wheel is tagged per interpreter and platform (e.g. `cp311-cp311-macosx_15_0_arm64`), not
+  `py3-none-any`, and contains only this interpreter's `_libslipstream<EXT_SUFFIX>`. Before, uv
+  cached one "pure" wheel per git commit and installed, for example, a cpython-312 decoder into a
+  3.10 venv (without running the build hook, so the 0.9.3 `--force` never applied). Stale builds for
+  other Pythons in a shared checkout were also packed into it (via the old `artifacts` glob).
+- The sdist no longer bundles `.devcontainer/cache` (a local uv cache), notebooks or build
+  leftovers: 164 MB → 0.8 MB.
+
 ## [0.9.5] - 2026-09-30
 
 ### Fixed
