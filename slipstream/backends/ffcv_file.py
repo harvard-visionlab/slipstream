@@ -122,7 +122,8 @@ def _load_batch_from_ffcv_parallel(
         data_ptr = alloc_ptr[sample_id]
         data_size = alloc_size[sample_id]
 
-        destination[i, :data_size] = mmap_data[data_ptr:data_ptr + data_size]
+        for j in range(data_size):   # explicit loop: numba slice assignment is slow (see cache.py)
+            destination[i, j] = mmap_data[data_ptr + j]
         sizes[i] = data_size
 
 
@@ -143,7 +144,8 @@ def _load_batch_from_ffcv_sequential(
         data_ptr = alloc_ptr[sample_id]
         data_size = alloc_size[sample_id]
 
-        destination[i, :data_size] = mmap_data[data_ptr:data_ptr + data_size]
+        for j in range(data_size):   # explicit loop: numba slice assignment is slow (see cache.py)
+            destination[i, j] = mmap_data[data_ptr + j]
         sizes[i] = data_size
 
 

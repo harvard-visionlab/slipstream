@@ -4,6 +4,19 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.9.5] - 2026-09-30
+
+### Fixed
+
+- `use_threading=True` (the default) was 10-20x slower than `use_threading=False`: 3.9k vs 38k
+  img/s (jpeg) and 2.3k vs 45k (yuv420) on machina. The prefetch thread reads records with the
+  serial cache kernel. Under numba 0.67 (in the lock since 0.4.5; BENCHMARKS.md was measured on
+  0.63) its slice assignment `dest[i, :n] = src[p:p + n]` compiles to a copy of ~1.8 GB/s, 20x
+  slower than a plain loop. The cache read kernels, and the dev-only FFCV loaders' copies, now
+  use explicit byte loops: serial reads went from 22k to 447k img/s (jpeg) and from 13k to 305k
+  (yuv420) on an M4 Pro. Output bytes are identical. Regression tests in
+  `tests/test_cache_copy_kernels.py`.
+
 ## [0.9.4] - 2026-09-30
 
 ### Fixed

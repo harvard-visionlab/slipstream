@@ -268,7 +268,8 @@ def _load_batch_parallel(
         data_size = metadata[sample_id]['data_size']
 
         # Copy data to destination
-        destination[i, :data_size] = data_region[data_ptr:data_ptr + data_size]
+        for j in range(data_size):   # explicit loop: numba slice assignment is slow (see cache.py)
+            destination[i, j] = data_region[data_ptr + j]
         sizes[i] = data_size
 
 
@@ -287,7 +288,8 @@ def _load_batch_sequential(
         sample_id = batch_indices[i]
         data_ptr = metadata[sample_id]['data_ptr']
         data_size = metadata[sample_id]['data_size']
-        destination[i, :data_size] = data_region[data_ptr:data_ptr + data_size]
+        for j in range(data_size):   # explicit loop: numba slice assignment is slow (see cache.py)
+            destination[i, j] = data_region[data_ptr + j]
         sizes[i] = data_size
 
 

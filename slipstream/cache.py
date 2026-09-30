@@ -115,7 +115,11 @@ def _load_variable_batch_parallel(
         sample_id = batch_indices[i]
         data_ptr = metadata[sample_id]['data_ptr']
         data_size = metadata[sample_id]['data_size']
-        destination[i, :data_size] = data_region[data_ptr:data_ptr + data_size]
+        # Explicit byte loop, not `destination[i, :n] = data_region[p:p + n]`: numba lowers that
+        # slice assignment to a slow copy (1.8 GB/s single-thread on numba 0.67, 7.5 on 0.63, vs
+        # ~45 GB/s for this loop), which throttled the prefetch thread 10-20x.
+        for j in range(data_size):
+            destination[i, j] = data_region[data_ptr + j]
         sizes[i] = data_size
 
 
@@ -134,7 +138,11 @@ def _load_variable_batch_sequential(
         sample_id = batch_indices[i]
         data_ptr = metadata[sample_id]['data_ptr']
         data_size = metadata[sample_id]['data_size']
-        destination[i, :data_size] = data_region[data_ptr:data_ptr + data_size]
+        # Explicit byte loop, not `destination[i, :n] = data_region[p:p + n]`: numba lowers that
+        # slice assignment to a slow copy (1.8 GB/s single-thread on numba 0.67, 7.5 on 0.63, vs
+        # ~45 GB/s for this loop), which throttled the prefetch thread 10-20x.
+        for j in range(data_size):
+            destination[i, j] = data_region[data_ptr + j]
         sizes[i] = data_size
 
 
