@@ -47,13 +47,20 @@ Do NOT use `pip install s5cmd` — that installs a broken 2018 Python wrapper, n
 
 ## Key Directives
 
-### DO NOT run benchmarks directly
+### DO NOT run benchmarks directly (one exception: the release gate)
 
 Benchmark scripts output progress bars that consume excessive tokens. Instead:
 
 1. Prepare code changes
 2. Ask the user to run benchmarks
 3. User will paste the results back
+
+**Release gate (approved by George 2026-09-30):** before every tag, run
+`uv run python -m benchmarks.release_gate --append-md --wait 30` yourself on **machina** (clean checkout of
+the commit to tag, inside `jupyter-grez72` as jovyan; see the workstation skill). It is quiet (~30 lines),
+refuses to start on a busy machine (tell peers not to use machina meanwhile), saves
+`benchmarks/results/gate/machina/v<version>.json`, and exits 1 on a >10% drop vs the previous version or
+threaded < 75% of simple. Do not tag on a FAIL; commit the results file + BENCHMARKS.md with the release.
 
 ### DO NOT add materialization ops to CPU benchmarks
 
