@@ -56,7 +56,7 @@ def _vkey(name: str) -> tuple[int, ...]:
     return tuple(int(x) for x in re.findall(r"\d+", name)[:3])
 
 
-def _meta() -> dict:
+def _meta(host: str | None) -> dict:
     import numba
     import numpy
     import torch
@@ -68,7 +68,7 @@ def _meta() -> dict:
                                 capture_output=True, text=True).stdout.strip())
     cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
     return {"version": __version__, "git": sha + ("-dirty" if dirty else ""), "date": date.today().isoformat(),
-            "host": socket.gethostname().split(".")[0], "cpus": cpus, "numba": numba.__version__,
+            "host": host or socket.gethostname().split(".")[0], "cpus": cpus, "numba": numba.__version__,
             "numpy": numpy.__version__, "torch": torch.__version__,
             "cuda": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}
 
@@ -106,6 +106,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cache-root", type=Path,
                     default=Path(os.environ.get("SLIPSTREAM_CACHE_DIR", "~/.slipstream")).expanduser())
+    ap.add_argument("--host", default=os.environ.get("SLIPSTREAM_BENCH_HOST"),
+                    help="results name for this machine (in a container the hostname is the container id)")
     ap.add_argument("--tolerance", type=float, default=0.10)
     ap.add_argument("--max-load", type=float, default=2.0)
     ap.add_argument("--wait", type=float, default=0, help="minutes to wait for a quiet machine")
@@ -125,7 +127,7 @@ def main() -> int:
         print(f"gate: machine busy ({state}); not running. Use --wait or --force.")
         return 2
 
-    meta = _meta()
+    meta = _meta(a.host)
     meta["load_before"] = state
     print(f"gate: slipstream {meta['version']} ({meta['git']}) on {meta['host']}, {meta['cpus']} CPUs, "
           f"numba {meta['numba']}, torch {meta['torch']}, {state}")

@@ -56,7 +56,7 @@ Benchmark scripts output progress bars that consume excessive tokens. Instead:
 3. User will paste the results back
 
 **Release gate (approved by George 2026-09-30):** before every tag, run
-`uv run python -m benchmarks.release_gate --append-md --wait 30` yourself on **machina** (clean checkout of
+`uv run python -m benchmarks.release_gate --host machina --append-md --wait 30` yourself on **machina** (clean checkout of
 the commit to tag, inside `jupyter-grez72` as jovyan; see the workstation skill). It is quiet (~30 lines),
 refuses to start on a busy machine (tell peers not to use machina meanwhile), saves
 `benchmarks/results/gate/machina/v<version>.json`, and exits 1 on a >10% drop vs the previous version or
