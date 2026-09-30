@@ -85,7 +85,8 @@ def _table(res: dict, base: dict | None, tol: float) -> tuple[list[str], list[st
     lines, fails = [], []
     for fmt, steps in res["results"].items():
         b = (base or {}).get("results", {}).get(fmt, {})
-        for key, label, *_ in STEPS:
+        extra = [(k, f"+ RandomHorizontalFlip @ {k[2:]}px") for k in steps if k.startswith("G@")]
+        for key, label in [(k, lbl) for k, lbl, *_ in STEPS] + extra:
             if key not in steps:
                 continue
             now, was = steps[key], b.get(key)

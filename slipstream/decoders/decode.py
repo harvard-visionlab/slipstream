@@ -200,6 +200,15 @@ class DecodeYUVRandomResizedCrop(BatchTransform):
         self.permute = permute
         self._decoder = _get_yuv420_decoder_class()(num_threads=num_threads)
 
+
+    resolution_schedulable = True      # SlipstreamLoader.set_resolution / resolution_schedule resize it
+
+    def set_size(self, size: int) -> None:
+        """Output crop size (square) from the next batch on; used for progressive resolution."""
+        if int(size) <= 0:
+            raise ValueError(f"size must be positive, got {size}")
+        self.size = int(size)
+
     def __call__(self, batch_data: dict[str, Any]) -> torch.Tensor | np.ndarray:
         result = self._decoder.decode_batch_yuv_random_crop(
             batch_data['data'], batch_data['sizes'],

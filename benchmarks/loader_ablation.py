@@ -9,6 +9,7 @@ Each step adds one thing, so a regression shows up at the step that introduced i
     E  + Normalize fp32
     F  ToTorchImage / Normalize in bf16
     G  + RandomHorizontalFlip          (~ model-rearing's catsup_minimal)
+    G@160, G@192  G at 160 / 192 px    (progressive resolution; G itself is 224)
 
 Quiet by design (one line per step, no progress bars) so it can run inside the release gate.
 
@@ -37,7 +38,10 @@ STEPS = [  # key, label, shuffle, threaded, stage
 ]
 
 
-def _pipeline(stage: int, device: str):
+EXTRA_SIZES = (160, 192)      # full pipeline (G) at progressive-resolution sizes
+
+
+def _pipeline(stage: int, device: str, size: int = 224):
     import torch
 
     from slipstream.decoders import DecodeRandomResizedCrop
@@ -45,7 +49,7 @@ def _pipeline(stage: int, device: str):
     from slipstream.transforms.geometric import RandomHorizontalFlip
 
     dtype = torch.bfloat16 if stage >= 3 else torch.float32
-    p = [DecodeRandomResizedCrop(224, seed=1)]
+    p = [DecodeRandomResizedCrop(size, seed=1)]
     if stage >= 1:
         p.append(ToTorchImage(device, dtype=dtype))
     if stage >= 2:
@@ -56,7 +60,8 @@ def _pipeline(stage: int, device: str):
 
 
 def run(cache_root: Path, fmt: str, *, batches: int = 60, batch_size: int = 512, repeats: int = 3,
-        warmup: int = 5, device: str | None = None, steps: str = "ABCDEFG", log=print) -> dict[str, float]:
+        warmup: int = 5, device: str | None = None, steps: str = "ABCDEFG", sizes=EXTRA_SIZES,
+        log=print) -> dict[str, float]:
     """Best-of-``repeats`` img/s for each step (``{"A": 38302.1, ...}``)."""
     import torch
 
@@ -65,14 +70,16 @@ def run(cache_root: Path, fmt: str, *, batches: int = 60, batch_size: int = 512,
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     ds = SlipstreamDataset(input_dir=str(cache_root / f"imagenet1k-s256_l512-{fmt}-val"))
     out: dict[str, float] = {}
-    for key, label, shuffle, threaded, stage in STEPS:
-        if key not in steps:
-            continue
+    todo = [(k, lbl, sh, th, st, 224) for k, lbl, sh, th, st in STEPS if k in steps]
+    if "G" in steps:
+        g = next(x for x in STEPS if x[0] == "G")
+        todo += [(f"G@{sz}", f"{g[1]} @ {sz}px", g[2], g[3], g[4], sz) for sz in sizes]
+    for key, label, shuffle, threaded, stage, size in todo:
         best = 0.0
         for _ in range(repeats):
             loader = SlipstreamLoader(ds, batch_size=batch_size, shuffle=shuffle, seed=0, image_format=fmt,
                                       verbose=False, use_threading=threaded, exclude_fields=["path"],
-                                      pipelines=_pipeline(stage, device))
+                                      pipelines=_pipeline(stage, device, size))
             it = iter(loader)
             for _ in range(warmup):
                 next(it)

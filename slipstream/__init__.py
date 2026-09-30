@@ -129,6 +129,7 @@ if TYPE_CHECKING:  # eager imports for type checkers / IDEs
     from slipstream.stats import compute_normalization_stats
 
     # Seed derivation
+    from slipstream.resolution import ResolutionSchedule
     from slipstream.seeds import derive_seed
 
     # Crop utilities
@@ -214,6 +215,7 @@ _LAZY: dict[str, str] = {
     'sync_s3_dataset': 'slipstream.s3_sync',
     'compute_normalization_stats': 'slipstream.stats',
     'derive_seed': 'slipstream.seeds',
+    'ResolutionSchedule': 'slipstream.resolution',
     'CropParams': 'slipstream.utils.crop',
     'align_to_mcu': 'slipstream.utils.crop',
     'generate_center_crop_params': 'slipstream.utils.crop',
@@ -287,6 +289,8 @@ __all__ = [
     "write_index",
     # Seeds
     "derive_seed",
+    # Progressive resolution
+    "ResolutionSchedule",
     # Crop utilities
     "CropParams",
     "align_to_mcu",

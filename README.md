@@ -155,6 +155,26 @@ uv run visionlab-datasets status
 uv run visionlab-datasets sync imagenet100 --fmt yuv420
 ```
 
+## Progressive resolution
+
+Train at a lower crop size early and ramp up (FFCV / lrm-ssl schedule):
+
+```python
+from slipstream import ResolutionSchedule, SlipstreamLoader
+
+sched = ResolutionSchedule(min_res=160, max_res=192, start_ramp=65, end_ramp=76)   # step=32
+loader = SlipstreamLoader(ds, ..., pipelines={"image": [DecodeRandomResizedCrop(224, seed=1), ...]},
+                          resolution_schedule=sched)
+for epoch in range(epochs):
+    loader.set_epoch(epoch)      # crop size = sched(epoch) from the first batch of the epoch
+```
+
+`min_res` through `start_ramp`, `max_res` from `end_ramp`, linear in between rounded to a multiple
+of `step`. It resizes single-size random-crop stages only (`DecodeRandomResizedCrop`,
+`DecodeDirectRandomResizedCrop`, `DecodeYUVRandomResizedCrop`); give the schedule to the training
+loader only. Crop boxes don't depend on the size, so resume stays exact. `loader.set_resolution(size)`
+sets it by hand.
+
 ## Shared, read-only caches (cluster scratch)
 
 When many jobs read one copy of a cache (e.g. a lab copy on FASRC netscratch), never let a job

@@ -4,6 +4,22 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.11.0] - 2026-09-30
+
+### Added
+
+- Progressive-resolution training: `slipstream.ResolutionSchedule(min_res, max_res, start_ramp,
+  end_ramp, step=32)` (the lrm-ssl `train.get_resolution` / ffcv-imagenet schedule; 0-based
+  epochs; validated: 0 < min_res <= max_res, both multiples of step, 0 <= start_ramp <= end_ramp).
+  `SlipstreamLoader(resolution_schedule=...)` applies `schedule(epoch)` at the start of every epoch
+  and in `set_epoch`. `loader.set_resolution(size)` and `loader.resolution` set and read the size by
+  hand. Only single-size random-crop stages are resized (`DecodeRandomResizedCrop`,
+  `DecodeDirectRandomResizedCrop`, `DecodeYUVRandomResizedCrop`, which gain `set_size`); a schedule on
+  a loader without one raises. The size applies from the next batch (prefetch holds only raw
+  bytes). Crop boxes are drawn before the resize, so crops for a given (seed, rank, epoch) don't
+  depend on the size and resume stays exact. Works with threaded prefetch, for jpeg and yuv420.
+- Release gate: steps `G@160` / `G@192` (full pipeline at progressive-resolution sizes).
+
 ## [0.10.0] - 2026-09-30
 
 ### Added

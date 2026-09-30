@@ -226,6 +226,7 @@ class SlipstreamLoader:
         window: int | tuple[int, int] | None = None,
         sample_data: dict[str, Any] | None = None,
         on_invalid_cache: str = "rebuild",
+        resolution_schedule: Any = None,
     ) -> None:
         """Initialize SlipstreamLoader.
 
@@ -260,6 +261,12 @@ class SlipstreamLoader:
                 Auto-adjusted if cache stores images in a different format.
                 Ignored when the primary field is a raw ``bytes`` field.
             exclude_fields: List of field names to exclude from loading
+            resolution_schedule: A :class:`slipstream.ResolutionSchedule` for progressive-resolution
+                training. At the start of every epoch (and in ``set_epoch``) the crop size of
+                every single-size random-crop stage (``DecodeRandomResizedCrop``,
+                ``DecodeDirectRandomResizedCrop``, ``DecodeYUVRandomResizedCrop``) becomes
+                ``schedule(epoch)``. ``None`` (default) keeps the sizes the stages were built with.
+                Give it to the training loader only; eval pipelines stay fixed.
             on_invalid_cache: What to do when the cache fails its integrity check or fails to
                 load: ``"rebuild"`` (default) wipes and rebuilds it from the dataset's source;
                 ``"raise"`` raises :class:`slipstream.cache.CacheIntegrityError` listing the
@@ -693,6 +700,12 @@ class SlipstreamLoader:
                 )
         self._propagate_seed_repeat(self.window_size)
 
+        self.resolution_schedule = resolution_schedule
+        if resolution_schedule is not None:
+            if not callable(resolution_schedule):
+                raise TypeError("resolution_schedule must be a ResolutionSchedule (callable epoch -> size)")
+            self._resolution_stages()                      # raises early if nothing can be resized
+
         # Pre-allocate memory banks for prefetching (only for image field)
         self._setup_prefetch_banks()
 
@@ -783,6 +796,40 @@ class SlipstreamLoader:
         except Exception:                     # noqa: BLE001 - no distributed backend
             return 0
 
+    def _resolution_stages(self) -> list[Any]:
+        """Pipeline stages whose crop size progressive resolution controls."""
+        stages, seen = [], set()
+        for obj in self._walk_transforms(list(self.pipelines.values()), include_owned=True):
+            if getattr(obj, "resolution_schedulable", False) and id(obj) not in seen:
+                seen.add(id(obj))
+                stages.append(obj)
+        if not stages:
+            raise ValueError(
+                "no resizable crop stage in the pipelines: progressive resolution needs a "
+                "DecodeRandomResizedCrop / DecodeDirectRandomResizedCrop / DecodeYUVRandomResizedCrop")
+        return stages
+
+    def set_resolution(self, size: int) -> None:
+        """Set the output crop size of every resizable random-crop stage (from the next batch on).
+
+        Decoded batches are never queued ahead (prefetch holds raw bytes only), so the new size
+        applies to the very next batch; the decoders re-size their output buffers once.
+        """
+        for stage in self._resolution_stages():
+            stage.set_size(size)
+        self._resolution = int(size)
+
+    @property
+    def resolution(self) -> int | None:
+        """Crop size last set by ``set_resolution`` / the schedule (``None`` if never set)."""
+        return getattr(self, "_resolution", None)
+
+    def _begin_epoch(self, epoch: int) -> None:
+        """Per-epoch state: reseed every stream, apply the resolution schedule."""
+        self._reseed_epoch(epoch)
+        if getattr(self, "resolution_schedule", None) is not None:
+            self.set_resolution(self.resolution_schedule(epoch))
+
     def _reseed_epoch(self, epoch: int) -> None:
         """Restart every augmentation stream at ``(seed, rank, epoch)`` (see slipstream.seeds)."""
         key = (self._seed_rank(), int(epoch))
@@ -836,7 +883,7 @@ class SlipstreamLoader:
         start of each epoch, so calling ``set_epoch`` is optional for reproducibility.
         """
         self._epoch = epoch
-        self._reseed_epoch(epoch)
+        self._begin_epoch(epoch)
 
     def _setup_prefetch_banks(self) -> None:
         """Set up pre-allocated memory banks for async prefetching."""
@@ -945,7 +992,7 @@ class SlipstreamLoader:
 
     def _iter_simple(self):
         """Simple iteration without threading (for debugging/profiling)."""
-        self._reseed_epoch(self._epoch)
+        self._begin_epoch(self._epoch)
         indices = self._generate_indices(self._epoch)
         self._epoch += 1
 
@@ -1067,7 +1114,7 @@ class SlipstreamLoader:
         # one — otherwise two workers write to the same prefetch banks.
         self._stop_worker()
 
-        self._reseed_epoch(self._epoch)
+        self._begin_epoch(self._epoch)
         indices = self._generate_indices(self._epoch)
         self._epoch += 1
 
