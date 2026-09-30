@@ -4,6 +4,23 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.7.1] - 2026-09-29
+
+### Fixed
+
+- `affine_transform` (so `RandomRotate` and the other affine augments) crashed on bf16 images
+  (`expected scalar type BFloat16 but found Float`): the fp32 sampling grid and the image dtype
+  differed. The image is now sampled in fp32 whenever its dtype differs from the grid's and cast
+  back; fp32 / CPU fp16 results are unchanged.
+- `DecodeMultiResizeCropEmbed` (and anything else calling `decode_batch_resize_short_crop_long`)
+  with `image_format="yuv420"`: `YUV420NumbaBatchDecoder` now has that method (same crop geometry
+  and output as the JPEG decoder).
+- `SlipstreamLoader.set_epoch` now reaches wrappers that hold their decoder as `_inner`
+  (`DecodeMultiResizeCropEmbed`) and resets `_embed_seed_counter` too, so a run resumed at epoch
+  N reproduces the fresh run's crops and embed placements. The same walk propagates `seed_repeat`
+  to the inner crop decoder, so windowed loaders now share its crop params across a window's T
+  frames as documented for 0.7.0.
+
 ## [0.7.0] - 2026-09-16
 
 ### Added

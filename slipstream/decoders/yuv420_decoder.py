@@ -23,6 +23,7 @@ from numpy.typing import NDArray
 
 from slipstream.decoders.numba_decoder import (
     Compiler,
+    NumbaBatchDecoder,
     _generate_center_crop_params_batch,
     _generate_direct_random_crop_params_batch,
     _generate_random_crop_params_batch,
@@ -745,6 +746,10 @@ class YUV420NumbaBatchDecoder:
         )
 
         return dest_buffer[:batch_size]
+
+    # Same crop geometry and output contract as the JPEG decoder; it only needs
+    # _decode_crop_fn and the temp/dest buffers, which this class provides.
+    decode_batch_resize_short_crop_long = NumbaBatchDecoder.decode_batch_resize_short_crop_long
 
     def decode_batch_multi_crop(
         self,

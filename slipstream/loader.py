@@ -715,7 +715,7 @@ class SlipstreamLoader:
 
     @staticmethod
     def _walk_transforms(obj: Any):
-        """Yield obj and everything it wraps: pipeline lists, `.transforms`, `._decoder`, `._cpu_decoder`."""
+        """Yield obj and everything it wraps: pipeline lists, `.transforms`, `._decoder`, `._cpu_decoder`, `._inner`."""
         if obj is None:
             return
         if isinstance(obj, (list, tuple)):
@@ -723,7 +723,7 @@ class SlipstreamLoader:
                 yield from SlipstreamLoader._walk_transforms(o)
             return
         yield obj
-        for attr in ('transforms', '_decoder', '_cpu_decoder'):
+        for attr in ('transforms', '_decoder', '_cpu_decoder', '_inner'):
             if attr == 'transforms' and getattr(obj, 'owns_transforms', False):
                 continue                      # e.g. DecodeVideoWindow manages its inner transforms itself
             inner = getattr(obj, attr, None)
@@ -779,9 +779,12 @@ class SlipstreamLoader:
 
         seen: set[int] = set()
         for obj in self._walk_transforms(list(self.pipelines.values())):
-            if hasattr(obj, '_seed_counter') and id(obj) not in seen:
-                seen.add(id(obj))
-                obj._seed_counter = target_counter
+            if id(obj) in seen:
+                continue
+            seen.add(id(obj))
+            for attr in ('_seed_counter', '_embed_seed_counter'):   # _embed_*: DecodeMultiResizeCropEmbed
+                if hasattr(obj, attr):
+                    setattr(obj, attr, target_counter)
 
     def _setup_prefetch_banks(self) -> None:
         """Set up pre-allocated memory banks for async prefetching."""

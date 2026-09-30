@@ -464,7 +464,8 @@ def _prepare_mat(x, mat):
 
 def _grid_sample(x, coords, mode="bilinear", padding_mode="reflection", align_corners=None):
     """Resample pixels using grid_sample with optional anti-aliasing."""
-    needs_precision_fix = x.dtype == torch.float16 and x.device.type == "cpu"
+    # fp16 on CPU is imprecise; any input/grid dtype mismatch (e.g. bf16 image, fp32 grid) crashes grid_sample.
+    needs_precision_fix = (x.dtype == torch.float16 and x.device.type == "cpu") or x.dtype != coords.dtype
     original_dtype = x.dtype if needs_precision_fix else None
 
     if needs_precision_fix:
@@ -548,7 +549,8 @@ def affine_transform(x: torch.Tensor, mat, sz=None, align_corners=False, mode="b
         else:
             coords = base_grid.expand(mat_f32.shape[0], -1, -1).bmm(rescaled_theta).view(mat_f32.shape[0], oh, ow, 2)
         # Same-size transform: anti-aliasing never triggers (d=0.5 < 1), skip _grid_sample.
-        x_f32 = x.float() if x.dtype == torch.float16 and x.device.type == "cpu" else x
+        # grid_sample needs input and grid in the same dtype (bf16/fp16 would crash vs the fp32 grid).
+        x_f32 = x if x.dtype == coords.dtype else x.float()
         out = F.grid_sample(x_f32, coords, mode=mode, padding_mode=pad_mode, align_corners=False)
         if out.dtype != x.dtype:
             out = out.to(x.dtype)
