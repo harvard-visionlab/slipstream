@@ -39,6 +39,7 @@ import numpy as np
 import torch
 
 from slipstream.decoders._window import repeat_params
+from slipstream.seeds import DEFAULT_KEY, next_sample_seeds
 
 from slipstream.utils.crop import (
     generate_batch_center_crop_params,
@@ -159,6 +160,8 @@ class GPUDecoder:
         self.device = device
         self.use_cvcuda_resize = use_cvcuda_resize and check_cvcuda_available()
         self.max_batch_size = max_batch_size
+        self._seed_counter = 0
+        self._seed_key = DEFAULT_KEY   # (rank, epoch), set by slipstream.seeds.reseed
 
         # Initialize nvImageCodec decoder
         self._decoder = nvimgcodec.Decoder(device_id=device)
@@ -480,6 +483,7 @@ class GPUDecoder:
         target_size: int = 224,
         scale: tuple[float, float] = (0.08, 1.0),
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
+        seed: int | None = None,
     ) -> torch.Tensor:
         """Decode batch with RandomResizedCrop during decode.
 
@@ -495,6 +499,8 @@ class GPUDecoder:
             target_size: Final crop size (square)
             scale: Scale range relative to original
             ratio: Aspect ratio range
+            seed: Seed for reproducible crops (keyed per sample by slipstream.seeds;
+                same boxes as the CPU decoders). None = non-reproducible.
 
         Returns:
             Cropped and resized images [B, 3, target_size, target_size] on GPU
@@ -509,7 +515,8 @@ class GPUDecoder:
 
         # Generate random crop params using unified utility
         rois = repeat_params(generate_batch_random_crop_params(
-            widths, heights, scale=scale, ratio=ratio
+            widths, heights, scale=scale, ratio=ratio,
+            seeds=next_sample_seeds(self, seed, batch_size),
         ), getattr(self, 'seed_repeat', 1))
 
         return self.decode_batch_with_roi(
@@ -654,6 +661,7 @@ class GPUDecoderFallback:
         target_size: int = 224,
         scale: tuple[float, float] = (0.08, 1.0),
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
+        seed: int | None = None,
     ) -> torch.Tensor:
         """Decode with random crop using CPU decoder + GPU resize.
 
@@ -665,6 +673,7 @@ class GPUDecoderFallback:
             target_size: Final crop size
             scale: Scale range
             ratio: Aspect ratio range
+            seed: Seed for reproducible crops (the CPU decoder keeps the counter). None = non-reproducible.
 
         Returns:
             Cropped images [B, 3, target_size, target_size] on GPU
@@ -673,7 +682,7 @@ class GPUDecoderFallback:
 
         images_hwc = self._cpu_decoder.decode_batch_random_crop(
             data, sizes, heights, widths,
-            target_size=target_size, scale=scale, ratio=ratio
+            target_size=target_size, scale=scale, ratio=ratio, seed=seed,
         )
 
         if len(images_hwc) == 0:

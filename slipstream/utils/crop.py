@@ -272,6 +272,7 @@ def generate_batch_random_crop_params(
     mcu_align: bool = True,
     mcu_size: int = 8,
     rng: np.random.Generator | None = None,
+    seeds: np.ndarray | None = None,
 ) -> np.ndarray:
     """Generate random crop parameters for a batch of images.
 
@@ -286,6 +287,8 @@ def generate_batch_random_crop_params(
         mcu_align: If True, align to MCU boundaries
         mcu_size: MCU block size for alignment
         rng: Optional numpy random generator
+        seeds: Optional per-sample seeds [B] (e.g. from ``slipstream.seeds.sample_seeds``);
+            sample ``i`` then draws from its own generator, independent of the batch. Overrides ``rng``.
 
     Returns:
         Array of shape [B, 4] with (x, y, width, height) for each image
@@ -304,7 +307,7 @@ def generate_batch_random_crop_params(
             ratio=ratio,
             mcu_align=mcu_align,
             mcu_size=mcu_size,
-            rng=rng,
+            rng=rng if seeds is None else np.random.default_rng(int(seeds[i])),
         )
         rois[i] = crop.to_roi_array()
 

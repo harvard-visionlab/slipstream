@@ -127,3 +127,53 @@ def test_preset_seeds_hashed():
     assert _seed(0, 1111, 0) != _seed(0, 2222, 0)
     assert _seed(None, CROP_OFFSET) is None
     assert _seed(3, CROP_OFFSET, 2) == derive_seed(3, CROP_OFFSET, 2) < 2**63
+
+
+def _raw_batch(n=16):
+    loader = _loader([], bs=n, shuffle=False)
+    loader.pipelines = {}
+    b = next(iter(loader))
+    raw = b["image"]
+    return {k: np.asarray(raw[k]) for k in ("data", "sizes", "heights", "widths")}
+
+
+def test_cpu_decoder_seeded_random_crop():
+    from slipstream.decoders.cpu import CPUDecoder, check_turbojpeg_available
+    from slipstream.seeds import reseed
+
+    if not check_turbojpeg_available():
+        pytest.skip("TurboJPEG not available")
+    raw = _raw_batch()
+    args = (raw["data"], raw["sizes"], raw["heights"], raw["widths"])
+    shapes = lambda imgs: [im.shape for im in imgs]
+    d1, d2 = CPUDecoder(num_workers=2), CPUDecoder(num_workers=2)
+    first = d1.decode_batch_random_crop(*args, seed=5)
+    other = d2.decode_batch_random_crop(*args, seed=5)                  # fresh decoder, same seed
+    assert all(np.array_equal(a, b) for a, b in zip(first, other))
+    second = d1.decode_batch_random_crop(*args, seed=5)                 # next batch: new draws
+    assert shapes(second) != shapes(first)
+    reseed(d1, (0, 0))
+    again = d1.decode_batch_random_crop(*args, seed=5)
+    assert all(np.array_equal(a, b) for a, b in zip(first, again))
+    reseed(d1, (1, 0))                                                   # another rank
+    assert shapes(d1.decode_batch_random_crop(*args, seed=5)) != shapes(first)
+
+
+def test_gpu_rois_seeded_match_cpu_boxes():
+    # GPUDecoder.decode_batch_random_crop builds its ROIs with this call; no CUDA needed to check it.
+    from slipstream.seeds import sample_seeds
+    from slipstream.utils.crop import generate_batch_random_crop_params, generate_random_crop_params
+
+    w = np.array([500, 375, 640, 333] * 4, np.int32)
+    h = np.array([375, 500, 480, 500] * 4, np.int32)
+    seeds = sample_seeds(5, 1, len(w))
+    rois = generate_batch_random_crop_params(w, h, seeds=seeds)
+    assert np.array_equal(rois, generate_batch_random_crop_params(w, h, seeds=seeds))
+    assert not np.array_equal(rois, generate_batch_random_crop_params(w, h, seeds=sample_seeds(5, 2, len(w))))
+    for i in range(len(w)):                                              # same boxes as the CPU decoder path
+        c = generate_random_crop_params(int(w[i]), int(h[i]), rng=np.random.default_rng(int(seeds[i])))
+        assert rois[i].tolist() == c.to_roi_array().tolist()
+    # per-sample: changing one image doesn't move the others' boxes
+    w2 = w.copy(); w2[3] = 200
+    r2 = generate_batch_random_crop_params(w2, h, seeds=seeds)
+    assert np.array_equal(np.delete(rois, 3, 0), np.delete(r2, 3, 0))

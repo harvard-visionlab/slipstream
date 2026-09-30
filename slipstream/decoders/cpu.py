@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from slipstream.seeds import DEFAULT_KEY, next_sample_seeds
 from slipstream.utils.crop import (
     CropParams,
     generate_center_crop_params,
@@ -81,6 +82,11 @@ def check_turbojpeg_available() -> bool:
         return False
 
 
+def _sample_rng(seeds: np.ndarray | None, i: int) -> np.random.Generator | None:
+    """Per-sample generator for seeded random crops (``None``: unseeded, fresh entropy)."""
+    return None if seeds is None else np.random.default_rng(int(seeds[i]))
+
+
 class CPUDecoder:
     """Parallel JPEG decoder using PyTurboJPEG + ThreadPoolExecutor.
 
@@ -124,6 +130,8 @@ class CPUDecoder:
 
         self.num_workers = num_workers
         self._executor: ThreadPoolExecutor | None = None
+        self._seed_counter = 0
+        self._seed_key = DEFAULT_KEY   # (rank, epoch), set by slipstream.seeds.reseed
 
     def _ensure_executor(self) -> ThreadPoolExecutor:
         """Ensure executor is initialized."""
@@ -351,6 +359,7 @@ class CPUDecoder:
         target_size: int = 224,
         scale: tuple[float, float] = (0.08, 1.0),
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
+        seed: int | None = None,
     ) -> list[NDArray[np.uint8]]:
         """Decode batch with RandomResizedCrop (decode full, then crop).
 
@@ -366,6 +375,7 @@ class CPUDecoder:
             target_size: Final desired size (for reference)
             scale: Range of size relative to original
             ratio: Range of aspect ratios
+            seed: Seed for reproducible crops (keyed per sample by slipstream.seeds). None = non-reproducible.
 
         Returns:
             List of cropped RGB images, each [H, W, 3]
@@ -374,6 +384,7 @@ class CPUDecoder:
         batch_size = len(sizes)
 
         jpeg_bytes_list = [bytes(data[i, :int(sizes[i])]) for i in range(batch_size)]
+        seeds = next_sample_seeds(self, seed, batch_size)
         dims_provided = heights is not None and widths is not None
 
         def decode_then_crop(args: tuple[int, bytes]) -> NDArray[np.uint8]:
@@ -384,7 +395,7 @@ class CPUDecoder:
             h, w = img.shape[:2]
 
             # Generate random crop params
-            crop = generate_random_crop_params(w, h, scale=scale, ratio=ratio)
+            crop = generate_random_crop_params(w, h, scale=scale, ratio=ratio, rng=_sample_rng(seeds, i))
 
             # Numpy slicing then copy (need copy since we return different sizes)
             return img[crop.y:crop.y + crop.height, crop.x:crop.x + crop.width].copy()
@@ -401,6 +412,7 @@ class CPUDecoder:
         target_size: int = 224,
         scale: tuple[float, float] = (0.08, 1.0),
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
+        seed: int | None = None,
     ) -> list[NDArray[np.uint8]]:
         """Decode batch with RandomResizedCrop using DCT-space cropping.
 
@@ -419,6 +431,7 @@ class CPUDecoder:
             target_size: Final desired size (for reference, actual resize done later)
             scale: Range of size relative to original
             ratio: Range of aspect ratios
+            seed: Seed for reproducible crops (keyed per sample by slipstream.seeds). None = non-reproducible.
 
         Returns:
             List of cropped RGB images, each [H, W, 3]
@@ -429,6 +442,7 @@ class CPUDecoder:
 
         # Extract JPEG bytes
         jpeg_bytes_list = [bytes(data[i, :int(sizes[i])]) for i in range(batch_size)]
+        seeds = next_sample_seeds(self, seed, batch_size)
 
         # Pre-compute dimensions if provided
         dims_provided = heights is not None and widths is not None
@@ -443,7 +457,7 @@ class CPUDecoder:
                 w, h = self._get_jpeg_dimensions(jpeg_bytes)
 
             # Generate random crop params using unified utility
-            crop = generate_random_crop_params(w, h, scale=scale, ratio=ratio)
+            crop = generate_random_crop_params(w, h, scale=scale, ratio=ratio, rng=_sample_rng(seeds, i))
 
             # Decode with DCT-space crop
             return self._decode_one_with_crop(jpeg_bytes, crop)
@@ -553,6 +567,7 @@ class CPUDecoder:
         scale: tuple[float, float] = (0.08, 1.0),
         ratio: tuple[float, float] = (3 / 4, 4 / 3),
         output: torch.Tensor | None = None,
+        seed: int | None = None,
     ) -> torch.Tensor:
         """Decode batch with RandomResizedCrop, returning a pre-sized tensor.
 
@@ -570,6 +585,7 @@ class CPUDecoder:
             scale: Range of crop area relative to original
             ratio: Range of aspect ratios
             output: Optional pre-allocated tensor [B, 3, target_size, target_size]
+            seed: Seed for reproducible crops (keyed per sample by slipstream.seeds). None = non-reproducible.
 
         Returns:
             Tensor [B, 3, target_size, target_size] uint8
@@ -587,6 +603,7 @@ class CPUDecoder:
             )
 
         jpeg_bytes_list = [bytes(data[i, :int(sizes[i])]) for i in range(batch_size)]
+        seeds = next_sample_seeds(self, seed, batch_size)
         dims_provided = heights is not None and widths is not None
 
         def decode_crop_resize(args: tuple[int, bytes]) -> tuple[int, NDArray[np.uint8]]:
@@ -598,7 +615,7 @@ class CPUDecoder:
                 w, h = self._get_jpeg_dimensions(jpeg_bytes)
 
             # Generate random crop params
-            crop = generate_random_crop_params(w, h, scale=scale, ratio=ratio)
+            crop = generate_random_crop_params(w, h, scale=scale, ratio=ratio, rng=_sample_rng(seeds, i))
 
             # Determine if scaled decode is beneficial
             # Use scaled decode if crop is significantly larger than target

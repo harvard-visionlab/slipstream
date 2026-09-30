@@ -33,6 +33,11 @@ All notable changes to slipstream are documented here. Versions follow
   adding offsets to a base seed).
 - `slipstream.seeds`: `derive_seed`, `sample_seeds`, `stream_seed`, `epoch_rng`, `reseed`.
   Objects used outside a loader behave as rank 0, epoch 0.
+- `seed=None` keyword on the random-crop methods of `GPUDecoder`, `GPUDecoderFallback` and
+  `CPUDecoder` (`decode_batch_random_crop`, `_dct`, `_to_tensor`), which previously could not be
+  seeded at all. Seeded crops are keyed per sample like the Numba decoders (reset by the loader's
+  reseed), and GPU and CPU give the same boxes for the same seed. `generate_batch_random_crop_params`
+  takes per-sample `seeds`. Unseeded behaviour is unchanged.
 
 ## [0.8.0] - 2026-09-29
 

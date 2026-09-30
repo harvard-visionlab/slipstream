@@ -59,6 +59,14 @@ def sample_seeds(seed: int | None, counter: int, n: int, *stream: int, key: tupl
     return state[:n].astype(np.int64)
 
 
+def next_sample_seeds(obj: Any, seed: int | None, n: int, *stream: int) -> np.ndarray | None:
+    """Advance ``obj._seed_counter`` and return its next ``n`` per-sample seeds (``None`` if unseeded)."""
+    if seed is None:
+        return None
+    obj._seed_counter = getattr(obj, '_seed_counter', 0) + 1
+    return sample_seeds(seed, obj._seed_counter, n, *stream, key=getattr(obj, '_seed_key', DEFAULT_KEY))
+
+
 def stream_seed(obj: Any) -> int:
     """Seed for a transform's sequential generator: ``derive_seed(obj.seed, rank, epoch)``."""
     return derive_seed(obj.seed, *getattr(obj, '_seed_key', DEFAULT_KEY))
