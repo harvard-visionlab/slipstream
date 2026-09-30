@@ -25,6 +25,8 @@ All notable changes to slipstream are documented here. Versions follow
 - A directory with slipcache data files but no manifest.json (e.g. purged by scratch cleanup) is no
   longer rebuilt in place by the loader, or handed to another reader by `SlipstreamDataset`: both
   raise `CacheIntegrityError`. Use `force_rebuild=True` to rebuild on purpose.
+- `SlipstreamDataset(input_dir=<empty local dir>)` (e.g. a purged scratch cache) raises
+  `CacheIntegrityError` ("empty directory ... restore or re-sync") instead of a LitData "no index.json" error.
 - manifest.json is written last and atomically: builds fsync the data files, then write a temp file,
   fsync it and rename it. `download_s3_cache` removes a stale local manifest, copies the data, then
   fetches the manifest last. `upload_s3_cache` uploads the data before the manifest. An interrupted

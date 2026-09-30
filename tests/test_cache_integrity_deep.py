@@ -134,3 +134,13 @@ def test_missing_manifest_with_data_is_never_rebuilt(cache):
 def test_invalid_mode_value(cache):
     with pytest.raises(ValueError, match="on_invalid_cache"):
         _loader(SimpleNamespace(cache_path=cache, remote_dir=None), on_invalid_cache="ignore")
+
+
+def test_empty_directory_is_reported_as_purged_cache(tmp_path):
+    from slipstream import SlipstreamDataset
+
+    empty = tmp_path / "purged"
+    empty.mkdir()
+    (empty / ".hidden").write_text("")                              # dotfiles don't count
+    with pytest.raises(CacheIntegrityError, match="empty directory"):
+        SlipstreamDataset(input_dir=str(empty))

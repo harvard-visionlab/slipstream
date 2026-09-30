@@ -714,6 +714,13 @@ class SlipstreamDataset(torch.utils.data.Dataset):
                     f"{source} holds slipcache data files but no manifest.json (deleted or purged?). "
                     "Restore the cache from a trusted copy; slipstream will not rebuild it in place."
                 )
+            src_dir = pathlib.Path(str(source))
+            if src_dir.is_dir() and not any(p for p in src_dir.iterdir() if not p.name.startswith(".")):
+                # Every reader fails on an empty directory; the likely story is a purged cache.
+                raise CacheIntegrityError(
+                    f"{source} is an empty directory (cache purged by scratch cleanup?). "
+                    "Restore or re-sync it from a trusted copy."
+                )
 
         # Check for FFCV .beton/.ffcv files
         if source is not None and _is_ffcv_source(str(source)):
