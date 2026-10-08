@@ -4,6 +4,21 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.11.1] - 2026-10-08
+
+### Fixed
+
+- `ImageBytesStorage.load_batch` (image and `bytes` fields, e.g. `cache.fields["video"].load_batch`)
+  is safe to call from several threads. Every call used to return views into ONE per-field scratch
+  buffer, so concurrent calls overwrote each other's bytes: 3,991 of 4,000 records corrupted with 48
+  threads. Each thread now has its own scratch buffer. Within one thread, results stay views valid
+  until that thread's next call, as before, and single-thread speed is unchanged. The loader's
+  zero-copy primary path (`load_batch_into` with its own banks) is untouched. From worker threads,
+  use `parallel=False`.
+- `verify()` "Bytes mismatch" now gives both sizes and explains that a source which regenerates a
+  field on every read (e.g. re-encoding video; libx264 is not byte-deterministic) will always
+  mismatch.
+
 ## [0.11.0] - 2026-09-30
 
 ### Added

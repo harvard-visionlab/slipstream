@@ -33,6 +33,7 @@ import hashlib
 import json
 import random
 import re
+import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -677,29 +678,43 @@ class ImageBytesStorage(FieldStorage):
         self._heights = np.ascontiguousarray(metadata['height'])
         self._widths = np.ascontiguousarray(metadata['width'])
 
-        # Pre-allocated buffers
-        self._batch_buffer: np.ndarray | None = None
-        self._sizes_buffer: np.ndarray | None = None
-        self._current_batch_size = 0
+        # Scratch buffers for load_batch, one set per thread (see load_batch).
+        self._tls = threading.local()
 
-    def _ensure_buffers(self, batch_size: int) -> None:
-        """Ensure pre-allocated buffers are large enough."""
-        if self._current_batch_size < batch_size:
-            self._batch_buffer = np.zeros((batch_size, self.max_size), dtype=np.uint8)
-            self._sizes_buffer = np.zeros(batch_size, dtype=np.uint64)
-            self._current_batch_size = batch_size
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        state.pop("_tls", None)                    # thread-local scratch: not picklable, not needed
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._tls = threading.local()
+
+    def _buffers(self, batch_size: int) -> tuple[np.ndarray, np.ndarray]:
+        """This thread's scratch buffers, grown to ``batch_size`` rows."""
+        tls = self._tls
+        if getattr(tls, "rows", 0) < batch_size:
+            tls.data = np.zeros((batch_size, self.max_size), dtype=np.uint8)
+            tls.sizes = np.zeros(batch_size, dtype=np.uint64)
+            tls.rows = batch_size
+        return tls.data[:batch_size], tls.sizes[:batch_size]
 
     def load_batch(
         self,
         indices: NDArray[np.int64],
         parallel: bool = True,
     ) -> dict[str, Any]:
-        """Load a batch of image bytes."""
-        batch_size = len(indices)
-        self._ensure_buffers(batch_size)
+        """Load a batch of image bytes.
 
-        dest = self._batch_buffer[:batch_size]
-        sizes = self._sizes_buffer[:batch_size]
+        Returns ``{'data': uint8 [B, max_size], 'sizes': uint64 [B], 'heights', 'widths'}``;
+        row ``i`` holds ``data[i, :sizes[i]]``. ``data``/``sizes`` are views into a scratch
+        buffer owned by the *calling thread*: valid until that thread's next call (copy them to
+        keep them longer). Concurrent calls from different threads are safe (0.11.1; before,
+        all threads shared one buffer). From worker threads use ``parallel=False``: numba's
+        parallel layer is not reentrant. The loader's hot path uses :meth:`load_batch_into`.
+        """
+        batch_size = len(indices)
+        dest, sizes = self._buffers(batch_size)
 
         if indices.dtype != np.int64:
             indices = indices.astype(np.int64)
@@ -2412,7 +2427,11 @@ class OptimizedCache:
                             dataset_bytes = dataset_value
                         if dataset_bytes != cache_bytes:
                             errors.append(
-                                f"Bytes mismatch at {idx}, '{field_name}'"
+                                f"Bytes mismatch at {idx}, '{field_name}': the source now returns "
+                                f"{len(dataset_bytes)} bytes, the cache holds {len(cache_bytes)}. "
+                                "Expected if the source regenerates this field on every read "
+                                "(e.g. re-encodes video: libx264 output is not byte-deterministic); "
+                                "otherwise the cache does not match its source"
                             )
 
                 elif isinstance(storage, StringStorage):
