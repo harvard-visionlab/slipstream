@@ -217,17 +217,16 @@ class TestWindowShapes:
             order0 = loader._generate_indices(0)
             assert sorted(order0.tolist()) == anchors.tolist() and order0.tolist() != anchors.tolist()
             assert loader._generate_indices(1).tolist() != order0.tolist()
-            # distributed sharding: disjoint strided anchor subsets that cover all anchors
+            # distributed sharding with drop_last: disjoint strided anchor subsets, tail truncated
             loader.distributed, loader.world_size = True, 2
             shards = []
             for r in range(2):
                 loader.rank = r
                 shards.append(loader._generate_indices(0))
-            per_rank = -(-len(anchors) // 2)
+            per_rank = len(anchors) // 2
             assert all(len(s) == per_rank for s in shards)
-            assert set(np.concatenate(shards).tolist()) == set(anchors.tolist())
-            # disjoint apart from the (at most one) padding anchor
-            assert len(set(shards[0].tolist()) & set(shards[1].tolist())) <= len(anchors) % 2
+            union = np.concatenate(shards).tolist()
+            assert len(set(union)) == len(union) == 2 * per_rank and set(union) <= set(anchors.tolist())
         finally:
             loader.shutdown()
 

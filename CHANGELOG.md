@@ -4,6 +4,17 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [Unreleased]
+
+### Fixed
+
+- `distributed=True, drop_last=True` no longer trains on padded duplicates. The epoch order was padded
+  to `ceil(n/W)*W` before batching, so when `ceil(n/W)` was a multiple of `batch_size` the padding
+  filled a whole last batch (n=1001, W=8, B=7: 1008 samples, 7 duplicates). With `drop_last` the order is
+  now truncated to `(n//W)*W` and `len()` uses `n//W` per rank, as in `DistributedSampler(drop_last=True)`.
+  `drop_last=False` still pads. Every rank's order is a prefix of the old one; only the dropped tail differs,
+  so runs where the bug didn't trigger see identical batches.
+
 ## [0.11.1] - 2026-10-08
 
 ### Fixed

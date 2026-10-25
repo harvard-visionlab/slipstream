@@ -718,8 +718,9 @@ class SlipstreamLoader:
 
         When shuffle is enabled, indices are shuffled using a deterministic
         RNG if seed is set, otherwise non-deterministic. When distributed,
-        indices are padded to be evenly divisible by world_size, then each
-        rank takes a strided subset (matching PyTorch DistributedSampler).
+        the order is truncated (drop_last) or padded (otherwise) to a multiple of
+        world_size, then each rank takes a strided subset (matching PyTorch
+        DistributedSampler, so drop_last never trains on padded duplicates).
 
         Args:
             epoch: Current epoch number, used with seed for deterministic ordering.
@@ -735,8 +736,10 @@ class SlipstreamLoader:
             rng.shuffle(pos)
 
         if self.distributed:
-            total = math.ceil(n / self.world_size) * self.world_size
-            if total > n:
+            if self.drop_last:
+                pos = pos[:(n // self.world_size) * self.world_size]
+            else:
+                total = math.ceil(n / self.world_size) * self.world_size
                 pos = np.concatenate([pos, pos[:total - n]])
             pos = pos[self.rank::self.world_size]
 
@@ -1292,7 +1295,7 @@ class SlipstreamLoader:
         """Return number of batches per epoch (batches of anchors when windowed)."""
         total = self._num_anchors()
         if self.distributed:
-            per_rank = math.ceil(total / self.world_size)
+            per_rank = total // self.world_size if self.drop_last else math.ceil(total / self.world_size)
         else:
             per_rank = total
         if self.drop_last:
