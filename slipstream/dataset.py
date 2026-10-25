@@ -512,7 +512,10 @@ class _PrebuiltCacheReader:
 
         import numpy as np
         indices = np.array([idx], dtype=np.int64)
-        batch = self._cache.load_batch(indices)
+        # Serial on purpose: one sample gains nothing from numba's parallel pool, and starting
+        # that pool here breaks forked DataLoader workers (GNU OpenMP aborts after fork; other
+        # layers deadlock or oversubscribe with one pool per worker).
+        batch = self._cache.load_batch(indices, parallel=False)
 
         sample = {}
         for field_name, field_data in batch.items():
