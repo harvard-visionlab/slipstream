@@ -4,7 +4,7 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
-## [Unreleased]
+## [0.11.2] - 2026-10-25
 
 ### Fixed
 
