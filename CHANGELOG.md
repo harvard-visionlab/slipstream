@@ -4,6 +4,16 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [Unreleased]
+
+### Fixed
+
+- `SlipstreamDataset` item reads (`ds[i]` on a prebuilt cache) work in forked torch `DataLoader` workers.
+  Each read ran `load_batch(parallel=True)`, which started numba's parallel pool in the parent; forked
+  workers then aborted ("fork() called from a process already using GNU OpenMP") or, with other threading
+  layers, hung or crawled at a flat ~32 img/s regardless of worker count. Single-item reads are now serial
+  (same bytes; main-process speed unchanged). `SlipstreamLoader` is unaffected.
+
 ## [0.11.2] - 2026-10-25
 
 ### Fixed
