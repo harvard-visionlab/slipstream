@@ -4,6 +4,24 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.13.0] - 2026-10-30
+
+### Added
+
+- `DecodeMultiRandomResizedCrop` per-crop `ratios=` (exclusive with `ratio`): a discrete set of aspect ratios,
+  for SimCLR hard negatives (lrm-ssl `RandomResizedCropSampleRatios`).
+  - Each image draws one ratio from the set, on its own seeded stream (`seeds.STREAM_RATIO`).
+  - A crop with the same `seed` as another makes the same centre, area and rejection draws with the ratio fixed
+    at that value, so it covers the same region stretched to that ratio.
+  - Same-seed crops with the same set choose the same ratio.
+  - Crops without `ratios` are unchanged.
+- `slipstream.identity.store_identity(cache_dir)` (also `slipstream.store_identity`) and `OptimizedCache.identity`.
+  - The value is `"sha256:" + sha256` of the canonical JSON of the manifest's `{num_samples, file_sha256}`, or
+    `None` without hashes.
+  - Moved from visionlab-datasets' `cache_identity`, bit-identical (evals pins these values); datasets
+    re-exports it.
+  - Stdlib-only import.
+
 ## [0.12.0] - 2026-10-30
 
 ### Added

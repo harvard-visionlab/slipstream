@@ -131,6 +131,7 @@ if TYPE_CHECKING:  # eager imports for type checkers / IDEs
     # Seed derivation
     from slipstream.resolution import ResolutionSchedule
     from slipstream.source import BatchSource, SourceLoader
+    from slipstream.identity import store_identity
     from slipstream.seeds import derive_seed
 
     # Crop utilities
@@ -219,6 +220,7 @@ _LAZY: dict[str, str] = {
     'ResolutionSchedule': 'slipstream.resolution',
     'SourceLoader': 'slipstream.source',
     'BatchSource': 'slipstream.source',
+    'store_identity': 'slipstream.identity',
     'CropParams': 'slipstream.utils.crop',
     'align_to_mcu': 'slipstream.utils.crop',
     'generate_center_crop_params': 'slipstream.utils.crop',
@@ -297,6 +299,8 @@ __all__ = [
     # Live sources (simulators, replay buffers)
     "SourceLoader",
     "BatchSource",
+    # Store identity (content hash of a cache)
+    "store_identity",
     # Crop utilities
     "CropParams",
     "align_to_mcu",

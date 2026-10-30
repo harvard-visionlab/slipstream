@@ -233,6 +233,12 @@ loader = SlipstreamLoader(dataset, ..., on_invalid_cache="raise")   # never wipe
 - Writers (build, S3 download/upload) write `manifest.json` last and atomically, so an interrupted
   copy never looks complete.
 
+**Store identity:**
+- `slipstream.store_identity(cache_dir)` (or `OptimizedCache.identity`) gives `"sha256:…"` over the manifest's
+  sample count and `file_sha256`.
+- Every copy of a store has the same identity, wherever it lives.
+- It is `None` until the store is hashed (`slipstream hash <dir>`).
+
 ## More Examples
 
 See **[Advanced Usage](docs/ADVANCED.md)** for:

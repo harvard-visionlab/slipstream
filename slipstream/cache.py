@@ -1800,6 +1800,12 @@ class OptimizedCache:
         self._field_metadata = field_metadata or {}
         self._indexes: dict[str, dict] = {}
 
+    @property
+    def identity(self) -> str | None:
+        """Content identity of this store (:func:`slipstream.identity.store_identity`; ``None`` without hashes)."""
+        from slipstream.identity import store_identity
+        return store_identity(self.cache_dir)
+
     @classmethod
     def exists(cls, cache_dir: Path) -> bool:
         """Check if an optimized cache exists in the given directory."""
