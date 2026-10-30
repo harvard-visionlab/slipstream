@@ -280,7 +280,8 @@ class RandomResizedCropBatch(BatchAugment):
     def before_call(self, b, **kwargs):
         n = b.shape[0] if b.ndim == 4 else 1
         ng = self._ng(n)
-        u = lambda lo, hi: self._expand(torch.empty(ng).uniform_(lo, hi, generator=self.rng), n)
+        dev = self.rng.device if self.rng is not None else "cpu"      # a CUDA generator draws on CUDA
+        u = lambda lo, hi: self._expand(torch.empty(ng, device=dev).uniform_(lo, hi, generator=self.rng).cpu(), n)
         area = u(self.scale[0], self.scale[1])
         ratio = torch.exp(u(self.log_ratio[0], self.log_ratio[1]))
         w = torch.sqrt(area * ratio).clamp_(max=1.0)          # crop width as a fraction of W
