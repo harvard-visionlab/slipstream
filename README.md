@@ -128,6 +128,44 @@ Fixed window starts come from per-sample side data aligned with `indices`:
 `DecodeVideoWindow(..., t0_key="t0")`. Repeating a record index with different `t0` gives
 several windows per clip. Needs `torchcodec` with loadable FFmpeg libraries.
 
+## Live sources: simulators and replay buffers (`SourceLoader`)
+
+`SourceLoader` runs slipstream's GPU augmentations and seeding on batches from any object with
+`next_batch(step) -> dict`, for example vectorized environments or a replay buffer, instead of a cache.
+The cache path (`SlipstreamLoader`) is separate and unchanged.
+
+```python
+from slipstream import SourceLoader
+from slipstream.transforms import RandomResizedCropBatch, RandomHorizontalFlip, ToFloatDiv
+
+loader = SourceLoader(replay, device="cuda", seed=0, steps_per_epoch=1000, pipelines={"obs": [
+    RandomResizedCropBatch(84, scale=(0.8, 1.0), seed=1), RandomHorizontalFlip(seed=2),
+    ToFloatDiv(255.0, dtype=torch.bfloat16)]})
+for epoch in range(start, epochs):
+    loader.set_epoch(epoch)
+    for batch in loader:            # batch["obs"]: [N, T, C, 84, 84] bf16, one augmentation draw per sequence
+        ...
+ckpt["loader"] = loader.state_dict()   # exact resume, even mid-epoch
+```
+
+**Batch format:**
+- `obs` [N, T, C, H, W] uint8, on the CPU (pinned preferred) or CUDA;
+- `action` [N, T, ...], `reward` / `done` [N, T], `index` [N];
+- optional `pose` / `egomotion`; any other keys pass through.
+
+**Seeding:**
+- Augmentations are reseeded per batch with `(seed, rank, epoch, step)`.
+- The source gets `reseed(derive_seed(seed, STREAM_SOURCE), (rank, epoch))` at each epoch start, so every
+  rank's environments differ.
+
+**Prefetch and on-policy sources:**
+- CPU sources are prefetched in a thread.
+- A source with `on_policy = True` is called inline, only after the previous batch was consumed, so it is
+  never stale.
+- `loader.apply(batch)` runs the same pipelines on a collector's own observations.
+
+**Not supported:** decoder stages (fused JPEG decode-crop). Use `slipstream.transforms` stages.
+
 ## Am I set up? (`slipstream status`)
 
 Installing slipstream adds a `slipstream` command (also `python -m slipstream`):

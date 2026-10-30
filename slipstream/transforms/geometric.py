@@ -261,7 +261,11 @@ class RandomResizedCropBatch(BatchAugment):
     crop uniformly inside the image and resamples it to ``size`` with bilinear
     ``grid_sample``. uint8 input gives uint8 output. Honours ``seed_repeat``
     (windows share one crop) and supports replay via ``apply_last``.
+    ``set_size`` (progressive resolution) changes the output size; the crop boxes are
+    drawn in input coordinates, so they do not depend on it.
     """
+
+    resolution_schedulable = True
 
     def __init__(self, size, scale=(0.08, 1.0), ratio=(3.0 / 4.0, 4.0 / 3.0), seed=None, device=None):
         self.size = (size, size) if isinstance(size, int) else tuple(size)
@@ -289,6 +293,9 @@ class RandomResizedCropBatch(BatchAugment):
         mat[:, 0, 0] = w; mat[:, 1, 1] = h
         mat[:, 0, 2] = 2 * cx - 1; mat[:, 1, 2] = 2 * cy - 1
         self.mat = mat.to(b.device)
+
+    def set_size(self, size):
+        self.size = (size, size) if isinstance(size, int) else tuple(size)
 
     def last_params(self):
         return {"mat": self.mat, **self.params}

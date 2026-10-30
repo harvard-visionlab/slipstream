@@ -4,6 +4,28 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.12.0] - 2026-10-30
+
+### Added
+
+- `SourceLoader` and the `BatchSource` protocol (`slipstream/source.py`) run slipstream pipelines on batches
+  from a live source, such as vectorized environments or a replay buffer, instead of a cache.
+  - **Batch format:** `obs` [N,T,C,H,W] uint8, `action`, `reward`, `done`, `index`, optional `pose` /
+    `egomotion`.
+  - **Pipelines:** 5-D fields run as [N*T,...] with `seed_repeat=T` (one draw per sequence) and are folded
+    back. Multi-view uses a list of sub-pipelines.
+  - **Seeding:** per batch with `(seed, rank, epoch, step)`. Exact mid-epoch resume via
+    `state_dict` / `load_state_dict`. The source is reseeded per `(rank, epoch)` with
+    `derive_seed(seed, STREAM_SOURCE)`.
+  - **Prefetch:** CPU sources are prefetched in a thread; the source state is captured per consumed batch.
+    CUDA tensors and `on_policy` sources are produced inline.
+  - **Safety:** the source's own buffers are never modified by in-place stages.
+  - **Rejected:** decoder stages.
+  - `SlipstreamLoader` is unchanged.
+- `seeds.STREAM_SOURCE`.
+- `RandomResizedCropBatch.set_size` / `resolution_schedulable`: progressive resolution for decoded frames
+  (`SourceLoader.set_resolution`; `SlipstreamLoader.set_resolution` now also finds this stage).
+
 ## [0.11.3] - 2026-10-25
 
 ### Fixed

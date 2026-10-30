@@ -92,6 +92,8 @@ decoder / transform / after_batch_transform at each epoch start and in `set_epoc
 draws with `sample_seeds(..., key=self._seed_key)`, transforms seed their generator with `stream_seed(self)`.
 New seeded code must follow this (never `seed + offset` arithmetic, never a raw `manual_seed(self.seed)`).
 The rank is the global rank and is never part of the shuffle seed.
+`SourceLoader` (`slipstream/source.py`, live sources) is a separate path: it reseeds augmentations per batch
+with `(rank, epoch, step)` and the source with `(rank, epoch)`; never route it through `loader.py`/`cache.py`.
 
 ### Pipeline seed conventions
 
