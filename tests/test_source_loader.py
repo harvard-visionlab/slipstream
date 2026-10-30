@@ -1,8 +1,9 @@
 """SourceLoader (0.12.0): slipstream pipelines on batches from a live source / replay buffer.
 
-Frames are real imagenet10 val images (center-cropped by the cache path), skipped when the cache is absent.
+Frames are real imagenet val images (center-cropped by the cache path), skipped when the cache is absent.
 """
 
+import os
 import threading
 from pathlib import Path
 
@@ -14,7 +15,8 @@ from slipstream import SourceLoader
 from slipstream.seeds import STREAM_SOURCE, derive_seed
 from slipstream.transforms import Normalize, RandomHorizontalFlip, RandomResizedCropBatch, ToFloatDiv
 
-CACHE = Path.home() / ".slipstream" / "imagenet10-s256_l512-jpeg-val"
+CANDIDATES = [Path.home() / ".slipstream" / "imagenet10-s256_l512-jpeg-val",
+              Path(os.environ.get("SLIPSTREAM_CACHE_DIR", "/nonexistent")) / "imagenet1k-s256_l512-jpeg-val"]
 N, T, S = 4, 3, 64
 
 
@@ -24,9 +26,10 @@ def frames():
     from slipstream import SlipstreamDataset, SlipstreamLoader
     from slipstream.decoders import DecodeCenterCrop
 
-    if not CACHE.exists():
-        pytest.skip(f"{CACHE} not present")
-    ld = SlipstreamLoader(SlipstreamDataset(input_dir=str(CACHE)), batch_size=64, shuffle=False, verbose=False,
+    cache = next((p for p in CANDIDATES if p.exists()), None)
+    if cache is None:
+        pytest.skip("no jpeg val cache present")
+    ld = SlipstreamLoader(SlipstreamDataset(input_dir=str(cache)), batch_size=64, shuffle=False, verbose=False,
                           pipelines={"image": [DecodeCenterCrop(S)]}, use_threading=False)
     b = next(iter(ld))["image"]
     ld.shutdown()
