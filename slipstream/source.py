@@ -20,7 +20,8 @@ This is a separate path from :class:`~slipstream.loader.SlipstreamLoader`: no ca
 decode stages raise), no numba. Seeding follows :mod:`slipstream.seeds` with one addition: augmentations
 are reseeded before every batch with key ``(rank, epoch, step)``, so a resumed run reproduces the fresh run
 exactly, even mid-epoch. The source is reseeded at each epoch start with
-``source.reseed(derive_seed(seed, STREAM_SOURCE), (rank, epoch))``; unlike the cache-path shuffle the rank is
+``source.reseed(derive_seed(source_seed, STREAM_SOURCE), (rank, epoch))`` (``source_seed`` defaults to
+``seed``); unlike the cache-path shuffle the rank is
 part of the key, so every rank's environments differ.
 
 Source protocol (only ``next_batch`` is required):
@@ -81,6 +82,8 @@ class SourceLoader:
         after_batch_transforms: Callables ``batch -> batch`` applied after the pipelines.
         device: Where batch tensors go (``'cpu'``, ``'cuda'``, ``'cuda:1'`` or a GPU index).
         seed: Base seed (``None``: no reseeding, transforms keep their own state).
+        source_seed: Seed for the source's randomness (env resets, replay sampling); defaults to ``seed``.
+            The source gets ``reseed(derive_seed(source_seed, STREAM_SOURCE), (rank, epoch))``.
         steps_per_epoch: Batches per epoch (``len(loader)``); ``None`` iterates forever.
         batches_ahead: Prefetch depth for CPU sources (0 disables the thread).
         use_threading: Prefetch CPU sources in a background thread. CUDA tensors are produced inline;
@@ -95,6 +98,7 @@ class SourceLoader:
         after_batch_transforms: list[Callable] | None = None,
         device: int | str = "cpu",
         seed: int | None = None,
+        source_seed: int | None = None,
         steps_per_epoch: int | None = None,
         batches_ahead: int = 2,
         use_threading: bool = True,
@@ -105,6 +109,7 @@ class SourceLoader:
             raise ValueError(f"steps_per_epoch must be positive or None, got {steps_per_epoch}")
         self.source = source
         self.seed = seed
+        self.source_seed = seed if source_seed is None else int(source_seed)
         self.steps_per_epoch = None if steps_per_epoch is None else int(steps_per_epoch)
         self.batches_ahead = int(batches_ahead)
         self.use_threading = use_threading
@@ -162,7 +167,8 @@ class SourceLoader:
 
     def state_dict(self) -> dict[str, Any]:
         """Position and source state as of the last consumed batch."""
-        return {"epoch": self._epoch, "step": self._step, "seed": self.seed, "rank": self.rank,
+        return {"epoch": self._epoch, "step": self._step, "seed": self.seed, "source_seed": self.source_seed,
+                "rank": self.rank,
                 "world_size": self.world_size, "source": self._current_source_state()}
 
     def load_state_dict(self, sd: dict[str, Any]) -> None:
@@ -170,6 +176,9 @@ class SourceLoader:
         self._stop_worker()
         if sd.get("seed") != self.seed:
             raise ValueError(f"state_dict was saved with seed={sd.get('seed')}, loader has seed={self.seed}")
+        if sd.get("source_seed", self.source_seed) != self.source_seed:
+            raise ValueError(f"state_dict was saved with source_seed={sd.get('source_seed')}, "
+                             f"loader has source_seed={self.source_seed}")
         self._epoch, self._step = int(sd["epoch"]), int(sd["step"])
         self._source_reseeded = None
         src = sd.get("source")
@@ -249,8 +258,8 @@ class SourceLoader:
         if self._source_reseeded is not None and self._source_reseeded[0] == self._epoch:
             return                                     # already reseeded / restored for this epoch
         fn = getattr(self.source, "reseed", None)
-        if self.seed is not None and callable(fn):
-            fn(derive_seed(self.seed, STREAM_SOURCE), (self.rank, self._epoch))
+        if self.source_seed is not None and callable(fn):
+            fn(derive_seed(self.source_seed, STREAM_SOURCE), (self.rank, self._epoch))
         self._source_reseeded = (self._epoch, "reseeded")
 
     def _reseed_transforms(self, step: int) -> None:

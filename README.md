@@ -155,8 +155,8 @@ ckpt["loader"] = loader.state_dict()   # exact resume, even mid-epoch
 
 **Seeding:**
 - Augmentations are reseeded per batch with `(seed, rank, epoch, step)`.
-- The source gets `reseed(derive_seed(seed, STREAM_SOURCE), (rank, epoch))` at each epoch start, so every
-  rank's environments differ.
+- The source gets `reseed(derive_seed(source_seed, STREAM_SOURCE), (rank, epoch))` at each epoch start
+  (`source_seed=` defaults to `seed`), so every rank's environments differ.
 
 **Prefetch and on-policy sources:**
 - CPU sources are prefetched in a thread.

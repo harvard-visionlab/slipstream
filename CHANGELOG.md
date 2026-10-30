@@ -16,7 +16,7 @@ All notable changes to slipstream are documented here. Versions follow
     back. Multi-view uses a list of sub-pipelines.
   - **Seeding:** per batch with `(seed, rank, epoch, step)`. Exact mid-epoch resume via
     `state_dict` / `load_state_dict`. The source is reseeded per `(rank, epoch)` with
-    `derive_seed(seed, STREAM_SOURCE)`.
+    `derive_seed(source_seed, STREAM_SOURCE)` (`source_seed=` defaults to `seed`).
   - **Prefetch:** CPU sources are prefetched in a thread; the source state is captured per consumed batch.
     CUDA tensors and `on_policy` sources are produced inline.
   - **Safety:** the source's own buffers are never modified by in-place stages.

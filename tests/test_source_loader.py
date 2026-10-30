@@ -104,6 +104,12 @@ def test_source_reseed_key(frames):
     ld.set_epoch(5)
     list(ld)
     assert src.reseeds == [(derive_seed(7, STREAM_SOURCE), (0, 5))]
+    src2 = Replay(frames)
+    ld2 = SourceLoader(src2, pipelines=_pipe(), seed=7, source_seed=11, steps_per_epoch=2)
+    ld2.set_epoch(5)
+    list(ld2)
+    assert src2.reseeds == [(derive_seed(11, STREAM_SOURCE), (0, 5))]
+    assert ld2.state_dict()["source_seed"] == 11
 
 
 @pytest.mark.parametrize("threaded", [False, True])
