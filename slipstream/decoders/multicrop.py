@@ -15,7 +15,7 @@ import copy
 import numpy as np
 
 from slipstream.decoders._window import repeat_params
-from slipstream.seeds import DEFAULT_KEY, sample_seeds, STREAM_SIZE, STREAM_EMBED
+from slipstream.seeds import DEFAULT_KEY, sample_seeds, STREAM_SIZE, STREAM_EMBED, STREAM_RATIO
 import torch
 
 from numba import njit
@@ -195,6 +195,18 @@ class DecodeUniformMultiRandomResizedCrop(BatchTransform):
         )
 
 
+def _ratio_set(name: str, params: dict) -> tuple[float, ...] | None:
+    """Validated ``ratios`` of one crop spec (``None`` when absent)."""
+    if 'ratios' not in params or params['ratios'] is None:
+        return None
+    if 'ratio' in params:
+        raise ValueError(f"Crop '{name}': give either 'ratio' (a range) or 'ratios' (a set), not both")
+    rs = tuple(float(r) for r in params['ratios'])
+    if not rs or any(not (r > 0) for r in rs):
+        raise ValueError(f"Crop '{name}': 'ratios' must be a non-empty sequence of positive numbers, got {params['ratios']!r}")
+    return rs
+
+
 class DecodeMultiRandomResizedCrop(BatchTransform):
     """Decode-once + N named crops with per-crop parameters.
 
@@ -205,7 +217,9 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
     Args:
         crops: Dict mapping crop names to parameter dicts.
             Required key: ``size`` (int).
-            Optional keys: ``scale`` (tuple), ``ratio`` (tuple), ``seed`` (int).
+            Optional keys: ``scale`` (tuple), ``ratio`` (tuple), ``ratios`` (sequence),
+            ``seed`` (int). ``ratios`` (exclusive with ``ratio``) is a discrete set of aspect
+            ratios: each image draws one from the set, and the crop uses it as a fixed ratio.
         ratio: Default aspect ratio range (used if not specified per crop).
         crop_mode: ``"standard"`` (torchvision-compatible, 10-attempt rejection
             sampling) or ``"direct"`` (analytic, no rejection loop).
@@ -230,6 +244,19 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
                 "zoom_out": dict(size=224, scale=(0.4, 1.0), seed=42),
                 "zoom_in":  dict(size=224, scale=(0.05, 0.4), seed=42),
             })
+
+    Discrete ratio sets (SimCLR hard negatives, lrm-ssl ``RandomResizedCropSampleRatios``):
+        a crop with ``ratios`` and the **same seed** as another crop makes the same draws
+        (centre, then area, then ratio, then the same rejection loop) with the ratio fixed
+        at the image's chosen value, so it covers the same region stretched to that ratio::
+
+            DecodeMultiRandomResizedCrop({
+                "view_0": dict(size=224, scale=(0.08, 1.0), seed=42),
+                "hn_0":   dict(size=224, scale=(0.08, 1.0), seed=42, ratios=(1/2, 3/5, 5/3, 2)),
+            })
+
+        The per-image choice comes from its own seeded stream (``STREAM_RATIO``): crops with
+        the same seed and the same set choose the same ratio.
 
     Example:
         multi = DecodeMultiRandomResizedCrop({
@@ -263,6 +290,7 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
         self._crop_sizes: list[int] = []
         self._crop_scales: list[tuple[float, float]] = []
         self._crop_ratios: list[tuple[float, float]] = []
+        self._crop_ratio_sets: list[tuple[float, ...] | None] = []
         self._crop_seeds: list[int | None] = []
 
         for name, params in crops.items():
@@ -272,6 +300,7 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
             self._crop_sizes.append(params['size'])
             self._crop_scales.append(params.get('scale', (0.08, 1.0)))
             self._crop_ratios.append(params.get('ratio', ratio))
+            self._crop_ratio_sets.append(_ratio_set(name, params))
             self._crop_seeds.append(params.get('seed', None))
 
     def set_image_format(self, image_format: str) -> None:
@@ -314,14 +343,31 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
             log_ratio_max = math.log(ratio[1])
 
             # Same seed -> same draws (yoked crops); unseeded crops get their own stream.
-            batch_seeds = sample_seeds(seed, batch_offset, batch_size, *(() if seed is not None else (c,)), key=self._decoder._seed_key)
+            stream = () if seed is not None else (c,)
+            batch_seeds = sample_seeds(seed, batch_offset, batch_size, *stream, key=self._decoder._seed_key)
 
-            params = _generate_fn(
-                widths_i32, heights_i32,
-                scale[0], scale[1],
-                log_ratio_min, log_ratio_max,
-                batch_seeds,
-            )
+            ratio_set = self._crop_ratio_sets[c]
+            if ratio_set is None:
+                params = _generate_fn(
+                    widths_i32, heights_i32,
+                    scale[0], scale[1],
+                    log_ratio_min, log_ratio_max,
+                    batch_seeds,
+                )
+            else:
+                # One ratio per image from the set, then the same draw sequence with the range
+                # collapsed to [log r, log r] (still one uniform draw, so yoking is preserved).
+                pick = sample_seeds(seed, batch_offset, batch_size, *stream, STREAM_RATIO,
+                                    key=self._decoder._seed_key) % len(ratio_set)
+                params = np.empty((batch_size, 4), dtype=np.int32)
+                for k, r in enumerate(ratio_set):
+                    sel = np.flatnonzero(pick == k)
+                    if len(sel):
+                        lr = math.log(r)
+                        params[sel] = _generate_fn(
+                            np.ascontiguousarray(widths_i32[sel]), np.ascontiguousarray(heights_i32[sel]),
+                            scale[0], scale[1], lr, lr, np.ascontiguousarray(batch_seeds[sel]),
+                        )
             crop_params_list.append(repeat_params(params, self._decoder.seed_repeat))
 
         all_same_size = len(set(self._crop_sizes)) == 1
@@ -354,9 +400,10 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
     def __repr__(self) -> str:
         crop_strs = []
         for c, name in enumerate(self._crop_names):
+            rs = self._crop_ratio_sets[c]
             crop_strs.append(
                 f"'{name}': size={self._crop_sizes[c]}, "
-                f"scale={self._crop_scales[c]}"
+                f"scale={self._crop_scales[c]}" + (f", ratios={rs}" if rs is not None else "")
             )
         mode = f", crop_mode='{self.crop_mode}'" if self.crop_mode != "standard" else ""
         extra = ""

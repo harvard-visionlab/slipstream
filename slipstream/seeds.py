@@ -36,6 +36,7 @@ STREAM_POSITION = 0
 STREAM_SIZE = 1
 STREAM_EMBED = 2
 STREAM_SOURCE = 3      # SourceLoader: the source's own seed, derive_seed(seed, STREAM_SOURCE)
+STREAM_RATIO = 4       # DecodeMultiRandomResizedCrop(ratios=...): per-image choice from the ratio set
 
 DEFAULT_KEY = (0, 0)    # (rank, epoch) for objects not driven by a loader
 
