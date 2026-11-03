@@ -8,7 +8,7 @@ High-performance data loading library for PyTorch vision workloads. Namespace: `
 
 ```bash
 uv sync --group dev              # Install dependencies
-uv run pytest tests/ -v          # Run tests
+uv run pytest tests/ -m "not slow"   # core tier (~40 s Mac, ~50 s machina); see "Testing tiers"
 ```
 
 **C extension** (requires system libturbojpeg: `brew install libjpeg-turbo` on macOS):
@@ -58,9 +58,22 @@ Benchmark scripts output progress bars that consume excessive tokens. Instead:
 **Release gate (approved by George 2026-09-30):** before every tag, run
 `uv run python -m benchmarks.release_gate --host machina --append-md --wait 30` yourself on **machina** (clean checkout of
 the commit to tag, inside `jupyter-grez72` as jovyan; see the workstation skill). It is quiet (~30 lines),
-refuses to start on a busy machine (tell peers not to use machina meanwhile), saves
-`benchmarks/results/gate/machina/v<version>.json`, and exits 1 on a >10% drop vs the previous version or
+refuses to start on a busy machine (tell peers not to use machina meanwhile; send "gate done" right after), saves
+`benchmarks/results/gate-full/machina/v<version>.json`, and exits 1 on a >10% drop vs the previous version or
 threaded < 75% of simple. Do not tag on a FAIL; commit the results file + BENCHMARKS.md with the release.
+Since 0.14.1 it times **full passes** over imagenet1k val (~3 min): per step the cache is evicted from the page
+cache, then 3 epochs; cold = epoch 1, warm = best of 2-3, both gated (run-to-run noise measured at <= 5%).
+Speed is the top priority after correctness (George 2026-11-03): no release may regress either number.
+
+### Testing tiers (George 2026-11-03: don't run slow suites a change can't affect)
+
+- `uv run python scripts/affected_tests.py [BASE]` (BASE = latest tag by default) lists the changed files, the
+  test files that reference a changed module (targeted run while developing), and the tiers needed before tagging.
+- **Core tier, before every tag:** `pytest tests/ -m "not slow"` on the Mac and on machina (~50 s there).
+- **Full tier** (`pytest tests/`, ~4.5 min on machina) only when the script reports a full-tier trigger: cache
+  build / readers / S3 sync / integrity / identity / backends / C extension / dependencies (`pyproject.toml`,
+  `uv.lock`; a numba bump once cost 40% throughput). The slow files are listed in `tests/conftest.py` (`SLOW_FILES`).
+- The speed gate runs before every tag regardless of tier.
 
 ### DO NOT add materialization ops to CPU benchmarks
 
