@@ -4,6 +4,18 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.14.1] - 2026-11-03
+
+### Changed
+
+- `SlipstreamLoader.warmup_cache()` reads with parallel 16 MB `pread`s: new `workers=` argument, default 8.
+  - On machina NVMe, filling the page cache goes from 2.1 to about 5.4 GB/s.
+  - `workers=1` gives the old sequential behaviour.
+  - The read plan, subsets, madvise and touch phases are unchanged.
+  - The returned dict gains `bytes_read`, which equals `total_bytes` unless a file shrank, and `workers`.
+  - Tests check that the read pieces tile the plan exactly, that each byte is read once for any worker count, and
+    that a real store is fully resident after warmup.
+
 ## [0.14.0] - 2026-11-03
 
 ### Added

@@ -291,3 +291,102 @@ class TestWarmupTouch:
         from slipstream.loader import _touch_mmap_ranges
         arr = np.arange(3 * 4096 + 100, dtype=np.uint8)          # plain array stands in for the mmap
         _touch_mmap_ranges(arr, [(10, 3 * 4096 + 50)])           # must not raise, covers partial pages
+
+
+# ---------------------------------------------------------------------------
+# Parallel phase 2 (0.14.1): pieces tile the plan, every byte is read once, any worker count
+# ---------------------------------------------------------------------------
+
+import os  # noqa: E402
+
+from slipstream.loader import _read_pieces, _warmup_pieces  # noqa: E402
+
+
+def _union(spans):
+    return _coalesce_ranges(np.array([s for s, _ in spans]), np.array([e for _, e in spans]), gap=0)
+
+
+class TestWarmupPieces:
+    @pytest.mark.parametrize("chunk", [1, 7, 4096, 1 << 20])
+    def test_pieces_tile_plan_exactly(self, tmp_path, chunk):
+        a, b = tmp_path / "a.bin", tmp_path / "b.npy"
+        a.write_bytes(os.urandom(50_000))
+        b.write_bytes(os.urandom(12_345))
+        (tmp_path / "empty.bin").write_bytes(b"")
+        ranges = [(0, 4096), (8192, 8193), (10_000, 50_000)]
+        plan = [(a, ranges), (b, None), (tmp_path / "empty.bin", None)]
+        pieces = _warmup_pieces(plan, chunk=chunk)
+        assert all(0 < n <= chunk for _, _, n in pieces)
+        for path, want in [(a, ranges), (b, [(0, 12_345)])]:
+            spans = [(o, o + n) for p, o, n in pieces if p == path]
+            assert sum(e - s for s, e in spans) == sum(e - s for s, e in want)      # no overlap
+            assert _union(spans) == _union(want)                                    # no gaps
+        assert not [p for p in pieces if p[0].name == "empty.bin"]
+
+    @pytest.mark.parametrize("workers", [1, 3, 8])
+    def test_every_planned_byte_read_once(self, tmp_path, monkeypatch, workers):
+        f = tmp_path / "data.bin"
+        f.write_bytes(os.urandom(300_000))
+        plan = [(f, [(0, 100_000), (150_000, 300_000)])]
+        pieces = _warmup_pieces(plan, chunk=10_000)
+        calls, real = [], os.preadv
+
+        def spy(fd, bufs, off):
+            n = real(fd, bufs, off)
+            calls.append((off, off + n))
+            return n
+
+        monkeypatch.setattr(os, "preadv", spy)
+        done = []
+        total = _read_pieces(pieces, workers, done.append)
+        assert total == sum(done) == 250_000 and len(done) == len(pieces)
+        assert sum(e - s for s, e in calls) == 250_000
+        assert _union(calls) == [(0, 100_000), (150_000, 300_000)]
+
+    def test_short_file_reports_fewer_bytes(self, tmp_path):
+        f = tmp_path / "data.bin"
+        f.write_bytes(os.urandom(1000))
+        assert _read_pieces([(f, 0, 600), (f, 600, 600)], 2, lambda n: None) == 1000
+
+
+class TestParallelWarmupStats:
+    @pytest.mark.parametrize("workers", [1, 8])
+    def test_full_and_subset_read_exactly_the_plan(self, tmp_path, workers):
+        ds = _BigBytesDataset(cache_path=tmp_path / "cache")
+        loader = SlipstreamLoader(ds, batch_size=2, shuffle=False, verbose=False)
+        try:
+            for kw in ({}, {"indices": [0, 1, 5, 8]}):
+                st = loader.warmup_cache(verbose=False, workers=workers, **kw)
+                assert st["bytes_read"] == st["total_bytes"] > 0 and st["workers"] == workers
+            assert len(list(loader)) == len(loader)
+        finally:
+            loader.shutdown()
+
+
+_REAL = [Path(os.environ.get("SLIPSTREAM_CACHE_DIR", "/nonexistent")) / "imagenet1k-s256_l512-jpeg-val",
+         Path.home() / ".slipstream" / "imagenet10-s256_l512-jpeg-val"]
+
+
+@pytest.mark.skipif(not hasattr(os, "posix_fadvise"), reason="needs posix_fadvise to evict (Linux)")
+def test_parallel_warmup_makes_real_cache_resident():
+    """Real imagenet val store: evict, warm with 8 workers (no touch), every sampled record is resident."""
+    from slipstream import SlipstreamDataset
+
+    cache = next((p for p in _REAL if p.exists()), None)
+    if cache is None:
+        pytest.skip("no real jpeg val cache")
+    for f in cache.iterdir():
+        if f.is_file():
+            fd = os.open(f, os.O_RDONLY)
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            os.close(fd)
+    loader = SlipstreamLoader(SlipstreamDataset(input_dir=str(cache)), batch_size=256, shuffle=False,
+                              verbose=False, exclude_fields=["path"])
+    try:
+        before = loader.page_cache_residency()
+        assert before is not None and before < 0.5
+        st = loader.warmup_cache(verbose=False, workers=8, touch=False)
+        assert st["bytes_read"] == st["total_bytes"]
+        assert loader.page_cache_residency() == 1.0
+    finally:
+        loader.shutdown()

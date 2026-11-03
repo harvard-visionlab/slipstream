@@ -47,6 +47,7 @@ Performance:
 from __future__ import annotations
 
 import math
+import os
 import queue
 import threading
 from collections.abc import Callable, Sequence
@@ -120,6 +121,70 @@ def _touch_mmap_ranges(arr: np.ndarray, ranges: list[tuple[int, int]], chunk: in
             stop = min(pos + chunk, end)
             arr[pos:stop:page].sum(dtype=np.uint64)     # one load per page; result discarded
             pos = stop
+
+
+_WARMUP_CHUNK = 16 * 1024 * 1024
+_WARMUP_WORKERS = 8         # machina NVMe RAID0: 1 -> 2.1 GB/s, 4 -> 5.1, 8 -> 5.4, 16 -> 5.7 (16 MB preads)
+
+
+def _warmup_pieces(
+    plan: list[tuple[Path, list[tuple[int, int]] | None]], chunk: int = _WARMUP_CHUNK
+) -> list[tuple[Path, int, int]]:
+    """Split a warmup plan into ``(path, offset, length)`` reads of at most ``chunk`` bytes, in file order.
+
+    The pieces tile every planned range exactly (no gaps, no overlap); whole files use their current size.
+    """
+    pieces: list[tuple[Path, int, int]] = []
+    for fpath, ranges in plan:
+        spans = [(0, fpath.stat().st_size)] if ranges is None else ranges
+        for start, end in spans:
+            for off in range(start, end, chunk):
+                pieces.append((fpath, off, min(chunk, end - off)))
+    return pieces
+
+
+def _read_pieces(pieces: list[tuple[Path, int, int]], workers: int, on_done) -> int:
+    """pread every piece (``workers`` threads; pread releases the GIL) and return the bytes read.
+
+    ``on_done(n)`` is called from the calling thread after each piece. A short read (file truncated
+    since the plan was made) stops that piece early; the return value then falls short of the plan.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    fds = {p: os.open(p, os.O_RDONLY) for p in dict.fromkeys(p for p, _, _ in pieces)}
+    local = threading.local()
+
+    def read(piece: tuple[Path, int, int]) -> int:
+        fpath, off, length = piece
+        buf = getattr(local, "buf", None)
+        if buf is None or len(buf) < length:
+            buf = local.buf = bytearray(max(length, _WARMUP_CHUNK))
+        view = memoryview(buf)
+        got = 0
+        while got < length:
+            n = os.preadv(fds[fpath], [view[: length - got]], off + got) if hasattr(os, "preadv") \
+                else len(os.pread(fds[fpath], length - got, off + got))
+            if n <= 0:
+                break
+            got += n
+        return got
+
+    total = 0
+    try:
+        if workers <= 1:
+            for piece in pieces:
+                n = read(piece)
+                total += n
+                on_done(n)
+        else:
+            with ThreadPoolExecutor(workers, thread_name_prefix="slipstream-warmup") as ex:
+                for n in ex.map(read, pieces):
+                    total += n
+                    on_done(n)
+    finally:
+        for fd in fds.values():
+            os.close(fd)
+    return total
 
 
 def _madvise_willneed(fpath: Path, ranges: list[tuple[int, int]] | None) -> None:
@@ -1348,6 +1413,7 @@ class SlipstreamLoader:
         verbose: bool = True,
         indices: Sequence[int] | np.ndarray | None = None,
         touch: bool = True,
+        workers: int = _WARMUP_WORKERS,
     ) -> dict:
         """Pre-read cache files to populate OS page cache. No decoding, no pipeline execution.
 
@@ -1392,10 +1458,13 @@ class SlipstreamLoader:
                 record of every window is warmed.
             touch: Also fault the primary field's records through this process's
                 mmap (phase 3, milliseconds when cached). Default True.
+            workers: Parallel reader threads for phase 2 (16 MB preads). Default 8: on
+                machina's NVMe 2.6x the single-stream rate. 1 reads sequentially.
 
         Returns:
-            dict with: elapsed_sec, total_bytes, throughput_mb_s, cache_dir,
-            num_files, subset (bool), num_records, num_ranges, touch_sec
+            dict with: elapsed_sec, total_bytes, bytes_read, throughput_mb_s, cache_dir,
+            num_files, subset (bool), num_records, num_ranges, touch_sec, workers.
+            ``bytes_read`` equals ``total_bytes`` unless a file shrank during the warmup.
         """
         import sys
         import time
@@ -1433,20 +1502,23 @@ class SlipstreamLoader:
             return dict(
                 elapsed_sec=0,
                 total_bytes=0,
+                bytes_read=0,
                 throughput_mb_s=0,
                 cache_dir=str(cache_dir),
                 num_files=0,
                 subset=indices is not None,
                 num_records=num_records,
                 num_ranges=0,
+                touch_sec=0.0,
+                workers=workers,
             )
 
         # Phase 1: madvise hints (best-effort, Linux/macOS)
         for fpath, ranges in plan:
             _madvise_willneed(fpath, ranges)
 
-        # Phase 2: read to fault pages into cache
-        CHUNK = 16 * 1024 * 1024  # 16 MB
+        # Phase 2: read to fault pages into cache (parallel 16 MB preads)
+        pieces = _warmup_pieces(plan)
         t0 = time.time()
 
         pbar = tqdm(
@@ -1458,24 +1530,7 @@ class SlipstreamLoader:
             leave=True,
             file=sys.stdout,
         )
-        for fpath, ranges in plan:
-            with open(fpath, "rb") as f:
-                if ranges is None:
-                    while True:
-                        chunk = f.read(CHUNK)
-                        if not chunk:
-                            break
-                        pbar.update(len(chunk))
-                else:
-                    for start, end in ranges:
-                        f.seek(start)
-                        remaining = end - start
-                        while remaining > 0:
-                            chunk = f.read(min(CHUNK, remaining))
-                            if not chunk:
-                                break
-                            remaining -= len(chunk)
-                            pbar.update(len(chunk))
+        bytes_read = _read_pieces(pieces, workers, pbar.update)
         pbar.close()
         elapsed = time.time() - t0
 
@@ -1499,6 +1554,7 @@ class SlipstreamLoader:
         return dict(
             elapsed_sec=elapsed,
             total_bytes=total_bytes,
+            bytes_read=bytes_read,
             throughput_mb_s=(total_bytes / (1024**2)) / elapsed if elapsed > 0 else 0,
             cache_dir=str(cache_dir),
             num_files=len(plan),
@@ -1506,6 +1562,7 @@ class SlipstreamLoader:
             num_records=num_records,
             num_ranges=num_ranges,
             touch_sec=touch_sec,
+            workers=workers,
         )
 
     def _warmup_plan(
