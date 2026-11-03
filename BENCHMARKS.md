@@ -544,3 +544,36 @@ Best of 3 × 60 batches of 512 (after 5 warmup batches), imagenet1k val slipcach
 | yuv420 | G | + RandomHorizontalFlip | 27,849 | 27,434 | 0.99x |
 | yuv420 | G@160 | + RandomHorizontalFlip @ 160px | 36,709 | 37,675 | 1.03x |
 | yuv420 | G@192 | + RandomHorizontalFlip @ 192px | 32,329 | 32,197 | 1.00x |
+
+## Release gate (full passes)
+
+imagenet1k val (50k), batch 512; per step the cache is evicted from the page cache, then 3 full epochs: cold = epoch 1, warm = best of epochs 2-3 (img/s, loader start-up included). `benchmarks/release_gate.py` (steps: `benchmarks/loader_ablation.py`).
+
+### v0.14.0 (cc52685), machina, 2026-11-03
+
+64 CPUs, numba 0.67.0, torch 2.14.0+cu126, NVIDIA RTX A6000; before: load1=2.0 gpu%=[0, 0], after: load1=31.0 gpu%=[0, 0]
+
+| fmt | step | pipeline | cold baseline | cold v0.14.0 | ratio | warm baseline | warm v0.14.0 | ratio |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| jpeg | A | RRC only, uint8 CPU, sequential, simple | — | 15,165 | — | — | 38,991 | — |
+| jpeg | B | + threaded prefetch | — | 22,406 | — | — | 41,462 | — |
+| jpeg | C | + shuffle | — | 15,459 | — | — | 40,308 | — |
+| jpeg | D | + ToTorchImage fp32 | — | 13,536 | — | — | 27,705 | — |
+| jpeg | E | + Normalize fp32 | — | 13,722 | — | — | 27,593 | — |
+| jpeg | F | ToTorchImage/Normalize bf16 | — | 13,345 | — | — | 27,471 | — |
+| jpeg | G | + RandomHorizontalFlip | — | 13,058 | — | — | 24,202 | — |
+| jpeg | G@160 | + RandomHorizontalFlip @ 160px | — | 14,445 | — | — | 31,292 | — |
+| jpeg | G@192 | + RandomHorizontalFlip @ 192px | — | 13,676 | — | — | 27,431 | — |
+| jpeg | M | multicrop 2x224 + 4x98, uint8 CPU | — | 12,233 | — | — | 22,242 | — |
+| jpeg | Mf | multicrop, crop_mode='ffcv' | — | 12,479 | — | — | 22,036 | — |
+| yuv420 | A | RRC only, uint8 CPU, sequential, simple | — | 15,443 | — | — | 46,373 | — |
+| yuv420 | B | + threaded prefetch | — | 14,133 | — | — | 53,742 | — |
+| yuv420 | C | + shuffle | — | 10,658 | — | — | 53,576 | — |
+| yuv420 | D | + ToTorchImage fp32 | — | 10,213 | — | — | 32,154 | — |
+| yuv420 | E | + Normalize fp32 | — | 10,330 | — | — | 31,877 | — |
+| yuv420 | F | ToTorchImage/Normalize bf16 | — | 10,212 | — | — | 32,810 | — |
+| yuv420 | G | + RandomHorizontalFlip | — | 10,040 | — | — | 27,463 | — |
+| yuv420 | G@160 | + RandomHorizontalFlip @ 160px | — | 10,535 | — | — | 37,900 | — |
+| yuv420 | G@192 | + RandomHorizontalFlip @ 192px | — | 10,354 | — | — | 32,461 | — |
+| yuv420 | M | multicrop 2x224 + 4x98, uint8 CPU | — | 9,678 | — | — | 25,414 | — |
+| yuv420 | Mf | multicrop, crop_mode='ffcv' | — | 9,641 | — | — | 25,159 | — |
