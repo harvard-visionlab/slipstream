@@ -122,8 +122,9 @@ def slipcache(litdata_reader):
 def _get_cached_image_bytes(cache: OptimizedCache, idx: int) -> bytes:
     """Extract raw image bytes from cache (pure Python, no JIT).
 
-    The s256-l512-jpgbytes streaming source stores each JPEG zero-padded to a fixed record size and the
-    cache keeps the bytes as-is, so EOI checks strip trailing zeros first.
+    The s256-l512-jpgbytes streaming source stores each JPEG in a fixed-size record (171,977 bytes) and the
+    cache keeps the bytes as-is. The tail after the real EOI is padding: zeros, or leftovers of an earlier,
+    larger image (e.g. index 120), so the EOI check looks for the marker rather than at the last two bytes.
     """
     storage = cache.fields['image']
     meta = storage._metadata[idx]
@@ -211,7 +212,7 @@ class TestLitDataToSlipCacheQuick:
                     if cached_bytes[:2] != b'\xff\xd8':
                         errors.append((idx, "missing JPEG SOI marker"))
                         continue
-                    if cached_bytes.rstrip(b'\x00')[-2:] != b'\xff\xd9':
+                    if cached_bytes.rfind(b'\xff\xd9') < 2:
                         errors.append((idx, "missing JPEG EOI marker"))
                         continue
 
@@ -312,7 +313,7 @@ class TestLitDataToSlipCacheFull:
                     # Verify JPEG structure (fast check, no decode)
                     if cached_bytes[:2] != b'\xff\xd8':
                         errors.append((idx, "missing JPEG SOI"))
-                    elif cached_bytes.rstrip(b'\x00')[-2:] != b'\xff\xd9':
+                    elif cached_bytes.rfind(b'\xff\xd9') < 2:
                         errors.append((idx, "missing JPEG EOI"))
                 else:
                     # YUV420: verify dimensions and size
@@ -371,7 +372,7 @@ class TestLitDataToSlipCacheFull:
                     if cached_bytes[:2] != b'\xff\xd8':
                         errors.append((idx, "missing JPEG SOI"))
                         continue
-                    if cached_bytes.rstrip(b'\x00')[-2:] != b'\xff\xd9':
+                    if cached_bytes.rfind(b'\xff\xd9') < 2:
                         errors.append((idx, "missing JPEG EOI"))
                         continue
 
