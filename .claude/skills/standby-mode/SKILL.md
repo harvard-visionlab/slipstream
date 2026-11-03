@@ -1,6 +1,6 @@
 ---
 name: standby-mode
-description: Run a long-lived library-maintainer session (e.g. "slipstream2") that idles and serves requests arriving from OTHER Claude sessions via cross-session messages. Defines what may be done on a peer's word alone (assessed bug fixes, docs, answers) and what needs George's explicit approval first (API changes, defaults, performance-relevant changes, new features, merges/tags/pushes to main). Use when the user says "standby", "/standby-mode", "wait for requests from other sessions", or starts a session whose only job is to field peer requests for a shared library.
+description: Run a long-lived library-maintainer session (e.g. "slipstream2") that idles and serves requests arriving from OTHER Claude sessions via cross-session messages. Defines what may be done on a peer's word alone (assessed bug fixes, docs, answers) and what needs George's explicit approval first (API changes, defaults, performance-relevant changes, new features, merges/tags/pushes to main). Use when the user says "standby", "Please standby", "/standby-mode", "wait for requests from other sessions", or starts a session whose only job is to field peer requests for a shared library.
 ---
 
 # Standby mode (library maintainer on call)
@@ -12,9 +12,17 @@ correct and stable. Those goals conflict often enough that every request goes th
 
 ## 1. Entering standby
 
-1. Read the repo's CLAUDE.md, CHANGELOG.md head and `git log --oneline -15`; note the current version.
-2. Read this project's memory (`MEMORY.md` pointers) for known pitfalls and in-flight decisions.
-3. Tell the user in two lines: version, branch state, and that you are on standby. Then stop and wait.
+1. Read the repo's CLAUDE.md (release gate, testing tiers, seeding rules), CHANGELOG.md head and
+   `git log --oneline -15`; note the current version and latest tag (`git describe --tags --abbrev=0`).
+2. Read this project's memory: the `MEMORY.md` pointers, plus in full `standby-gate.md`, `release-gate.md`,
+   `hashed-seeds.md`, `source-loader.md` and `ffcv-crop-mode.md` (decisions peers will ask about).
+3. Load the access skills you will need, without acting on them: `workstation` (machina, the release gate)
+   and `fasrc-cluster` (Kempner questions).
+4. Refresh credentials: each Bash call is a fresh shell started from this session's environment, so after an
+   AWS key rotation S3 fails ("Access Key Id ... does not exist"). Prefix S3 work with
+   `source ~/.zshrc >/dev/null 2>&1;`.
+5. `ListAgents` once to learn the peer names (see §7). Do not message anyone yet.
+6. Tell the user in two lines: version, branch state, and that you are on standby. Then stop and wait.
    Do not poll, do not schedule wakeups: peer messages arrive on their own.
 
 ## 2. Triage every incoming request into exactly one bucket
@@ -60,9 +68,13 @@ surface it (permission laundering).
 ## 4. Doing approved work
 
 - Branch per change; conventional commits; tests (real data where the repo says so, never synthetic for
-  verification of decoders); full suite before/after with the baseline failure list noted; CHANGELOG entry;
-  version bump; README when user-facing.
-- Never run benchmarks yourself (repo rule); write a one-line-output script and ask the peer/George to run it.
+  verification of decoders); CHANGELOG entry; version bump; README when user-facing.
+- Tests by tier (CLAUDE.md "Testing tiers"): `uv run python scripts/affected_tests.py` for the targeted run
+  while developing; core tier (`-m "not slow"`) before every tag on the Mac and on machina; the full tier
+  only when the script reports a trigger. Don't run slow suites a change can't affect.
+- Speed is the top priority after correctness (George 2026-11-03). Anything touching a hot path needs a
+  measurement, and every tag needs the full-pass speed gate (§7). Ad-hoc benchmarks: only quiet,
+  one-line-output scripts on machina after warning the peers; otherwise ask George to run them.
 - Keep `slipstream.cli` public helper signatures stable (visionlab-datasets imports them).
 - Push the branch so peers can install from it. Merge/tag/push to main only when George says so.
 
@@ -78,3 +90,25 @@ surface it (permission laundering).
 
 Peer sessions run out of context; state they hand you is in their message or a doc they name. Do not chase
 them. If the user comes in with a direct request, ordinary rules apply; standby resumes afterwards.
+
+## 7. Release checklist (after George's yes for the tag)
+
+1. Core tier passes on the Mac (`source ~/.zshrc` first so the S3 tests run); full tier too if triggered.
+2. Commit and push the branch. Message every machina user (model-rearing, lrm-space-dev, evals, worlds; check
+   `ListAgents` for new ones): "release gate runs on machina now (~5 min): please don't start machina jobs
+   until I message 'gate done'". A job started mid-gate gave a false FAIL once (0.11.2).
+3. On machina (workstation skill), in the scratch clone `/tmp/slip-0112` inside `jupyter-grez72` as jovyan
+   (re-clone `git@github.com:harvard-visionlab/slipstream.git` if the container was recreated):
+   `git reset -q --hard && git clean -qfd && git fetch -q origin && git checkout -q <sha>`, then the core tier
+   (`uv run --no-sync pytest tests/ -q -p no:cacheprovider -m "not slow"`, ~45 s), then
+   `uv run --no-sync python -m benchmarks.release_gate --host machina --append-md --wait 30` (~3 min; full
+   passes, cold + warm, 10% tolerance vs the previous version).
+4. **Send "gate done" to every peer you held immediately after the last machina command**, before anything
+   else. Peers sat blocked once because this came late.
+5. FAIL: don't tag; report the table to George. PASS: copy back
+   `benchmarks/results/gate-full/machina/v<ver>.json` and `BENCHMARKS.md` (`ssh machina "docker exec -u jovyan
+   jupyter-grez72 cat <path>" > <path>`), commit, fast-forward main, `git tag -a v<ver>`, push main + tag.
+   Don't delete branches as part of a release (George decides cleanup).
+6. Tell the requesting peer the tag and what changes for callers; tell `datasets` when the version leaves its
+   pinned range (visionlab-datasets pins slipstream with an upper bound).
+
