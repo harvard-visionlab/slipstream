@@ -92,7 +92,7 @@ def slipcache(ffcv_reader):
     _print_progress(f"\n[fixture] Dataset hash: {ffcv_reader.dataset_hash}")
     _print_progress(f"[fixture] Cache path: {cache_dir}")
 
-    manifest_path = cache_dir / ".slipstream" / "manifest.json"
+    manifest_path = cache_dir / "manifest.json"
 
     # Check if cache already exists
     if manifest_path.exists():

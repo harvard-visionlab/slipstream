@@ -114,11 +114,18 @@ class TestS3PathExists:
                 assert result == "/usr/bin/s5cmd"
 
 
+def _fake_manifest_cp(cmd, **kwargs):
+    """Stand-in for the manifest-last ``s5cmd cp`` (subprocess.run): writes the local target if any."""
+    if not cmd[-1].startswith("s3://"):
+        Path(cmd[-1]).write_text("{}")
+    return MagicMock(returncode=0)
+
+
 class TestDownloadS3Cache:
     """Tests for download_s3_cache function."""
 
     def test_download_success(self, tmp_path):
-        """download_s3_cache creates local directory and runs with progress."""
+        """download_s3_cache copies the data (manifest excluded), then fetches manifest.json last."""
         from slipstream.s3_sync import download_s3_cache
 
         captured_cmd = None
@@ -128,23 +135,27 @@ class TestDownloadS3Cache:
             captured_cmd = cmd
             return 0  # Success
 
+        dest = tmp_path / "cache"
         with patch("slipstream.s3_sync.run_s5cmd_with_progress", side_effect=mock_progress):
             with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
-                result = download_s3_cache(
-                    "s3://bucket/caches/slipcache-abc123/",
-                    tmp_path,
-                    verbose=False,
-                )
+                with patch("slipstream.s3_sync.subprocess.run", side_effect=_fake_manifest_cp) as run:
+                    result = download_s3_cache(
+                        "s3://bucket/caches/slipcache-abc123/",
+                        dest,
+                        verbose=False,
+                    )
 
         assert result is True
-        assert (tmp_path / ".slipstream").exists()
+        assert (dest / "manifest.json").exists()
 
-        # Verify command structure
+        # Verify command structure: data first without the manifest, then the manifest alone
         assert captured_cmd is not None
         assert "s5cmd" in captured_cmd
         assert "cp" in captured_cmd
         assert "--show-progress" in captured_cmd
-        assert "s3://bucket/caches/slipcache-abc123/.slipstream/*" in captured_cmd
+        assert captured_cmd[-2:] == ["s3://bucket/caches/slipcache-abc123/*", str(dest) + "/"]
+        assert "manifest.json" in captured_cmd[captured_cmd.index("--exclude") + 1]
+        assert run.call_args[0][0][-2] == "s3://bucket/caches/slipcache-abc123/manifest.json"
 
     def test_download_failure(self, tmp_path):
         """download_s3_cache returns False on failure."""
@@ -192,13 +203,10 @@ class TestUploadS3Cache:
     """Tests for upload_s3_cache function."""
 
     def test_upload_success(self, tmp_path):
-        """upload_s3_cache uploads .slipstream directory."""
+        """upload_s3_cache uploads the cache directory, manifest.json last."""
         from slipstream.s3_sync import upload_s3_cache
 
-        # Create .slipstream directory with a file
-        slipstream_dir = tmp_path / ".slipstream"
-        slipstream_dir.mkdir()
-        (slipstream_dir / "manifest.json").write_text('{"version": 1}')
+        (tmp_path / "manifest.json").write_text('{"version": 1}')
 
         captured_cmd = None
 
@@ -209,25 +217,27 @@ class TestUploadS3Cache:
 
         with patch("slipstream.s3_sync.run_s5cmd_with_progress", side_effect=mock_progress):
             with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
-                result = upload_s3_cache(
-                    tmp_path,
-                    "s3://bucket/caches/slipcache-abc123/",
-                    verbose=False,
-                )
+                with patch("slipstream.s3_sync.subprocess.run", side_effect=_fake_manifest_cp) as run:
+                    result = upload_s3_cache(
+                        tmp_path,
+                        "s3://bucket/caches/slipcache-abc123/",
+                        verbose=False,
+                    )
 
         assert result is True
         assert captured_cmd is not None
         assert "cp" in captured_cmd
         assert "--show-progress" in captured_cmd
-        assert "s3://bucket/caches/slipcache-abc123/.slipstream/" in captured_cmd
+        assert captured_cmd[-2:] == [str(tmp_path) + "/*", "s3://bucket/caches/slipcache-abc123/"]
+        assert run.call_args[0][0][-1] == "s3://bucket/caches/slipcache-abc123/manifest.json"
 
     def test_upload_no_slipstream_dir(self, tmp_path):
-        """upload_s3_cache returns False if .slipstream doesn't exist."""
+        """upload_s3_cache returns False if the cache directory doesn't exist."""
         from slipstream.s3_sync import upload_s3_cache
 
         with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
             result = upload_s3_cache(
-                tmp_path,
+                tmp_path / "missing",
                 "s3://bucket/caches/slipcache-abc123/",
                 verbose=False,
             )
@@ -238,10 +248,7 @@ class TestUploadS3Cache:
         """upload_s3_cache returns False on failure."""
         from slipstream.s3_sync import upload_s3_cache
 
-        # Create .slipstream directory
-        slipstream_dir = tmp_path / ".slipstream"
-        slipstream_dir.mkdir()
-        (slipstream_dir / "manifest.json").write_text('{"version": 1}')
+        (tmp_path / "manifest.json").write_text('{"version": 1}')
 
         def mock_progress(cmd, verbose=True):
             return 1  # Failure
@@ -319,15 +326,12 @@ class TestSyncS3Cache:
         """sync_s3_cache syncs files in both directions."""
         from slipstream.s3_sync import sync_s3_cache
 
-        # Create local .slipstream with some files
-        slipstream_dir = tmp_path / ".slipstream"
-        slipstream_dir.mkdir()
-        (slipstream_dir / "manifest.json").write_text('{}')
-        (slipstream_dir / "local_only.npy").write_text('local')
+        (tmp_path / "manifest.json").write_text('{}')
+        (tmp_path / "local_only.npy").write_text('local')
 
         # Mock s5cmd ls to return remote files
-        ls_output = "2024-01-01 12:00:00  100 s3://bucket/cache/.slipstream/manifest.json\n"
-        ls_output += "2024-01-01 12:00:00  100 s3://bucket/cache/.slipstream/remote_only.npy\n"
+        ls_output = "2024-01-01 12:00:00  100 s3://bucket/cache/manifest.json\n"
+        ls_output += "2024-01-01 12:00:00  100 s3://bucket/cache/remote_only.npy\n"
 
         call_count = [0]
 
@@ -350,12 +354,12 @@ class TestSyncS3Cache:
         assert call_count[0] >= 1  # At least the ls call
 
     def test_sync_no_slipstream_dir(self, tmp_path):
-        """sync_s3_cache returns (0,0) if no .slipstream dir."""
+        """sync_s3_cache returns (0,0) if the cache directory doesn't exist."""
         from slipstream.s3_sync import sync_s3_cache
 
         with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
             downloaded, uploaded = sync_s3_cache(
-                tmp_path,
+                tmp_path / "missing",
                 "s3://bucket/cache/",
                 verbose=False,
             )
@@ -422,12 +426,13 @@ class TestCommandGeneration:
 
         with patch("slipstream.s3_sync.run_s5cmd_with_progress", side_effect=capture_cmd):
             with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
-                download_s3_cache(
-                    "s3://my-bucket/caches/slipcache-abc123",
-                    tmp_path,
-                    numworkers=16,
-                    verbose=False,
-                )
+                with patch("slipstream.s3_sync.subprocess.run", side_effect=_fake_manifest_cp):
+                    download_s3_cache(
+                        "s3://my-bucket/caches/slipcache-abc123",
+                        tmp_path,
+                        numworkers=16,
+                        verbose=False,
+                    )
 
         assert captured_cmd is not None
         assert "s5cmd" in captured_cmd
@@ -435,17 +440,13 @@ class TestCommandGeneration:
         assert "16" in captured_cmd
         assert "cp" in captured_cmd
         assert "--show-progress" in captured_cmd
-        # Source should be remote .slipstream/*
-        assert any(".slipstream/*" in arg for arg in captured_cmd)
+        assert captured_cmd[-2] == "s3://my-bucket/caches/slipcache-abc123/*"
 
     def test_upload_command_format(self, tmp_path):
         """Verify upload generates correct s5cmd cp command with progress."""
         from slipstream.s3_sync import upload_s3_cache
 
-        # Create .slipstream directory
-        slipstream_dir = tmp_path / ".slipstream"
-        slipstream_dir.mkdir()
-        (slipstream_dir / "manifest.json").write_text('{}')
+        (tmp_path / "manifest.json").write_text('{}')
 
         captured_cmd = None
 
@@ -456,12 +457,13 @@ class TestCommandGeneration:
 
         with patch("slipstream.s3_sync.run_s5cmd_with_progress", side_effect=capture_cmd):
             with patch("slipstream.s3_sync._check_s5cmd", return_value="/usr/bin/s5cmd"):
-                upload_s3_cache(
-                    tmp_path,
-                    "s3://my-bucket/caches/slipcache-abc123",
-                    numworkers=64,
-                    verbose=False,
-                )
+                with patch("slipstream.s3_sync.subprocess.run", side_effect=_fake_manifest_cp):
+                    upload_s3_cache(
+                        tmp_path,
+                        "s3://my-bucket/caches/slipcache-abc123",
+                        numworkers=64,
+                        verbose=False,
+                    )
 
         assert captured_cmd is not None
         assert "s5cmd" in captured_cmd
@@ -472,8 +474,7 @@ class TestCommandGeneration:
         assert "--if-size-differ" in captured_cmd
         # Note: --if-source-newer removed to avoid re-uploads when local files
         # have newer timestamps (e.g., after moving cache directories)
-        # Destination should be remote .slipstream/
-        assert any(".slipstream/" in arg for arg in captured_cmd)
+        assert captured_cmd[-1] == "s3://my-bucket/caches/slipcache-abc123/"
 
 
 # Integration tests that require real S3 access
@@ -513,24 +514,23 @@ class TestRemoteCacheIntegration:
 
         # Create local cache structure
         local_cache = tmp_path / "local"
-        slipstream_dir = local_cache / ".slipstream"
-        slipstream_dir.mkdir(parents=True)
-        (slipstream_dir / "manifest.json").write_text('{"version": 1, "test": true}')
-        (slipstream_dir / "test.bin").write_bytes(b"test data")
+        local_cache.mkdir(parents=True)
+        (local_cache / "manifest.json").write_text('{"version": 1, "test": true}')
+        (local_cache / "test.bin").write_bytes(b"test data")
 
         try:
             # Upload
             assert upload_s3_cache(local_cache, remote_path, verbose=True)
 
             # Verify exists
-            assert s3_path_exists(f"{remote_path}/.slipstream/manifest.json")
+            assert s3_path_exists(f"{remote_path}/manifest.json")
 
             # Download to different location
             download_cache = tmp_path / "downloaded"
             assert download_s3_cache(remote_path, download_cache, verbose=True)
 
             # Verify contents match
-            downloaded_manifest = download_cache / ".slipstream" / "manifest.json"
+            downloaded_manifest = download_cache / "manifest.json"
             assert downloaded_manifest.exists()
             assert '"test": true' in downloaded_manifest.read_text()
 
@@ -538,6 +538,6 @@ class TestRemoteCacheIntegration:
             # Cleanup (best effort)
             import subprocess
             subprocess.run(
-                ["s5cmd", "rm", f"{remote_path}/.slipstream/*"],
+                ["s5cmd", "rm", f"{remote_path}/*"],
                 capture_output=True,
             )

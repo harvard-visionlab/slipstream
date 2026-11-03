@@ -93,7 +93,7 @@ def slipcache(litdata_reader):
     _print_progress(f"\n[fixture] Dataset hash: {litdata_reader.dataset_hash}")
     _print_progress(f"[fixture] Cache path: {cache_dir}")
 
-    manifest_path = cache_dir / ".slipstream" / "manifest.json"
+    manifest_path = cache_dir / "manifest.json"
 
     # Check if cache already exists
     if manifest_path.exists():
@@ -120,7 +120,11 @@ def slipcache(litdata_reader):
 # ---------------------------------------------------------------------------
 
 def _get_cached_image_bytes(cache: OptimizedCache, idx: int) -> bytes:
-    """Extract raw image bytes from cache (pure Python, no JIT)."""
+    """Extract raw image bytes from cache (pure Python, no JIT).
+
+    The s256-l512-jpgbytes streaming source stores each JPEG zero-padded to a fixed record size and the
+    cache keeps the bytes as-is, so EOI checks strip trailing zeros first.
+    """
     storage = cache.fields['image']
     meta = storage._metadata[idx]
     ptr = int(meta['data_ptr'])
@@ -207,7 +211,7 @@ class TestLitDataToSlipCacheQuick:
                     if cached_bytes[:2] != b'\xff\xd8':
                         errors.append((idx, "missing JPEG SOI marker"))
                         continue
-                    if cached_bytes[-2:] != b'\xff\xd9':
+                    if cached_bytes.rstrip(b'\x00')[-2:] != b'\xff\xd9':
                         errors.append((idx, "missing JPEG EOI marker"))
                         continue
 
@@ -308,7 +312,7 @@ class TestLitDataToSlipCacheFull:
                     # Verify JPEG structure (fast check, no decode)
                     if cached_bytes[:2] != b'\xff\xd8':
                         errors.append((idx, "missing JPEG SOI"))
-                    elif cached_bytes[-2:] != b'\xff\xd9':
+                    elif cached_bytes.rstrip(b'\x00')[-2:] != b'\xff\xd9':
                         errors.append((idx, "missing JPEG EOI"))
                 else:
                     # YUV420: verify dimensions and size
@@ -367,7 +371,7 @@ class TestLitDataToSlipCacheFull:
                     if cached_bytes[:2] != b'\xff\xd8':
                         errors.append((idx, "missing JPEG SOI"))
                         continue
-                    if cached_bytes[-2:] != b'\xff\xd9':
+                    if cached_bytes.rstrip(b'\x00')[-2:] != b'\xff\xd9':
                         errors.append((idx, "missing JPEG EOI"))
                         continue
 

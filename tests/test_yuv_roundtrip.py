@@ -1,9 +1,15 @@
 """Verify YUV→RGB round-trip: DecodeYUVFullRes → manual BT.601 → matches decode_batch RGB."""
+import os
+from pathlib import Path
+
 import numpy as np
+import pytest
+
 from slipstream.cache import OptimizedCache, load_yuv420_cache
 from slipstream.decoders.yuv420_decoder import YUV420NumbaBatchDecoder
 
-CACHE_DIR = "/Users/gaa019/.lightning/chunks/6088ed39051d2929849d270c9e7a505a/1743941646.7863863"
+CANDIDATES = [Path.home() / ".slipstream" / "imagenet10-s256_l512-yuv420-val",
+              Path(os.environ.get("SLIPSTREAM_CACHE_DIR", "/nonexistent")) / "imagenet1k-s256_l512-yuv420-val"]
 
 
 def yuv_to_rgb_bt601(yuv: np.ndarray) -> np.ndarray:
@@ -17,8 +23,15 @@ def yuv_to_rgb_bt601(yuv: np.ndarray) -> np.ndarray:
 
 
 def test_roundtrip():
-    cache = OptimizedCache.load(CACHE_DIR)
-    storage = load_yuv420_cache(cache.cache_dir, "image")
+    cache_dir = next((p for p in CANDIDATES if p.exists()), None)
+    if cache_dir is None:
+        pytest.skip("no yuv420 val cache present")
+    cache = OptimizedCache.load(cache_dir)
+    # a yuv420 store keeps the field as "image"; a jpeg store may carry an image_yuv420 sibling
+    if cache.get_image_format("image") == "yuv420":
+        storage = cache.fields["image"]
+    else:
+        storage = load_yuv420_cache(cache.cache_dir, "image")
     indices = np.arange(8, dtype=np.int64)
     batch_data = storage.load_batch(indices)
 

@@ -642,7 +642,8 @@ class TestParallelBuild:
             dataset, output_dir=tmp_path / "out", verbose=False, num_workers=2
         )
 
-        cache_dir = tmp_path / "out" / ".slipstream"
+        cache_dir = tmp_path / "out"
+        assert (cache_dir / "manifest.json").exists()
         shard_dirs = list(cache_dir.glob("_shard_*"))
         assert len(shard_dirs) == 0, f"Shard dirs not cleaned up: {shard_dirs}"
 
