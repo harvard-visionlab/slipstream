@@ -4,6 +4,24 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.14.0] - 2026-11-03
+
+### Added
+
+- `DecodeMultiRandomResizedCrop(crop_mode="ffcv")`: reproduces lrm-ssl / FFCV `get_random_crop`
+  (lrm_ssl_torch `custom_decoders/resized_crop.py`) exactly.
+  - Draw order: area, then ratio (10 attempts), then a uniform top-left (row, then column) after the size.
+    `"standard"` draws a centre first and clamps it, so its crops pile up at the edges.
+  - When no attempt fits, the fallback keeps the ratio, clamped to the image and centred, instead of a central
+    `min(w, h)` square. With `ratios` at r=2 and scale [0.4, 1], about 15% of `"standard"` hard negatives fall
+    back to a square.
+  - `ratios` crops pick the ratio from `STREAM_RATIO`, then run the same sequence with ratio `[r, r]`
+    (lrm `RandomResizedCropSampleRatios`).
+  - Same-seed crops make the same area draw and proportional position.
+  - Opt-in: `"standard"` (the default) and `"direct"` are unchanged.
+  - Same cost: about 250 µs per 256-image batch in all three modes, negligible next to decode.
+  - `tests/test_multicrop_ffcv_mode.py` checks the output against a verbatim copy of `get_random_crop`.
+
 ## [0.13.0] - 2026-10-30
 
 ### Added

@@ -761,6 +761,70 @@ def _generate_direct_random_crop_params_batch(
     return params
 
 
+@njit(cache=True, fastmath=True)
+def _generate_ffcv_random_crop_params_batch(
+    widths: NDArray[np.int32],
+    heights: NDArray[np.int32],
+    scale_min: float,
+    scale_max: float,
+    ratio_min: float,
+    ratio_max: float,
+    seeds: NDArray[np.int64],   # per-sample, from _seeds.sample_seeds
+) -> NDArray[np.int32]:
+    """FFCV / lrm-ssl ``get_random_crop`` geometry (crop_mode="ffcv").
+
+    Per sample: up to 10 attempts drawing area, then log-ratio; on the first fit the top-left
+    is drawn uniformly (row, then column). If nothing fits, a centred crop that keeps the ratio
+    (clamped to the image) instead of a square. Takes ratios (not logs) like the reference.
+
+    Returns:
+        Array of shape [B, 4] with (x, y, crop_w, crop_h) for each image
+    """
+    batch_size = len(widths)
+    params = np.zeros((batch_size, 4), dtype=np.int32)
+    log_ratio_min = np.log(ratio_min)
+    log_ratio_max = np.log(ratio_max)
+
+    for b in range(batch_size):
+        np.random.seed(seeds[b])
+        width = widths[b]
+        height = heights[b]
+        area = height * width
+
+        found = False
+        for _ in range(10):
+            target_area = area * np.random.uniform(scale_min, scale_max)
+            aspect_ratio = np.exp(np.random.uniform(log_ratio_min, log_ratio_max))
+            w = int(round(np.sqrt(target_area * aspect_ratio)))
+            h = int(round(np.sqrt(target_area / aspect_ratio)))
+            if 0 < w <= width and 0 < h <= height:
+                i = int(np.random.uniform(0, height - h + 1))
+                j = int(np.random.uniform(0, width - w + 1))
+                found = True
+                break
+
+        if not found:
+            in_ratio = float(width) / float(height)
+            if in_ratio < ratio_min:
+                w = width
+                h = int(round(w / ratio_min))
+            elif in_ratio > ratio_max:
+                h = height
+                w = int(round(h * ratio_max))
+            else:
+                w = width // 2
+                h = height // 2
+            i = (height - h) // 2
+            j = (width - w) // 2
+
+        params[b, 0] = j
+        params[b, 1] = i
+        params[b, 2] = w
+        params[b, 3] = h
+
+    return params
+
+
 @njit(cache=True, parallel=True)
 def _generate_center_crop_params_batch(
     widths: NDArray[np.int32],

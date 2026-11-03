@@ -222,7 +222,9 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
             ratios: each image draws one from the set, and the crop uses it as a fixed ratio.
         ratio: Default aspect ratio range (used if not specified per crop).
         crop_mode: ``"standard"`` (torchvision-compatible, 10-attempt rejection
-            sampling) or ``"direct"`` (analytic, no rejection loop).
+            sampling), ``"direct"`` (analytic, no rejection loop) or ``"ffcv"``
+            (lrm-ssl / FFCV ``get_random_crop``: area, ratio, then a uniform top-left;
+            the fallback keeps the ratio instead of a central square).
         num_threads: Parallel decode threads. 0 = auto.
         to_tensor: If True, return torch.Tensor; if False, return numpy array.
         permute: If True, permute HWC→CHW. If False, keep HWC layout.
@@ -277,8 +279,8 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
         to_tensor: bool = False,
         permute: bool = False,
     ) -> None:
-        if crop_mode not in ("standard", "direct"):
-            raise ValueError(f"crop_mode must be 'standard' or 'direct', got '{crop_mode}'")
+        if crop_mode not in ("standard", "direct", "ffcv"):
+            raise ValueError(f"crop_mode must be 'standard', 'direct' or 'ffcv', got '{crop_mode}'")
         self.ratio = ratio
         self.crop_mode = crop_mode
         self.num_threads = num_threads
@@ -311,13 +313,15 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
         from slipstream.decoders.numba_decoder import (
             _generate_random_crop_params_batch,
             _generate_direct_random_crop_params_batch,
+            _generate_ffcv_random_crop_params_batch,
         )
 
-        _generate_fn = (
-            _generate_direct_random_crop_params_batch
-            if self.crop_mode == "direct"
-            else _generate_random_crop_params_batch
-        )
+        _generate_fn = {
+            "standard": _generate_random_crop_params_batch,
+            "direct": _generate_direct_random_crop_params_batch,
+            "ffcv": _generate_ffcv_random_crop_params_batch,   # takes ratios, not logs
+        }[self.crop_mode]
+        _r = (lambda x: x) if self.crop_mode == "ffcv" else math.log
 
         data = batch_data['data']
         sizes = batch_data['sizes']
@@ -339,8 +343,8 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
             ratio = self._crop_ratios[c]
             seed = self._crop_seeds[c]
 
-            log_ratio_min = math.log(ratio[0])
-            log_ratio_max = math.log(ratio[1])
+            log_ratio_min = _r(ratio[0])
+            log_ratio_max = _r(ratio[1])
 
             # Same seed -> same draws (yoked crops); unseeded crops get their own stream.
             stream = () if seed is not None else (c,)
@@ -363,7 +367,7 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
                 for k, r in enumerate(ratio_set):
                     sel = np.flatnonzero(pick == k)
                     if len(sel):
-                        lr = math.log(r)
+                        lr = _r(r)
                         params[sel] = _generate_fn(
                             np.ascontiguousarray(widths_i32[sel]), np.ascontiguousarray(heights_i32[sel]),
                             scale[0], scale[1], lr, lr, np.ascontiguousarray(batch_seeds[sel]),

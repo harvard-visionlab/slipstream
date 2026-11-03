@@ -32,7 +32,7 @@ def _batch(crops, fmt="jpeg", post=None, **kw):
 
 
 @pytest.mark.parametrize("fmt", ["jpeg", "yuv420"])
-@pytest.mark.parametrize("mode", ["standard", "direct"])
+@pytest.mark.parametrize("mode", ["standard", "direct", "ffcv"])
 def test_single_ratio_set_equals_fixed_range(fmt, mode):
     # the grouped path with one ratio must reproduce the plain path with ratio=(r, r) exactly
     b = _batch({"fixed": dict(size=64, seed=7, ratio=(2.0, 2.0)),
@@ -40,7 +40,7 @@ def test_single_ratio_set_equals_fixed_range(fmt, mode):
     assert np.array_equal(b["fixed"], b["set"])
 
 
-@pytest.mark.parametrize("mode", ["standard", "direct"])
+@pytest.mark.parametrize("mode", ["standard", "direct", "ffcv"])
 def test_each_image_uses_one_ratio_from_the_set_with_the_positive_draws(mode):
     crops = {"hn": dict(size=64, seed=42, ratios=SET)}
     crops |= {f"r{i}": dict(size=64, seed=42, ratio=(r, r)) for i, r in enumerate(SET)}
