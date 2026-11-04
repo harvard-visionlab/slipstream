@@ -11,6 +11,7 @@ from slipstream.transforms import functional as F
 @pytest.mark.parametrize("t", [SRGBToLMS(), RGBToLab()], ids=lambda t: type(t).__name__)
 def test_no_host_sync_on_cuda(t):
     x = torch.rand(4, 3, 32, 32, device="cuda")
+    t(x)                                           # first call puts the constants on the device (once)
     torch.cuda.synchronize()
     torch.cuda.set_sync_debug_mode("error")
     try:
