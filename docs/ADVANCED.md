@@ -75,6 +75,60 @@ supervised_train(
 )
 ```
 
+## Augmentation Parameters in the Batch (`CollectParams`)
+
+Some objectives need to know what was done to each view: equivariant SSL needs the jitter factors,
+flips and rotations, and VICRegL needs the crop boxes. Add `CollectParams` as an
+`after_batch_transform`, giving it the same `pipelines` dict:
+
+```python
+from slipstream.decoders import DecodeMultiRandomResizedCrop, MultiCropPipeline
+from slipstream.transforms import (CollectParams, ToTorchImage, RandomHorizontalFlip,
+                                   RandomColorJitterHSV, RandomGaussianBlur)
+
+def view(s):
+    return [ToTorchImage("cuda"), RandomHorizontalFlip(seed=s), RandomColorJitterHSV(p=0.8, seed=s + 1),
+            RandomGaussianBlur(p=0.5, seed=s + 2)]
+
+pipelines = {"image": [
+    DecodeMultiRandomResizedCrop({"g0": dict(size=224, seed=1), "g1": dict(size=224, seed=2)}),
+    MultiCropPipeline({"g0": view(10), "g1": view(20)}),
+]}
+loader = SlipstreamLoader(dataset, batch_size=256, pipelines=pipelines,
+                          after_batch_transforms=[CollectParams(pipelines)])
+for batch in loader:
+    p = batch["_params"]["image"]["g0"]
+    p["DecodeMultiRandomResizedCrop"]["box"]     # [B, 4] int32 (x, y, w, h), source-image pixels
+    p["RandomHorizontalFlip"]["applied"]         # [B] bool
+    p["RandomColorJitterHSV"]["h"]               # [B]; 0 where not applied (s, v, c: 1)
+    p["RandomGaussianBlur"]["sigma"]             # [B]; 0 where not applied
+```
+
+- **Layout:** `batch[key][field][view][TransformName]`.
+- **Views** are the names given by `MultiCropPipeline`, `NamedCopies` or a multi-crop decoder. Each view lists
+  every random step that produced it, including shared steps such as a single decoder before `NamedCopies`.
+- **Values:** every value is per sample. `applied` replaces `do` / `idx`, and samples that weren't augmented get
+  the identity value. Other keys (`deg`, `xs`, `mat`, …) come back as the transform stores them.
+- **What's left out:** deterministic steps (`ToTorchImage`, `Normalize`, `RGBToLab`, …). With a window, params
+  are `[B, T]`. A skipped `RandomApply` gives only `applied` (all False).
+- **Devices:** decoder boxes are CPU tensors. Pass `device="cuda"` to move everything.
+- **yuv420 caches** store even dimensions, so `heights` / `widths` can be 1 px larger than the original (the padding
+  is at the right / bottom edge).
+- **Without the loader:** decoders expose the same boxes through `last_params()`. This covers
+  `DecodeRandomResizedCrop`, `DecodeMultiRandomResizedCrop` and the resize-short-crop-long decoders.
+- **Cost:** opt-in, a few tiny tensor ops per random step. Loaders without it are unchanged.
+
+### Lab colour space (CMC)
+
+`RGBToLab` converts a float sRGB batch in [0, 1] to CIE L\*a\*b\* (D65) on its device. The constants
+match `skimage.color.rgb2lab`. Normalise with the CMC constants and split in the model:
+
+```python
+from slipstream.transforms import RGBToLab, Normalize, LAB_CMC_MEAN, LAB_CMC_STD
+view = [ToTorchImage("cuda"), ..., RGBToLab(), Normalize(LAB_CMC_MEAN, LAB_CMC_STD)]
+# model side: L, ab = x[:, :1], x[:, 1:]
+```
+
 ## YUV420 Format (2x Faster)
 
 YUV420 stores images in a format optimized for JPEG decode. ~2x faster than RGB JPEG with 1.7x storage.

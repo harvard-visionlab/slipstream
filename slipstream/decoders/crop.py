@@ -116,6 +116,12 @@ class DecodeRandomResizedCrop(BatchTransform):
     Note:
         Default output (numpy HWC) is optimal for GPU pipelines when followed
         by ToTorchImage, which transfers contiguous HWC to GPU then permutes.
+
+    Crop geometry:
+        ``last_params()`` returns the boxes of the most recent call:
+        ``{"crop_params": int32 [B, 4] (x, y, w, h) in source-image pixels,
+        "heights": int32 [B], "widths": int32 [B]}``. See
+        :class:`~slipstream.transforms.CollectParams` to put them in the batch.
     """
 
     def __init__(
@@ -135,6 +141,7 @@ class DecodeRandomResizedCrop(BatchTransform):
         self.to_tensor = to_tensor
         self.permute = permute
         self._decoder = NumbaBatchDecoder(num_threads=num_threads)
+        self._last_params: dict = {}
 
     def set_image_format(self, image_format: str) -> None:
         self._decoder = _swap_yuv420_if_needed(self._decoder, image_format)
@@ -155,11 +162,20 @@ class DecodeRandomResizedCrop(BatchTransform):
             target_size=self.size, scale=self.scale, ratio=self.ratio,
             seed=self.seed,
         )
+        self._last_params = {
+            "crop_params": self._decoder._last_crop_params,
+            "heights": np.asarray(batch_data['heights'], dtype=np.int32),
+            "widths": np.asarray(batch_data['widths'], dtype=np.int32),
+        }
         if self.permute:
             result = self._decoder.hwc_to_chw(result)
         if self.to_tensor:
             return torch.from_numpy(result)
         return result
+
+    def last_params(self) -> dict:
+        """Crop boxes of the most recent call (see the class docstring)."""
+        return self._last_params
 
     def shutdown(self) -> None:
         self._decoder.shutdown()

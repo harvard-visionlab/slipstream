@@ -1,4 +1,4 @@
-"""Biological color space transforms (sRGB → LMS → Parvo/Magno/Konio)."""
+"""Color space transforms: CIE L*a*b*, and biological ones (sRGB → LMS → Parvo/Magno/Konio)."""
 
 import torch
 from typing import Callable
@@ -153,3 +153,26 @@ class RGBToMagno(BatchAugment):
 
     def __repr__(self):
         return f"{self.__class__.__name__}(\n   (magno): {self.magno}\n)"
+
+
+# CMC (Tian et al. 2019) normalisation of L*a*b*: maps each channel's range to about [-1, 1].
+LAB_CMC_MEAN = (50.0, 6.025, -6.6895)
+LAB_CMC_STD = (50.0, 92.208, 101.1675)
+
+
+class RGBToLab(BatchAugment):
+    """Convert an sRGB float batch in [0, 1] to CIE L*a*b* (D65), on the batch's device.
+
+    Output channels: L in [0, 100], a and b roughly in [-128, 127] (``skimage.color.rgb2lab``
+    convention). Deterministic, so ``apply_last`` is the same conversion.
+
+    Put it after ``ToTorchImage`` / ``ToFloatDiv`` and any colour augmentations. For CMC-style inputs
+    follow it with ``Normalize(LAB_CMC_MEAN, LAB_CMC_STD)`` and split channels in the model
+    (``x[:, :1]`` = L, ``x[:, 1:]`` = ab).
+    """
+
+    def apply_last(self, b):
+        return F.srgb_to_lab(b)
+
+    def __call__(self, b, **kwargs):
+        return F.srgb_to_lab(b)

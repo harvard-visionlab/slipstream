@@ -39,6 +39,9 @@ from .effects import (
 # Erasing
 from .erasing import RandomErasing
 
+# Per-sample params into the batch (after_batch_transform)
+from .params import CollectParams
+
 # Mixup / CutMix
 from .mixup import CutMixClutter, Mixup, mixup_target, one_hot
 
@@ -46,7 +49,10 @@ from .mixup import CutMixClutter, Mixup, mixup_target, one_hot
 from .sidebyside import SideBySideSearchPair
 
 # Color space
-from .color_space import SRGBToLMS, LMSToParvo, LMSToMagno, LMSToKonio, RGBToLGN, RGBToMagno
+from .color_space import (
+    SRGBToLMS, LMSToParvo, LMSToMagno, LMSToKonio, RGBToLGN, RGBToMagno,
+    RGBToLab, LAB_CMC_MEAN, LAB_CMC_STD,
+)
 
 __all__ = [
     # Base
@@ -109,4 +115,8 @@ __all__ = [
     "LMSToKonio",
     "RGBToLGN",
     "RGBToMagno",
+    "RGBToLab",
+    "CollectParams",
+    "LAB_CMC_MEAN",
+    "LAB_CMC_STD",
 ]

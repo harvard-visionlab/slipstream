@@ -593,6 +593,7 @@ class YUV420NumbaBatchDecoder:
             log_ratio_min, log_ratio_max,
             batch_seeds,
         ), self.seed_repeat)
+        self._last_crop_params = crop_params   # [B, 4] (x, y, w, h), read by DecodeRandomResizedCrop.last_params
 
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
         dest_buffer = self._ensure_dest_buffer(batch_size, target_size, target_size)

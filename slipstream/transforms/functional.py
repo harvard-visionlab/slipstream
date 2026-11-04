@@ -893,6 +893,33 @@ def srgb_to_lms(image: torch.Tensor) -> torch.Tensor:
     return torch.einsum('...chw, oc -> ...ohw', linrgb, mat)
 
 
+# CIE L*a*b* (D65, 2 deg observer): same constants as skimage.color.rgb2lab, which CMC used.
+# The sRGB->XYZ rows are pre-divided by the D65 white point, so f() takes X/Xn, Y/Yn, Z/Zn directly.
+_D65_WHITE = torch.tensor([0.95047, 1.0, 1.08883], dtype=torch.float32)
+_SRGB_TO_XYZ_WHITE = _SRGB_TO_LMS_MAT / _D65_WHITE[:, None]
+_LAB_EPS = (6 / 29) ** 3
+_LAB_SLOPE = 1 / (3 * (6 / 29) ** 2)
+_LAB_OFFSET = 4 / 29
+
+
+def srgb_to_lab(image: torch.Tensor) -> torch.Tensor:
+    """Convert sRGB in [0, 1] to CIE L*a*b* (D65): L in [0, 100], a and b roughly in [-128, 127].
+
+    Shape ``(*, 3, H, W)``, floating point; the output has the input's dtype and device.
+    No host sync (no range check), one fused 3x3 matrix for linear RGB -> XYZ / white.
+    """
+    if image.ndim < 3 or image.shape[-3] != 3:
+        raise ValueError(f"Input must have shape (*, 3, H, W). Got {tuple(image.shape)}")
+    if not image.is_floating_point():
+        raise TypeError(f"srgb_to_lab expects a float image in [0, 1], got {image.dtype}")
+    lin = torch.where(image > 0.04045, ((image + 0.055) / 1.055).pow(2.4), image / 12.92)
+    mat = _SRGB_TO_XYZ_WHITE.to(device=lin.device, dtype=lin.dtype)
+    xyz = torch.einsum('...chw, oc -> ...ohw', lin, mat)
+    f = torch.where(xyz > _LAB_EPS, xyz.clamp_min(_LAB_EPS).pow(1 / 3), xyz * _LAB_SLOPE + _LAB_OFFSET)
+    fx, fy, fz = f.unbind(-3)
+    return torch.stack([116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)], -3)
+
+
 # =================================================
 #  Gaussian kernels for DoG filtering
 # =================================================

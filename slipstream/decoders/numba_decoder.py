@@ -1466,6 +1466,7 @@ class NumbaBatchDecoder:
             log_ratio_min, log_ratio_max,
             batch_seeds,
         ), self.seed_repeat)
+        self._last_crop_params = crop_params   # [B, 4] (x, y, w, h), read by DecodeRandomResizedCrop.last_params
 
         # Allocate buffers
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)

@@ -4,6 +4,29 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.15.0] - 2026-11-04
+
+### Added
+
+- `CollectParams(pipelines, key="_params", fields=None, device=None)` (`slipstream.transforms`): an
+  `after_batch_transform` that puts every pipeline step's random parameters in the batch.
+  - Layout: `batch["_params"][field][view][TransformName]`. Every value is per sample.
+  - `applied` replaces `do` / `idx`, and samples that weren't augmented get the identity value.
+  - Blur reports `sigma`, crop decoders report `box`, and windowed loaders get `[B, T]`.
+  - Steps inside a skipped `RandomApply` report `applied=False` only.
+  - Opt-in: the loader is unchanged.
+  - Use: equivariant SSL (jitter / flip / rotation factors) and VICRegL (crop boxes).
+- `DecodeRandomResizedCrop.last_params()` and `DecodeMultiRandomResizedCrop.last_params()` return the crop boxes
+  as `{"crop_params": int32 [B, 4] (x, y, w, h) in source pixels, or {view: ...}, "heights", "widths"}`.
+  - These boxes were already computed; the decoders now keep a reference instead of discarding them.
+  - For yuv420 caches, the boxes and sizes are in the stored, even-padded frame (at most 1 px).
+- `RGBToLab` and `functional.srgb_to_lab`: sRGB in [0, 1] to CIE L\*a\*b\* (D65, `skimage.color.rgb2lab`
+  constants), batched on the input's device with no host sync.
+  - `LAB_CMC_MEAN` / `LAB_CMC_STD` hold the CMC normalisation.
+- `tests/test_ssl_params.py`, on the real imagenet val caches (jpeg + yuv420): each reported box, cut from the
+  full image and resized, reproduces the decoded crop. Also checks Lab against a float64 reference and
+  CollectParams against the transforms' own state.
+
 ## [0.14.1] - 2026-11-03
 
 ### Changed

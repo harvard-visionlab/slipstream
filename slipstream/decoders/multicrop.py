@@ -287,6 +287,7 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
         self.to_tensor = to_tensor
         self.permute = permute
         self._decoder = NumbaBatchDecoder(num_threads=num_threads)
+        self._last_params: dict = {}
 
         self._crop_names: list[str] = []
         self._crop_sizes: list[int] = []
@@ -374,6 +375,12 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
                         )
             crop_params_list.append(repeat_params(params, self._decoder.seed_repeat))
 
+        self._last_params = {
+            "crop_params": dict(zip(self._crop_names, crop_params_list)),
+            "heights": np.asarray(heights, dtype=np.int32),
+            "widths": np.asarray(widths, dtype=np.int32),
+        }
+
         all_same_size = len(set(self._crop_sizes)) == 1
 
         crops_hwc = self._decoder.decode_batch_multi_crop_varied(
@@ -397,6 +404,11 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
             else:
                 result[name] = crops_out[c]
         return result
+
+    def last_params(self) -> dict:
+        """Crop boxes of the most recent call: ``{"crop_params": {name: int32 [B, 4] (x, y, w, h)
+        in source-image pixels}, "heights": int32 [B], "widths": int32 [B]}``."""
+        return self._last_params
 
     def shutdown(self) -> None:
         self._decoder.shutdown()
