@@ -21,11 +21,12 @@ from slipstream.transforms import functional as F
 
 
 def _cache(fmt):
+    """The same dataset for both formats (the yuv420 test compares against the jpeg records)."""
     roots = [Path(os.environ.get("SLIPSTREAM_CACHE_DIR", "/nonexistent")), Path.home() / ".slipstream"]
     for root in roots:
-        for name in (f"imagenet10-s256_l512-{fmt}-val", f"imagenet1k-s256_l512-{fmt}-val"):
-            if (root / name).exists():
-                return root / name
+        for ds in ("imagenet10", "imagenet1k"):
+            if all((root / f"{ds}-s256_l512-{f}-val").exists() for f in ("jpeg", "yuv420")):
+                return root / f"{ds}-s256_l512-{fmt}-val"
     return None
 
 
