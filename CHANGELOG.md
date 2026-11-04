@@ -4,6 +4,16 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.15.1] - 2026-11-04
+
+### Fixed
+
+- `functional.srgb_to_lrgb` (used by `SRGBToLMS`, `RGBToLGN`, `RGBToMagno`) no longer forces a GPU-to-host sync on
+  every batch.
+  - Its out-of-range warning (`image.max() > 1`) now checks CPU tensors only.
+  - Values are unchanged.
+  - `tests/test_color_space_sync.py` runs the colour-space transforms under `torch.cuda.set_sync_debug_mode("error")`.
+
 ## [0.15.0] - 2026-11-04
 
 ### Added

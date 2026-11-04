@@ -832,8 +832,12 @@ def generate_batch_permutations(batch_size, N, rng=None):
 # =================================================
 
 def srgb_to_lrgb(image: torch.Tensor, inplace=True) -> torch.Tensor:
-    """Convert sRGB [0,1] to linear RGB (inverse gamma)."""
-    if image.max() > 1:
+    """Convert sRGB [0,1] to linear RGB (inverse gamma).
+
+    The out-of-range warning only checks CPU tensors: on an accelerator ``image.max() > 1`` is a
+    device-to-host sync that stalls the pipeline on every batch.
+    """
+    if image.device.type == "cpu" and image.max() > 1:
         warnings.warn("srgb_to_lrgb: srgb appears to be outside the (0,1) range")
     if len(image.shape) < 3 or image.shape[-3] != 3:
         raise ValueError(f"Input must have shape (*, 3, H, W). Got {image.shape}")
