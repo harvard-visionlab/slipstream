@@ -885,6 +885,18 @@ _CAT02_MAT = torch.tensor([
 _SRGB_TO_LMS_FUSED = (_CAT02_MAT @ _SRGB_TO_LMS_MAT)
 
 
+_CONST_CACHE: dict = {}
+
+
+def _const_on(t: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """`t` on ref's device / dtype, cached: a fresh host-to-device copy each batch syncs the GPU."""
+    key = (id(t), ref.device, ref.dtype)
+    out = _CONST_CACHE.get(key)
+    if out is None:
+        out = _CONST_CACHE[key] = t.to(device=ref.device, dtype=ref.dtype)
+    return out
+
+
 def srgb_to_lms(image: torch.Tensor) -> torch.Tensor:
     """Convert sRGB to CAT02 LMS via linear RGB.
 
@@ -893,7 +905,7 @@ def srgb_to_lms(image: torch.Tensor) -> torch.Tensor:
     """
     linrgb = srgb_to_lrgb(image)
     # einsum: ...cHW, oc -> ...oHW (3x3 color matrix applied per-pixel)
-    mat = _SRGB_TO_LMS_FUSED.to(device=linrgb.device, dtype=linrgb.dtype)
+    mat = _const_on(_SRGB_TO_LMS_FUSED, linrgb)
     return torch.einsum('...chw, oc -> ...ohw', linrgb, mat)
 
 
@@ -917,7 +929,7 @@ def srgb_to_lab(image: torch.Tensor) -> torch.Tensor:
     if not image.is_floating_point():
         raise TypeError(f"srgb_to_lab expects a float image in [0, 1], got {image.dtype}")
     lin = torch.where(image > 0.04045, ((image + 0.055) / 1.055).pow(2.4), image / 12.92)
-    mat = _SRGB_TO_XYZ_WHITE.to(device=lin.device, dtype=lin.dtype)
+    mat = _const_on(_SRGB_TO_XYZ_WHITE, lin)
     xyz = torch.einsum('...chw, oc -> ...ohw', lin, mat)
     f = torch.where(xyz > _LAB_EPS, xyz.clamp_min(_LAB_EPS).pow(1 / 3), xyz * _LAB_SLOPE + _LAB_OFFSET)
     fx, fy, fz = f.unbind(-3)

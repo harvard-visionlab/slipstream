@@ -11,6 +11,8 @@ All notable changes to slipstream are documented here. Versions follow
 - `functional.srgb_to_lrgb` (used by `SRGBToLMS`, `RGBToLGN`, `RGBToMagno`) no longer forces a GPU-to-host sync on
   every batch.
   - Its out-of-range warning (`image.max() > 1`) now checks CPU tensors only.
+  - `srgb_to_lms` and `srgb_to_lab` (`RGBToLab`, new in 0.15.0) also copied their constant 3x3 matrix to the
+    device on every call, which syncs too. The device copy is now cached per (device, dtype).
   - Values are unchanged.
   - `tests/test_color_space_sync.py` runs the colour-space transforms under `torch.cuda.set_sync_debug_mode("error")`.
 
