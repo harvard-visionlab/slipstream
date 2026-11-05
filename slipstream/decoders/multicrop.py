@@ -349,7 +349,9 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
 
             # Same seed -> same draws (yoked crops); unseeded crops get their own stream.
             stream = () if seed is not None else (c,)
-            batch_seeds = sample_seeds(seed, batch_offset, batch_size, *stream, key=self._decoder._seed_key)
+            # groups (seed_repeat) share the draw, not the pixel box: correct for images of different sizes
+            group = self._decoder.seed_repeat
+            batch_seeds = repeat_params(sample_seeds(seed, batch_offset, batch_size, *stream, key=self._decoder._seed_key), group)
 
             ratio_set = self._crop_ratio_sets[c]
             if ratio_set is None:
@@ -362,8 +364,8 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
             else:
                 # One ratio per image from the set, then the same draw sequence with the range
                 # collapsed to [log r, log r] (still one uniform draw, so yoking is preserved).
-                pick = sample_seeds(seed, batch_offset, batch_size, *stream, STREAM_RATIO,
-                                    key=self._decoder._seed_key) % len(ratio_set)
+                pick = repeat_params(sample_seeds(seed, batch_offset, batch_size, *stream, STREAM_RATIO,
+                                                  key=self._decoder._seed_key), group) % len(ratio_set)
                 params = np.empty((batch_size, 4), dtype=np.int32)
                 for k, r in enumerate(ratio_set):
                     sel = np.flatnonzero(pick == k)
@@ -373,7 +375,7 @@ class DecodeMultiRandomResizedCrop(BatchTransform):
                             np.ascontiguousarray(widths_i32[sel]), np.ascontiguousarray(heights_i32[sel]),
                             scale[0], scale[1], lr, lr, np.ascontiguousarray(batch_seeds[sel]),
                         )
-            crop_params_list.append(repeat_params(params, self._decoder.seed_repeat))
+            crop_params_list.append(params)
 
         self._last_params = {
             "crop_params": dict(zip(self._crop_names, crop_params_list)),
@@ -571,7 +573,9 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
 
             # Per-image seeds (same keys as DecodeMultiRandomResizedCrop)
             crop_key = () if seed is not None else (c,)
-            pos_seeds = sample_seeds(seed, batch_offset, batch_size, *crop_key, key=self._decoder._seed_key)
+            # groups (seed_repeat) share the draws (fractional positions, sizes), so boxes fit each image
+            T = getattr(self._decoder, 'seed_repeat', 1)
+            pos_seeds = repeat_params(sample_seeds(seed, batch_offset, batch_size, *crop_key, key=self._decoder._seed_key), T)
 
             # Determine target size for this crop
             crop_size_mode = self._crop_size_modes[c]
@@ -614,7 +618,8 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                 else:
                     # Per-image random sizes
                     target_sizes_arr = np.empty(batch_size, dtype=np.int32)
-                    size_seeds = sample_seeds(seed, batch_offset, batch_size, STREAM_SIZE, *crop_key, key=self._decoder._seed_key)
+                    size_seeds = repeat_params(sample_seeds(seed, batch_offset, batch_size, STREAM_SIZE, *crop_key,
+                                                            key=self._decoder._seed_key), T)
                     for i in range(batch_size):
                         rng_i = np.random.RandomState(size_seeds[i])
                         target_sizes_arr[i] = int(
@@ -627,12 +632,6 @@ class DecodeMultiRandomResizeShortCropLong(BatchTransform):
                 x_pos_list.append(x_pos)
                 y_pos_list.append(y_pos)
 
-            T = getattr(self._decoder, 'seed_repeat', 1)
-            if T > 1:                                   # windows: share size / position across frames
-                params = repeat_params(params, T)
-                target_sizes_arr = repeat_params(target_sizes_arr, T)
-                x_pos_list[-1] = repeat_params(x_pos_list[-1], T)
-                y_pos_list[-1] = repeat_params(y_pos_list[-1], T)
             crop_params_list.append(params)
             target_sizes_list.append(target_sizes_arr)
 

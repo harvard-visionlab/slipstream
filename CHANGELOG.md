@@ -4,6 +4,28 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.16.0] - 2026-11-04
+
+### Added
+
+- `SlipstreamLoader(group=G)`: every `G` consecutive samples of a batch share one draw of every random step.
+  This is paired augmentation for ce_ssl: different images, same augmentation, with pair k at rows 2k and 2k+1.
+  - Sampling is unchanged.
+  - `batch_size` must be a multiple of `group`.
+  - Default 1: off, with output identical to 0.15.1.
+  - Raises with `DecodeVideoWindow`.
+  - See docs/ADVANCED.md "Paired Augmentation".
+
+### Changed
+
+- Crop decoders share the per-sample *draw* across a window or group (`seed_repeat`), not the pixel box. This covers
+  RRC, direct RRC, multi-crop, resize-short-crop-long and the GPU decoder.
+  - Each crop now fits its own image.
+  - Equal-size frames (video) get the same box as before.
+  - Without `window` / `group`, output is bit-identical.
+  - Before, `window=` over records of different sizes repeated the first record's box, which fell outside the image
+    on 14-19% of rows (imagenet1k val, T=2-3).
+
 ## [0.15.1] - 2026-11-04
 
 ### Fixed

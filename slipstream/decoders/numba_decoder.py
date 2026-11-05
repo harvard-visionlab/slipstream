@@ -1460,12 +1460,12 @@ class NumbaBatchDecoder:
         self._seed_counter += 1
         batch_seeds = sample_seeds(seed, self._seed_counter, batch_size, key=self._seed_key)
 
-        crop_params = repeat_params(_generate_random_crop_params_batch(
+        crop_params = _generate_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
-            batch_seeds,
-        ), self.seed_repeat)
+            repeat_params(batch_seeds, self.seed_repeat),   # groups share the draw, not the box
+        )
         self._last_crop_params = crop_params   # [B, 4] (x, y, w, h), read by DecodeRandomResizedCrop.last_params
 
         # Allocate buffers
@@ -1532,12 +1532,12 @@ class NumbaBatchDecoder:
         self._seed_counter += 1
         batch_seeds = sample_seeds(seed, self._seed_counter, batch_size, key=self._seed_key)
 
-        crop_params = repeat_params(_generate_direct_random_crop_params_batch(
+        crop_params = _generate_direct_random_crop_params_batch(
             widths_i32, heights_i32,
             scale[0], scale[1],
             log_ratio_min, log_ratio_max,
-            batch_seeds,
-        ), self.seed_repeat)
+            repeat_params(batch_seeds, self.seed_repeat),   # groups share the draw, not the box
+        )
 
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)
         dest_buffer = self._ensure_dest_buffer(batch_size, target_size, target_size)
@@ -1603,12 +1603,12 @@ class NumbaBatchDecoder:
             self._seed_counter += 1
             batch_seeds = sample_seeds(seeds[c] if seeds is not None else None, self._seed_counter, batch_size, key=self._seed_key)
 
-            all_crop_params[c] = repeat_params(_generate_random_crop_params_batch(
+            all_crop_params[c] = _generate_random_crop_params_batch(
                 widths_i32, heights_i32,
                 scale[0], scale[1],
                 log_ratio_min, log_ratio_max,
-                batch_seeds,
-            ), self.seed_repeat)
+                repeat_params(batch_seeds, self.seed_repeat),   # groups share the draw, not the box
+            )
 
         # Allocate buffers
         temp_buffer = self._ensure_temp_buffer(batch_size, max_h, max_w)

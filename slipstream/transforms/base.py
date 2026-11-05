@@ -14,7 +14,7 @@ class BatchAugment:
     This enables SSL replay: call t(x) on view 1, then t.apply_last(y)
     on view 2 to apply the same augmentation.
 
-    Window support: ``seed_repeat`` (set by ``SlipstreamLoader(window=(T, stride))``)
+    Window / group support: ``seed_repeat`` (set by ``SlipstreamLoader(window=(T, stride), group=G)`` to T*G)
     makes every ``seed_repeat`` consecutive samples of a batch share one draw of the
     per-sample random parameters. Subclasses draw ``self._ng(n)`` values and expand
     them with ``self._expand(x, n)``.

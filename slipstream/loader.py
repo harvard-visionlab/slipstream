@@ -289,6 +289,7 @@ class SlipstreamLoader:
         use_threading: bool = True,
         after_batch_transforms: list[Callable] | None = None,
         window: int | tuple[int, int] | None = None,
+        group: int = 1,
         sample_data: dict[str, Any] | None = None,
         on_invalid_cache: str = "rebuild",
         resolution_schedule: Any = None,
@@ -376,6 +377,16 @@ class SlipstreamLoader:
                 None, every record ``a`` with ``a+(T-1)*stride < len(cache)`` is
                 an anchor. ``batch['_indices']`` is ``[B, T]`` record indices and
                 ``batch['_anchors']`` the ``[B]`` anchors.
+            group: Every ``group`` consecutive samples of a batch share one draw of
+                every random augmentation (crop, flip, colour, blur, ...): paired
+                augmentation, e.g. for ce_ssl. Samples are still shuffled as usual,
+                so a group holds different images; ``x[0::2]`` / ``x[1::2]`` are
+                the two halves for ``group=2``. Decoders share the per-sample draw,
+                not the pixel box, so on images of different sizes the crops match
+                in relative terms (area fraction, aspect ratio, fractional centre)
+                and differ only where a crop has to be clamped to fit. ``batch_size``
+                must be a multiple of ``group``. With ``window``, groups of windows
+                share a draw. Default 1 (off).
             sample_data: Per-sample side arrays aligned with ``indices`` (which
                 is then required), e.g. ``{"t0": window_start_seconds}``. They
                 travel with their sample through shuffling and sharding: each
@@ -403,6 +414,11 @@ class SlipstreamLoader:
             raise ValueError(f"window must be (T >= 1, stride >= 1), got {window!r}")
         self.window_size = T
         self.window_stride = stride
+        if int(group) != group or group < 1:
+            raise ValueError(f"group must be an integer >= 1, got {group!r}")
+        if batch_size % group:
+            raise ValueError(f"batch_size ({batch_size}) must be a multiple of group ({group})")
+        self.group = int(group)
 
         # Per-sample side data aligned with `indices` (shuffled / sharded together with them)
         self.sample_data: dict[str, np.ndarray] = {}
@@ -763,7 +779,7 @@ class SlipstreamLoader:
                     f"cache has {len(self.cache)} records, too few for a window of "
                     f"{self.window_size} at stride {self.window_stride}"
                 )
-        self._propagate_seed_repeat(self.window_size)
+        self._propagate_seed_repeat(self.window_size * self.group)
 
         self.resolution_schedule = resolution_schedule
         if resolution_schedule is not None:
@@ -909,7 +925,11 @@ class SlipstreamLoader:
                 reseed(obj, key)
 
     def _propagate_seed_repeat(self, T: int) -> None:
-        """Tell every decoder / augmentation in the pipelines to share random params across T frames."""
+        """Tell every decoder / augmentation in the pipelines to share random params across T rows."""
+        if self.group > 1 and any(getattr(o, 'owns_transforms', False)
+                                  for o in self._walk_transforms(list(self.pipelines.values()))):
+            raise NotImplementedError("group > 1 is not supported with stages that manage their own "
+                                      "transforms (DecodeVideoWindow)")
         for obj in self._walk_transforms(list(self.pipelines.values())):
             if hasattr(obj, 'seed_repeat'):
                 try:

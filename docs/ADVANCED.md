@@ -129,6 +129,32 @@ view = [ToTorchImage("cuda"), ..., RGBToLab(), Normalize(LAB_CMC_MEAN, LAB_CMC_S
 # model side: L, ab = x[:, :1], x[:, 1:]
 ```
 
+## Paired Augmentation (`group=`)
+
+`SlipstreamLoader(..., group=G)` makes every `G` consecutive samples of a batch share one draw of every
+random step: crop, flip, colour jitter, grayscale, blur, solarize, rotation and so on. Sampling is
+unchanged (shuffled, distinct images), so a group is G different images given the same augmentation.
+Use it for objectives that compare images under identical augmentations, such as ce_ssl (Yerxa et al. 2024):
+
+```python
+loader = SlipstreamLoader(dataset, batch_size=256, pipelines=pipelines, group=2)
+for batch in loader:
+    for view in ("g0", "g1"):
+        x = batch[view]
+        a, b = x[0::2], x[1::2]       # pair k = rows 2k, 2k+1: different images, same draw in this view
+```
+
+- **Layout:** rows stay interleaved, so `[B, ...]` keeps its shape. Views are still drawn independently of
+  each other.
+- **Crops:** decoders share the per-sample draw (fractional centre, area fraction, aspect ratio), not the
+  pixel box, so every crop fits its own image. Pairs of the same size get the same box. Otherwise the boxes
+  match in relative terms, except where one image needs a retry or fallback, or a centre clamped at the edge.
+- **Batch size:** `batch_size` (per rank under DDP) must be a multiple of `group`. Pairs never straddle
+  ranks or batches. With `drop_last=False`, a final partial batch of odd size has one unpaired sample.
+- **Windows:** with `window=(T, stride)`, groups of windows share a draw.
+- **Not supported:** stages that manage their own transforms (`DecodeVideoWindow`) raise.
+- **Check:** `CollectParams` shows the pairing. Every param is equal within a pair.
+
 ## YUV420 Format (2x Faster)
 
 YUV420 stores images in a format optimized for JPEG decode. ~2x faster than RGB JPEG with 1.7x storage.

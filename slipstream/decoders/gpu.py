@@ -514,10 +514,15 @@ class GPUDecoder:
             )
 
         # Generate random crop params using unified utility
-        rois = repeat_params(generate_batch_random_crop_params(
+        # groups (seed_repeat) share the draw, not the pixel box; unseeded draws can only share the box
+        group = getattr(self, 'seed_repeat', 1)
+        seeds = next_sample_seeds(self, seed, batch_size)
+        rois = generate_batch_random_crop_params(
             widths, heights, scale=scale, ratio=ratio,
-            seeds=next_sample_seeds(self, seed, batch_size),
-        ), getattr(self, 'seed_repeat', 1))
+            seeds=None if seeds is None else repeat_params(seeds, group),
+        )
+        if seeds is None:
+            rois = repeat_params(rois, group)
 
         return self.decode_batch_with_roi(
             data, sizes, heights, widths, rois, (target_size, target_size)
