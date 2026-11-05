@@ -154,6 +154,8 @@ for batch in loader:
 - **Windows:** with `window=(T, stride)`, groups of windows share a draw.
 - **Not supported:** stages that manage their own transforms (`DecodeVideoWindow`) raise.
 - **Check:** `CollectParams` shows the pairing. Every param is equal within a pair.
+- **Cost:** none measurable. On machina (A6000, imagenet1k val, bs 256), `group=2` is within -1.1% to +0.2% of
+  `group=1` for RRC, simclr_standard and lejepa, jpeg and yuv420.
 
 ## YUV420 Format (2x Faster)
 
