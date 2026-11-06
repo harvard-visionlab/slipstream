@@ -190,15 +190,20 @@ def random_grayscale(b: torch.Tensor, idx, num_output_channels=3):
     copy of the selected images. PyTorch has no "index_view" — all advanced
     indexing (integer or boolean) returns a copy, not a view.
     """
+    # to_grayscale's 3-channel output is a stride-0 expand: write it into b, never return it
+    # (an in-place op downstream, e.g. Normalize, raises on an expanded tensor).
     if len(b.shape) == 3:
         do = len(idx) == 1 and idx[0] == 0
-        return to_grayscale(b, num_output_channels=num_output_channels) if do else b
+        if not do:
+            return b
+        gray = to_grayscale(b, num_output_channels=num_output_channels)
+        return b.copy_(gray) if num_output_channels == 3 else gray
     elif len(b.shape) == 4:
         if len(idx) == 0:
             return b
         gray = to_grayscale(b, num_output_channels=num_output_channels)
         if len(idx) == b.shape[0]:
-            return gray
+            return b.copy_(gray) if num_output_channels == 3 else gray
         b[idx] = gray[idx]
         return b
 

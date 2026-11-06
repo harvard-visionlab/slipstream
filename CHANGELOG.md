@@ -4,6 +4,18 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.16.1] - 2026-11-06
+
+### Fixed
+
+- Grayscale followed by an in-place op (e.g. `Normalize`, which is in-place by default) no longer raises "more than one
+  element of the written-to tensor refers to a single memory location".
+  - `RandomGrayscale` returned a stride-0 expanded tensor when every row of the batch was selected. That happens
+    with p=1, or on a small tail batch with an unlucky draw (reported by model-rearing on a 1-row tail).
+  - `RandomGrayscale` now writes the result into the batch instead. `ToGrayscale` / `ToGrayscaleTorch` with
+    3 output channels return a contiguous tensor.
+  - Values are unchanged. Regression test: `tests/test_grayscale_expand.py`.
+
 ## [0.16.0] - 2026-11-05
 
 ### Added

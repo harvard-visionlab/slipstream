@@ -15,7 +15,8 @@ class ToGrayscale(BatchAugment):
         self.num_output_channels = num_output_channels
 
     def apply_last(self, b):
-        return F.to_grayscale(b, num_output_channels=self.num_output_channels)
+        g = F.to_grayscale(b, num_output_channels=self.num_output_channels)
+        return g.contiguous() if self.num_output_channels == 3 else g   # not a stride-0 expand (in-place ops downstream)
 
     def __call__(self, b, **kwargs):
         return self.apply_last(b)
@@ -31,7 +32,8 @@ class ToGrayscaleTorch(BatchAugment):
         self.num_output_channels = num_output_channels
 
     def apply_last(self, b):
-        return FT.rgb_to_grayscale(b, num_output_channels=self.num_output_channels)
+        g = FT.rgb_to_grayscale(b, num_output_channels=self.num_output_channels)
+        return g.contiguous() if self.num_output_channels == 3 else g   # not a stride-0 expand
 
     def __call__(self, b, **kwargs):
         return self.apply_last(b)
