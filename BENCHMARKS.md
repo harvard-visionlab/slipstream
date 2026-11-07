@@ -693,3 +693,32 @@ imagenet1k val (50k), batch 512; per step the cache is evicted from the page cac
 | yuv420 | G@192 | + RandomHorizontalFlip @ 192px | 10,132 | 10,215 | 1.01x | 32,078 | 31,918 | 1.00x |
 | yuv420 | M | multicrop 2x224 + 4x98, uint8 CPU | 9,556 | 9,526 | 1.00x | 24,954 | 25,408 | 1.02x |
 | yuv420 | Mf | multicrop, crop_mode='ffcv' | 9,517 | 9,636 | 1.01x | 24,539 | 25,048 | 1.02x |
+
+### v0.16.1 (7df539a), machina, 2026-11-07
+
+64 CPUs, numba 0.67.0, torch 2.14.0+cu126, NVIDIA RTX A6000; before: load1=1.6 gpu%=[8, 0], after: load1=36.8 gpu%=[0, 0]
+
+| fmt | step | pipeline | cold v0.16.0 | cold v0.16.1 | ratio | warm v0.16.0 | warm v0.16.1 | ratio |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| jpeg | A | RRC only, uint8 CPU, sequential, simple | 15,346 | 15,598 | 1.02x | 38,599 | 38,909 | 1.01x |
+| jpeg | B | + threaded prefetch | 22,086 | 22,034 | 1.00x | 41,402 | 41,240 | 1.00x |
+| jpeg | C | + shuffle | 15,574 | 15,645 | 1.00x | 41,843 | 41,927 | 1.00x |
+| jpeg | D | + ToTorchImage fp32 | 13,599 | 13,589 | 1.00x | 27,600 | 28,243 | 1.02x |
+| jpeg | E | + Normalize fp32 | 13,516 | 13,630 | 1.01x | 27,512 | 27,542 | 1.00x |
+| jpeg | F | ToTorchImage/Normalize bf16 | 13,381 | 13,629 | 1.02x | 27,428 | 27,296 | 1.00x |
+| jpeg | G | + RandomHorizontalFlip | 12,907 | 12,824 | 0.99x | 24,131 | 23,995 | 0.99x |
+| jpeg | G@160 | + RandomHorizontalFlip @ 160px | 14,046 | 14,330 | 1.02x | 30,960 | 31,505 | 1.02x |
+| jpeg | G@192 | + RandomHorizontalFlip @ 192px | 13,493 | 13,594 | 1.01x | 27,660 | 27,501 | 0.99x |
+| jpeg | M | multicrop 2x224 + 4x98, uint8 CPU | 12,350 | 12,113 | 0.98x | 22,164 | 22,040 | 0.99x |
+| jpeg | Mf | multicrop, crop_mode='ffcv' | 12,367 | 12,162 | 0.98x | 21,893 | 22,373 | 1.02x |
+| yuv420 | A | RRC only, uint8 CPU, sequential, simple | 16,007 | 15,773 | 0.99x | 46,372 | 46,537 | 1.00x |
+| yuv420 | B | + threaded prefetch | 14,084 | 14,035 | 1.00x | 52,836 | 53,580 | 1.01x |
+| yuv420 | C | + shuffle | 10,468 | 10,366 | 0.99x | 52,909 | 53,866 | 1.02x |
+| yuv420 | D | + ToTorchImage fp32 | 10,160 | 10,149 | 1.00x | 32,427 | 32,521 | 1.00x |
+| yuv420 | E | + Normalize fp32 | 10,231 | 10,169 | 0.99x | 32,491 | 32,062 | 0.99x |
+| yuv420 | F | ToTorchImage/Normalize bf16 | 10,227 | 10,272 | 1.00x | 32,338 | 32,373 | 1.00x |
+| yuv420 | G | + RandomHorizontalFlip | 9,946 | 9,967 | 1.00x | 27,609 | 28,081 | 1.02x |
+| yuv420 | G@160 | + RandomHorizontalFlip @ 160px | 10,559 | 10,535 | 1.00x | 37,506 | 37,779 | 1.01x |
+| yuv420 | G@192 | + RandomHorizontalFlip @ 192px | 10,215 | 10,147 | 0.99x | 31,918 | 32,402 | 1.02x |
+| yuv420 | M | multicrop 2x224 + 4x98, uint8 CPU | 9,526 | 9,615 | 1.01x | 25,408 | 25,394 | 1.00x |
+| yuv420 | Mf | multicrop, crop_mode='ffcv' | 9,636 | 9,624 | 1.00x | 25,048 | 25,411 | 1.01x |
