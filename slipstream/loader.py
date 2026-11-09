@@ -821,7 +821,9 @@ class SlipstreamLoader:
                 pos = pos[:(n // self.world_size) * self.world_size]
             else:
                 total = math.ceil(n / self.world_size) * self.world_size
-                pos = np.concatenate([pos, pos[:total - n]])
+                # pad cyclically (like DistributedSampler): pos[:pad] alone falls short when n < world_size / 2,
+                # leaving ranks empty (they then desync from the others' collectives)
+                pos = np.concatenate([pos, np.resize(pos, total - n)])
             pos = pos[self.rank::self.world_size]
 
         self._epoch_positions = pos                  # lets the iterators pick up sample_data per batch

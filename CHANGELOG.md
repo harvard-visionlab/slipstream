@@ -4,6 +4,18 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.16.2] - 2026-11-08
+
+### Fixed
+
+- Distributed sharding with `drop_last=False` now gives every rank `ceil(N / world_size)` samples, even when N <
+  world_size / 2.
+  - Padding copied the epoch order only once, so N=1 on 4 ranks gave shard sizes [1, 1, 0, 0]. Ranks without a
+    batch fell out of step with the others' collectives, and `len(loader)` disagreed.
+  - Padding now repeats cyclically, as torch's `DistributedSampler` does.
+  - Output is identical whenever N >= world_size / 2.
+  - Reported by model-rearing (Astra review). Test: `tests/test_ddp_tiny_split.py`.
+
 ## [0.16.1] - 2026-11-07
 
 ### Fixed
