@@ -108,10 +108,11 @@ from slipstream.transforms import RandomResizedCropBatch, RandomHorizontalFlip
 
 stage = DecodeVideoWindow(T=120, rate_hz=15, seed=0,           # 8 s windows, random start per clip
                           device="cpu", num_workers=32,          # or device="cuda:0"
-                          transforms=[RandomResizedCropBatch(224, seed=1), RandomHorizontalFlip(seed=2)])
+                          transforms=[RandomResizedCropBatch(224, seed=1), RandomHorizontalFlip(seed=2)],
+                          aug_mode="clip")                       # required with transforms: "clip" | "frame"
 loader = SlipstreamLoader(store, batch_size=8, indices=clip_ids, pipelines={"video": [stage]})
 for batch in loader:
-    batch["video"]        # [B, 120, 3, 224, 224] uint8, one crop/flip per window
+    batch["video"]        # [B, 120, 3, 224, 224] uint8, one crop/flip per window ("frame": per frame)
     batch["video_t_sec"]  # [B, 120] true presentation times of the frames
     batch["video_t0"], batch["video_rec"]
 ```

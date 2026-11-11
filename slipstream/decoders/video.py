@@ -43,8 +43,9 @@ decoders on a cold CIFS mount vs 87 windows/s warm). Call
 hint when most of the records it is about to read are not in the page cache.
 
 ``transforms`` (slipstream ``BatchAugment`` objects) are applied to the flat
-``[B*T, 3, H, W]`` frames with ``seed_repeat = T``, so a window's frames share
-one crop / flip / colour draw.
+``[B*T, 3, H, W]`` frames. ``aug_mode`` (required with ``transforms``) picks the scheme:
+``"clip"`` (``seed_repeat = T``: a window's frames share one crop / flip / colour draw) or
+``"frame"`` (``seed_repeat = 1``: every frame its own draw, as for images).
 """
 
 from __future__ import annotations
@@ -114,7 +115,12 @@ class DecodeVideoWindow(BatchTransform):
         resize: Decoder-side resize before augmentation: an int (short side) or
             ``(H, W)``. Required when a store mixes frame sizes.
         transforms: slipstream ``BatchAugment`` transforms applied to the flat
-            ``[B*T, 3, H, W]`` frames with ``seed_repeat = T``.
+            ``[B*T, 3, H, W]`` frames.
+        aug_mode: How ``transforms`` draw their random parameters; required when
+            ``transforms`` are given (0.17.0). ``"clip"``: one draw per window,
+            shared by its T frames (``seed_repeat = T``). ``"frame"``: an
+            independent draw per frame, as for images (``seed_repeat = 1``; e.g.
+            SimCLR-TT+). Both are reproducible from the loader's (seed, rank, epoch).
         end_margin_frames: Frames at the end of a clip never requested (default 2).
         cpu_fallback: Retry a failed CUDA decode on the CPU (default True).
         reuse_output: Recycle the output tensors through a ring of buffers instead
@@ -180,6 +186,7 @@ class DecodeVideoWindow(BatchTransform):
         seek_mode: str = "exact",
         resize: int | tuple[int, int] | None = None,
         transforms: list[Any] | None = None,
+        aug_mode: str | None = None,
         end_margin_frames: int = 2,
         cpu_fallback: bool = True,
         reuse_output: bool = True,
@@ -208,6 +215,13 @@ class DecodeVideoWindow(BatchTransform):
         self.seek_mode = seek_mode
         self.resize = resize
         self.transforms = list(transforms or [])
+        if aug_mode not in (None, "clip", "frame"):
+            raise ValueError(f"aug_mode must be 'clip' or 'frame', got {aug_mode!r}")
+        if self.transforms and aug_mode is None:
+            raise ValueError("DecodeVideoWindow: transforms given without aug_mode; pass aug_mode='clip' "
+                             "(one draw per window, shared by its frames) or 'frame' (an independent draw per frame)")
+        self.aug_mode = aug_mode
+        self._inner_repeat = self.T if aug_mode == "clip" else 1
         self.end_margin_frames = int(end_margin_frames)
         self.cpu_fallback = cpu_fallback
         self.reuse_output = reuse_output
@@ -265,7 +279,7 @@ class DecodeVideoWindow(BatchTransform):
             t = stack.pop()
             if hasattr(t, "seed_repeat"):
                 try:
-                    t.seed_repeat = self.T
+                    t.seed_repeat = self._inner_repeat
                 except AttributeError:
                     pass
             inner = getattr(t, "transforms", None)
@@ -448,4 +462,4 @@ class DecodeVideoWindow(BatchTransform):
         devs = ",".join(str(d) for d in self.devices)
         return (f"DecodeVideoWindow(T={self.T}, rate_hz={self.rate_hz:g}, window_s={self.window_s:g}, "
                 f"seed={self.seed}, t0_key={self.t0_key!r}, device='{devs}', output_device='{self.output_device}', "
-                f"workers={self.num_workers}, resize={self.resize}, transforms=[{tr}])")
+                f"workers={self.num_workers}, resize={self.resize}, transforms=[{tr}], aug_mode={self.aug_mode!r})")

@@ -162,7 +162,7 @@ class TestDecodeVideoWindow:
         ds = MockVideoStore(cache_path=tmp_path / "cache", static=True)      # every frame of a clip identical
         T = 6
         stage = DecodeVideoWindow(T=T, rate_hz=10.0, seed=1, transforms=[
-            RandomResizedCropBatch(32, scale=(0.3, 0.9), seed=5), RandomHorizontalFlip(p=0.5, seed=6)])
+            RandomResizedCropBatch(32, scale=(0.3, 0.9), seed=5), RandomHorizontalFlip(p=0.5, seed=6)], aug_mode="clip")
         loader = SlipstreamLoader(ds, batch_size=5, shuffle=False, verbose=False, pipelines={"video": [stage]})
         try:
             b = next(iter(loader))
@@ -181,6 +181,50 @@ class TestDecodeVideoWindow:
             assert all(t.seed_repeat == T for t in stage.transforms)
         finally:
             loader.shutdown()
+
+    def test_frame_aug_mode_draws_per_frame_reproducibly(self, tmp_path):
+        """aug_mode='frame' (0.17.0): every frame its own crop / flip / jitter / grayscale draw (SimCLR-TT+),
+        reproducible from (seed, epoch) and different across epochs."""
+        from slipstream.transforms import RandomColorJitterHSV, RandomGrayscale
+        ds = MockVideoStore(cache_path=tmp_path / "cache", static=True)
+        T, B = 6, 5
+
+        def make():
+            return DecodeVideoWindow(T=T, rate_hz=10.0, seed=1, aug_mode="frame", transforms=[
+                RandomResizedCropBatch(32, scale=(0.2, 1.0), seed=5), RandomHorizontalFlip(p=0.5, seed=6),
+                RandomColorJitterHSV(p=0.8, hue=0.2, saturation=0.8, value=0.8, contrast=0.8, seed=7),
+                RandomGrayscale(p=0.2, seed=8)])
+
+        def run(epochs=1):
+            stage = make()
+            loader = SlipstreamLoader(ds, batch_size=B, shuffle=False, seed=0, verbose=False,
+                                      pipelines={"video": [stage]})
+            out = []
+            try:
+                for _ in range(epochs):
+                    b = next(iter(loader))
+                    out.append((b["video"].clone(), stage.transforms[0].last_params()["mat"].clone(),
+                                stage.transforms[1].last_params()["do"].clone()))
+            finally:
+                loader.shutdown()
+            assert all(t.seed_repeat == 1 for t in stage.transforms)
+            return out
+
+        (f, mat, do), (f2, mat2, _) = run(epochs=2)
+        assert f.shape == (B, T, 3, 32, 32)
+        mat = mat.reshape(B, T, 2, 3)
+        assert not torch.equal(mat, mat[:, :1].expand_as(mat))            # frames of a window differ
+        assert do.reshape(B, T).float().std(dim=1).max() > 0               # flips vary within a window
+        assert not torch.equal(mat.reshape(-1, 2, 3), mat2)               # next epoch: new draws
+        (g, gmat, _), = run()
+        assert torch.equal(f, g) and torch.equal(mat.reshape(-1, 2, 3), gmat)   # same seed: same frames
+
+    def test_aug_mode_required_with_transforms(self):
+        with pytest.raises(ValueError, match="aug_mode"):
+            DecodeVideoWindow(T=4, rate_hz=10.0, transforms=[RandomHorizontalFlip(seed=1)])
+        with pytest.raises(ValueError, match="aug_mode must be"):
+            DecodeVideoWindow(T=4, rate_hz=10.0, transforms=[RandomHorizontalFlip(seed=1)], aug_mode="window")
+        assert DecodeVideoWindow(T=4, rate_hz=10.0).aug_mode is None      # no transforms: not needed
 
     def test_resize_short_side_and_hw(self, tmp_path):
         ds = MockVideoStore(cache_path=tmp_path / "cache")

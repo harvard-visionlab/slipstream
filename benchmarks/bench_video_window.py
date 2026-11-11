@@ -56,7 +56,7 @@ def main() -> None:
     inner = [RandomResizedCropBatch(a.crop, seed=1), RandomHorizontalFlip(p=0.5, seed=2)] if a.crop else None
     devices = a.device.split(",") if "," in a.device else a.device
     stage = DecodeVideoWindow(T=a.T, rate_hz=a.rate, seed=0, device=devices, output_device=a.output_device,
-                              num_workers=a.workers, num_ffmpeg_threads=a.ffmpeg_threads, resize=a.resize, transforms=inner,
+                              num_workers=a.workers, num_ffmpeg_threads=a.ffmpeg_threads, resize=a.resize, transforms=inner, aug_mode="clip" if inner else None,
                               reuse_output=not a.no_reuse_output)
     ahead = a.batches_ahead or max(3, -(-stage.num_workers // a.batch_size))
     loader = SlipstreamLoader(ds, batch_size=a.batch_size, shuffle=True, seed=0, drop_last=True, indices=indices,

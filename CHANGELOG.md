@@ -4,7 +4,21 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
-## [0.16.2] - 2026-11-08
+## [0.17.0] - unreleased
+
+### Changed (breaking)
+
+- `DecodeVideoWindow(transforms=...)` now requires `aug_mode="clip" | "frame"` (George 2026-11-10: the augmentation
+  scheme must be explicit per config). Without it the constructor raises `ValueError`.
+  - Migration: add `aug_mode="clip"`. Output is bit-identical to 0.16.x.
+  - No `transforms`: nothing changes.
+
+### Added
+
+- `aug_mode="frame"`: every frame gets its own crop / flip / colour / grayscale draw, as images do (SimCLR-TT+,
+  Aubret et al. 2023). It sets the inner transforms' `seed_repeat` to 1 instead of T.
+  - Reproducible from the loader's (seed, rank, epoch), like `"clip"`.
+  - Requested by model-rearing. Test: `test_frame_aug_mode_draws_per_frame_reproducibly`.
 
 ### Fixed
 
