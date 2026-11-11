@@ -185,14 +185,14 @@ class TestDecodeVideoWindow:
     def test_frame_aug_mode_draws_per_frame_reproducibly(self, tmp_path):
         """aug_mode='frame' (0.17.0): every frame its own crop / flip / jitter / grayscale draw (SimCLR-TT+),
         reproducible from (seed, epoch) and different across epochs."""
-        from slipstream.transforms import RandomColorJitterHSV, RandomGrayscale
+        from slipstream.transforms import RandomColorJitterHSV, RandomGrayscale, ToFloatDiv
         ds = MockVideoStore(cache_path=tmp_path / "cache", static=True)
         T, B = 6, 5
 
         def make():
             return DecodeVideoWindow(T=T, rate_hz=10.0, seed=1, aug_mode="frame", transforms=[
                 RandomResizedCropBatch(32, scale=(0.2, 1.0), seed=5), RandomHorizontalFlip(p=0.5, seed=6),
-                RandomColorJitterHSV(p=0.8, hue=0.2, saturation=0.8, value=0.8, contrast=0.8, seed=7),
+                ToFloatDiv(255), RandomColorJitterHSV(p=0.8, hue=0.2, saturation=0.8, value=0.8, contrast=0.8, seed=7),
                 RandomGrayscale(p=0.2, seed=8)])
 
         def run(epochs=1):
@@ -207,7 +207,7 @@ class TestDecodeVideoWindow:
                                 stage.transforms[1].last_params()["do"].clone()))
             finally:
                 loader.shutdown()
-            assert all(t.seed_repeat == 1 for t in stage.transforms)
+            assert all(t.seed_repeat == 1 for t in stage.transforms if hasattr(t, "seed_repeat"))
             return out
 
         (f, mat, do), (f2, mat2, _) = run(epochs=2)
