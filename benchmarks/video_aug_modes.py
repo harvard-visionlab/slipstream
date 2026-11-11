@@ -35,7 +35,7 @@ def _frames(cache_root: Path, n: int):
     return img if img.shape[1] == 3 else img.permute(0, 3, 1, 2).contiguous()     # [n, 3, 256, 256] uint8
 
 
-def _stage(mode: str, T: int):
+def _stage(mode: str, T: int, device: str = "cpu"):
     from slipstream.decoders import DecodeVideoWindow
     from slipstream.transforms import (
         RandomColorJitterHSV,
@@ -45,9 +45,10 @@ def _stage(mode: str, T: int):
         ToFloatDiv,
     )
     return DecodeVideoWindow(T=T, rate_hz=10.0, seed=0, aug_mode=mode, transforms=[
-        RandomResizedCropBatch(224, scale=(0.2, 1.0), seed=1), RandomHorizontalFlip(p=0.5, seed=2), ToFloatDiv(255),
-        RandomColorJitterHSV(p=0.8, hue=0.2, saturation=0.8, value=0.8, contrast=0.8, seed=3),
-        RandomGrayscale(p=0.2, seed=4)])
+        RandomResizedCropBatch(224, scale=(0.2, 1.0), seed=1, device=device),
+        RandomHorizontalFlip(p=0.5, seed=2, device=device), ToFloatDiv(255),
+        RandomColorJitterHSV(p=0.8, hue=0.2, saturation=0.8, value=0.8, contrast=0.8, seed=3, device=device),
+        RandomGrayscale(p=0.2, seed=4, device=device)])
 
 
 def run(cache_root: Path, device: str, *, B: int = 8, T: int = 64, iters: int = 20, warmup: int = 3) -> dict:
@@ -55,7 +56,7 @@ def run(cache_root: Path, device: str, *, B: int = 8, T: int = 64, iters: int = 
     import torch
 
     frames = _frames(cache_root, B * T).to(device).reshape(B, T, 3, 256, 256)
-    stages = {m: _stage(m, T) for m in ("clip", "frame")}
+    stages = {m: _stage(m, T, device) for m in ("clip", "frame")}
     sync = torch.cuda.synchronize if device.startswith("cuda") else (lambda: None)
     times: dict[str, list[float]] = {m: [] for m in stages}
     for i in range(warmup + iters):
