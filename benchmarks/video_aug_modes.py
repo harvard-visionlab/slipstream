@@ -5,14 +5,13 @@ Times ``DecodeVideoWindow.apply_transforms`` -- the only code the two modes diff
 (RandomResizedCropBatch 224 scale (0.2, 1), flip, ToFloatDiv, colour jitter p=0.8, grayscale p=0.2).
 Decoding is excluded: it is identical in both modes and would hide the difference. Needs no torchcodec.
 
-    uv run python -m benchmarks.video_aug_modes [--device cuda] [--B 8 --T 64]
+    uv run python -m benchmarks.video_aug_modes [--device cuda] [--B 32 --T 16] [--iters 50]
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import statistics
 import time
 from pathlib import Path
 
@@ -51,8 +50,12 @@ def _stage(mode: str, T: int, device: str = "cpu"):
         RandomGrayscale(p=0.2, seed=4, device=device)])
 
 
-def run(cache_root: Path, device: str, *, B: int = 8, T: int = 64, iters: int = 20, warmup: int = 3) -> dict:
-    """``{"clip": frames/s, "frame": frames/s, "ratio": frame/clip}``; modes interleaved, median of `iters`."""
+def run(cache_root: Path, device: str, *, B: int = 32, T: int = 16, iters: int = 50, warmup: int = 3) -> dict:
+    """``{"clip": frames/s, "frame": frames/s, "ratio": frame/clip}``; modes interleaved, total time over `iters`.
+
+    Total, not median: in "clip" mode p<1 steps select whole windows, so the work per call is lumpy (multiples
+    of T frames); a median then picks one lump (measured: a false -4 % at B=8, T=64). Same expected work in
+    both modes; many windows (B) and iterations keep the sampling noise around 1 %."""
     import torch
 
     frames = _frames(cache_root, B * T).to(device).reshape(B, T, 3, 256, 256)
@@ -67,7 +70,7 @@ def run(cache_root: Path, device: str, *, B: int = 8, T: int = 64, iters: int = 
             sync()
             if i >= warmup:
                 times[m].append(time.perf_counter() - t)
-    fps = {m: B * T / statistics.median(v) for m, v in times.items()}
+    fps = {m: B * T * len(v) / sum(v) for m, v in times.items()}
     return {"clip": fps["clip"], "frame": fps["frame"], "ratio": fps["frame"] / fps["clip"],
             "B": B, "T": T, "chain": CHAIN}
 
@@ -78,9 +81,9 @@ def main() -> None:
     ap.add_argument("--cache-root", type=Path,
                     default=Path(os.environ.get("SLIPSTREAM_CACHE_DIR", "~/.slipstream")).expanduser())
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--B", type=int, default=8)
-    ap.add_argument("--T", type=int, default=64)
-    ap.add_argument("--iters", type=int, default=20)
+    ap.add_argument("--B", type=int, default=32)
+    ap.add_argument("--T", type=int, default=16)
+    ap.add_argument("--iters", type=int, default=50)
     a = ap.parse_args()
     r = run(a.cache_root, a.device, B=a.B, T=a.T, iters=a.iters)
     print(f"{a.device} B={a.B} T={a.T}: clip {r['clip']:,.0f}  frame {r['frame']:,.0f} frames/s  "

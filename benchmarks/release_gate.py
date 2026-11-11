@@ -144,7 +144,7 @@ def main() -> int:
           f"numba {meta['numba']}, torch {meta['torch']}, {state}")
     results = {f: run_epochs(a.cache_root, f, epochs=a.epochs) for f in ("jpeg", "yuv420")}
     import torch
-    video = {d: run_video_aug(a.cache_root, d) for d in (["cuda"] if torch.cuda.is_available() else []) + ["cpu"]}
+    video = {d: run_video_aug(a.cache_root, d, iters=100 if d == "cuda" else 30) for d in (["cuda"] if torch.cuda.is_available() else []) + ["cpu"]}
     meta["load_after"] = _quiet(a.max_load)[1]
     meta["forced_busy"] = not ok
     res = {"meta": meta, "params": {"epochs": a.epochs, "batch_size": 512, "samples": "imagenet1k val, full"},
