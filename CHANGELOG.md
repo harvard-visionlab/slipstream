@@ -4,7 +4,7 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
-## [0.17.0] - unreleased
+## [0.17.0] - 2026-11-10
 
 ### Changed (breaking)
 
@@ -19,6 +19,10 @@ All notable changes to slipstream are documented here. Versions follow
   Aubret et al. 2023). It sets the inner transforms' `seed_repeat` to 1 instead of T.
   - Reproducible from the loader's (seed, rank, epoch), like `"clip"`.
   - Requested by model-rearing. Test: `test_frame_aug_mode_draws_per_frame_reproducibly`.
+  - Cost: none measurable. On machina, frame/clip throughput is 0.99-1.01 (GPU and CPU, transforms only).
+- `DecodeVideoWindow.apply_transforms(frames)`: the stage's transform step on `[B, T, 3, H, W]` frames.
+- Release gate: also times `aug_mode="frame"` vs `"clip"` (`benchmarks/video_aug_modes.py`). FAIL if frame mode is
+  more than 10 % slower.
 
 ### Fixed
 
