@@ -13,7 +13,9 @@ Run on the reference machine (machina) from a clean checkout of the commit to be
    step with the latest earlier version saved for this host. FAIL (exit 1) if either drops more than
    --tolerance (default 10 %), or if threaded prefetch (B) is below 75 % of simple (A) -- the 0.9.x
    regression. (``benchmarks/results/gate/`` holds the older warm-only, partial-epoch results.)
-4. ``--append-md`` appends the table to BENCHMARKS.md ("Release gate" section).
+4. Times DecodeVideoWindow augmentation, aug_mode="frame" vs "clip" (benchmarks/video_aug_modes.py), on
+   each device: FAIL if frame mode is more than --tolerance slower than clip mode (George 2026-11-10).
+5. ``--append-md`` appends the table to BENCHMARKS.md ("Release gate" section).
 
 Commit the results file (and BENCHMARKS.md) with the release.
 """
@@ -33,6 +35,8 @@ from datetime import date
 from pathlib import Path
 
 from benchmarks.loader_ablation import MULTICROP_STEPS, STEPS, run_epochs
+from benchmarks.video_aug_modes import CHAIN as VIDEO_CHAIN
+from benchmarks.video_aug_modes import run as run_video_aug
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "benchmarks" / "results" / "gate-full"
@@ -139,9 +143,12 @@ def main() -> int:
     print(f"gate: slipstream {meta['version']} ({meta['git']}) on {meta['host']}, {meta['cpus']} CPUs, "
           f"numba {meta['numba']}, torch {meta['torch']}, {state}")
     results = {f: run_epochs(a.cache_root, f, epochs=a.epochs) for f in ("jpeg", "yuv420")}
+    import torch
+    video = {d: run_video_aug(a.cache_root, d) for d in (["cuda"] if torch.cuda.is_available() else []) + ["cpu"]}
     meta["load_after"] = _quiet(a.max_load)[1]
     meta["forced_busy"] = not ok
-    res = {"meta": meta, "params": {"epochs": a.epochs, "batch_size": 512, "samples": "imagenet1k val, full"}, "results": results}
+    res = {"meta": meta, "params": {"epochs": a.epochs, "batch_size": 512, "samples": "imagenet1k val, full"},
+           "results": results, "video_aug": video}
 
     host_dir = RESULTS / meta["host"]
     base = _baseline(host_dir, meta["version"])
@@ -150,7 +157,15 @@ def main() -> int:
     header = [f"| fmt | step | pipeline | cold {was} | cold v{meta['version']} | ratio "
               f"| warm {was} | warm v{meta['version']} | ratio |",
               "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
-    print("\n".join(header + lines))
+    vlines = [f"DecodeVideoWindow aug_mode, {VIDEO_CHAIN} (frames/s, transforms only):", "",
+              "| device | B x T | clip | frame | frame/clip |", "| --- | --- | ---: | ---: | ---: |"]
+    for dev, r in video.items():
+        bad = r["ratio"] < 1 - a.tolerance
+        if bad:
+            fails.append(f"video aug {dev}: frame {r['frame']:,.0f} vs clip {r['clip']:,.0f} frames/s ({r['ratio']:.2f}x)")
+        vlines.append(f"| {dev} | {r['B']} x {r['T']} | {r['clip']:,.0f} | {r['frame']:,.0f} | {r['ratio']:.3f}"
+                      + (" ✗" if bad else "") + " |")
+    print("\n".join(header + lines + [""] + vlines))
     if not a.no_save:
         host_dir.mkdir(parents=True, exist_ok=True)
         (host_dir / f"v{meta['version']}.json").write_text(json.dumps(res, indent=2) + "\n")
@@ -164,7 +179,7 @@ def main() -> int:
                      "(steps: `benchmarks/loader_ablation.py`).\n")
         text += (f"\n### v{meta['version']} ({meta['git']}), {meta['host']}, {meta['date']}\n\n"
                  f"{meta['cpus']} CPUs, numba {meta['numba']}, torch {meta['torch']}, {meta['cuda']}; "
-                 f"before: {meta['load_before']}, after: {meta['load_after']}\n\n" + "\n".join(header + lines) + "\n")
+                 f"before: {meta['load_before']}, after: {meta['load_after']}\n\n" + "\n".join(header + lines + [""] + vlines) + "\n")
         md.write_text(text)
     if fails:
         print("GATE FAIL:\n  " + "\n  ".join(fails))

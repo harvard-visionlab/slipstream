@@ -432,17 +432,22 @@ class DecodeVideoWindow(BatchTransform):
         frames = frames.permute(0, 1, 4, 2, 3)                        # [B, T, 3, H, W] view over HWC memory
 
         if self.transforms and pend.B:
-            self._set_inner_seed_repeat()                             # loader may have reset them
-            flat = frames.reshape(pend.B * self.T, *frames.shape[2:])
-            for t in self.transforms:
-                flat = t(flat)
-            frames = flat.reshape(pend.B, self.T, *flat.shape[1:])
+            frames = self.apply_transforms(frames)
 
         self._last_params = {"t0": pend.t0, "t_sec": pend.t_sec}
         out = {pend.field: frames, f"{pend.field}_t_sec": pend.t_sec, f"{pend.field}_t0": pend.t0}
         if pend.indices is not None:
             out[f"{pend.field}_rec"] = torch.from_numpy(pend.indices)
         return out
+
+    def apply_transforms(self, frames: torch.Tensor) -> torch.Tensor:
+        """Apply `transforms` (per `aug_mode`) to ``[B, T, 3, H, W]`` frames; returns ``[B, T, ...]``."""
+        self._set_inner_seed_repeat()                                 # loader may have reset them
+        B = frames.shape[0]
+        flat = frames.reshape(B * self.T, *frames.shape[2:])
+        for t in self.transforms:
+            flat = t(flat)
+        return flat.reshape(B, self.T, *flat.shape[1:])
 
     def __call__(self, batch_data: dict[str, Any]) -> dict[str, Any]:
         return self.collect(self.submit(batch_data))
