@@ -72,6 +72,17 @@ for batch in loader:
 
 First epoch builds the cache (if not already present locally). Subsequent epochs run at full speed.
 
+**Batches are borrowed, not owned.** For speed, decoders write into reused output buffers. A batch's decoded
+tensors stay valid only until the buffer is reused:
+- **Image decoders** (`DecodeRandomResizedCrop`, `DecodeCenterCrop`, multicrop; jpeg and yuv420) reuse theirs on the
+  next batch. Pipelines that end in `ToTorchImage`/`Normalize` (e.g. `supervised_train`) return fresh tensors.
+- **`DecodeVideoWindow`** writes into a ring that wraps after about `batches_ahead` + 2 batches. `reuse_output=False`
+  turns the ring off.
+
+Training loops that consume each batch before asking for the next are unaffected. To keep batches (e.g. collecting
+a dataset into a list), `.clone()` the tensors. `.contiguous()` and `.permute()` are not copies: they can return a view
+of the same buffer. Stale views fail silently: they show another batch's plausible data, not an error.
+
 ### Sequence windows (video frame stores)
 
 For a cache whose records are consecutive frames, `window=(T, stride)` turns the loader

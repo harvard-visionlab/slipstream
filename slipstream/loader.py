@@ -232,6 +232,13 @@ class SlipstreamLoader:
     The loader handles efficient I/O and batching. Processing (decode, crop,
     normalize) is handled by pipelines, which can be customized per field.
 
+    Buffer lifetime: decoded outputs live in reused buffers. Image decoders
+    overwrite theirs on the next batch, and DecodeVideoWindow's ring wraps after
+    about ``batches_ahead`` + 2 batches. Pipelines ending in ToTorchImage/Normalize
+    return fresh tensors. To keep a batch beyond that, ``.clone()`` it:
+    ``.contiguous()`` and ``.permute()`` can return views of the same buffer, and a
+    stale view shows another batch's data silently.
+
     On first use, the loader automatically builds an optimized cache
     from the dataset. This cache is stored in a .slipstream subdirectory
     and reused in subsequent runs.
