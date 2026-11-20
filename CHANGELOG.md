@@ -4,6 +4,22 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.18.0] - unreleased
+
+### Added
+
+- `SlipstreamLoader(clone=True)`: yields batches that own their memory. Every tensor is `.clone()`d and every array
+  copied, recursively.
+  - Decoders write into reused buffers. Raw image decoder output is overwritten on the next batch, and
+    `DecodeVideoWindow`'s ring wraps after about `batches_ahead` + 2 batches. Code that kept batches therefore got
+    other batches' data silently: tjepa-redux, 6,016 of 6,400 windows.
+  - Default False: training loops are unchanged and pay nothing.
+  - Tests: `tests/test_loader_clone.py` and `test_loader_clone_keeps_video_batches`.
+
+### Documentation
+
+- README and `SlipstreamLoader` docstring: buffer lifetime ("batches are borrowed, not owned").
+
 ## [0.17.0] - 2026-11-10
 
 ### Changed (breaking)

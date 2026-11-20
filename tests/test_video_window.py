@@ -219,6 +219,20 @@ class TestDecodeVideoWindow:
         (g, gmat, _), = run()
         assert torch.equal(f, g) and torch.equal(mat.reshape(-1, 2, 3), gmat)   # same seed: same frames
 
+    def test_loader_clone_keeps_video_batches(self, tmp_path):
+        """0.18.0: clone=True; without it a kept batch is overwritten once the output ring wraps."""
+        ds = MockVideoStore(cache_path=tmp_path / "cache")
+        for clone in (False, True):
+            stage = DecodeVideoWindow(T=4, rate_hz=10.0, seed=1, num_workers=2, ring_size=2)
+            loader = SlipstreamLoader(ds, batch_size=1, shuffle=False, verbose=False, clone=clone,
+                                      batches_ahead=1, pipelines={"video": [stage]})
+            try:
+                kept = [(b["video"], b["video"].clone()) for b in loader]
+            finally:
+                loader.shutdown()
+            intact = all(torch.equal(v, s) for v, s in kept)
+            assert intact == clone, (clone, intact)
+
     def test_aug_mode_required_with_transforms(self):
         with pytest.raises(ValueError, match="aug_mode"):
             DecodeVideoWindow(T=4, rate_hz=10.0, transforms=[RandomHorizontalFlip(seed=1)])

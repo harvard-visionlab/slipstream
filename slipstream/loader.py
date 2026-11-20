@@ -221,6 +221,19 @@ def _madvise_willneed(fpath: Path, ranges: list[tuple[int, int]] | None) -> None
         pass
 
 
+def _owned(x: Any) -> Any:
+    """Copy of a batch that shares no memory with the loader's buffers (``SlipstreamLoader(clone=True)``)."""
+    if isinstance(x, torch.Tensor):
+        return x.clone()
+    if isinstance(x, np.ndarray):
+        return x.copy()
+    if isinstance(x, dict):
+        return {k: _owned(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return type(x)(_owned(v) for v in x)
+    return x
+
+
 class SlipstreamLoader:
     """High-level data loader for training with streaming datasets.
 
@@ -235,7 +248,7 @@ class SlipstreamLoader:
     Buffer lifetime: decoded outputs live in reused buffers. Image decoders
     overwrite theirs on the next batch, and DecodeVideoWindow's ring wraps after
     about ``batches_ahead`` + 2 batches. Pipelines ending in ToTorchImage/Normalize
-    return fresh tensors. To keep a batch beyond that, ``.clone()`` it:
+    return fresh tensors. To keep a batch beyond that, pass ``clone=True`` or ``.clone()`` it:
     ``.contiguous()`` and ``.permute()`` can return views of the same buffer, and a
     stale view shows another batch's data silently.
 
@@ -297,6 +310,7 @@ class SlipstreamLoader:
         after_batch_transforms: list[Callable] | None = None,
         window: int | tuple[int, int] | None = None,
         group: int = 1,
+        clone: bool = False,
         sample_data: dict[str, Any] | None = None,
         on_invalid_cache: str = "rebuild",
         resolution_schedule: Any = None,
@@ -394,6 +408,11 @@ class SlipstreamLoader:
                 and differ only where a crop has to be clamped to fit. ``batch_size``
                 must be a multiple of ``group``. With ``window``, groups of windows
                 share a draw. Default 1 (off).
+            clone: Yield batches that own their memory (every tensor ``.clone()``d,
+                every array copied, recursively). Decoders write into reused
+                buffers, so a kept batch is otherwise overwritten by a later one
+                (see "Buffer lifetime" above). For code that collects batches;
+                training loops do not need it. Costs one copy per batch. Default False.
             sample_data: Per-sample side arrays aligned with ``indices`` (which
                 is then required), e.g. ``{"t0": window_start_seconds}``. They
                 travel with their sample through shuffling and sharding: each
@@ -426,6 +445,7 @@ class SlipstreamLoader:
         if batch_size % group:
             raise ValueError(f"batch_size ({batch_size}) must be a multiple of group ({group})")
         self.group = int(group)
+        self.clone = bool(clone)
 
         # Per-sample side data aligned with `indices` (shuffled / sharded together with them)
         self.sample_data: dict[str, np.ndarray] = {}
@@ -1082,10 +1102,12 @@ class SlipstreamLoader:
                     f"  Note: only {frac * 100:.0f}% of this loader's records are in the OS page cache; "
                     f"on a network mount cold reads serialize badly. Consider loader.warmup_cache() first."
                 )
-        if self.use_threading:
-            yield from self._iter_threaded()
-        else:
-            yield from self._iter_simple()
+        it = self._iter_threaded() if self.use_threading else self._iter_simple()
+        if not self.clone:
+            yield from it
+            return
+        for batch in it:
+            yield _owned(batch)
 
     def _iter_simple(self):
         """Simple iteration without threading (for debugging/profiling)."""

@@ -80,7 +80,7 @@ tensors stay valid only until the buffer is reused:
   turns the ring off.
 
 Training loops that consume each batch before asking for the next are unaffected. To keep batches (e.g. collecting
-a dataset into a list), `.clone()` the tensors. `.contiguous()` and `.permute()` are not copies: they can return a view
+a dataset into a list), pass `SlipstreamLoader(..., clone=True)` (0.18.0) or `.clone()` the tensors yourself. `.contiguous()` and `.permute()` are not copies: they can return a view
 of the same buffer. Stale views fail silently: they show another batch's plausible data, not an error.
 
 ### Sequence windows (video frame stores)
