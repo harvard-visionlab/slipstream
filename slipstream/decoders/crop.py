@@ -57,6 +57,9 @@ class DecodeCenterCrop(BatchTransform):
         by ToTorchImage, which transfers contiguous HWC to GPU then permutes.
     """
 
+    #: output may live in pinned memory when ToTorchImage(<cuda>) follows (set by the loader, 0.18.0)
+    pinned_output_ok = True
+
     def __init__(
         self,
         size: int = 224,
@@ -123,6 +126,9 @@ class DecodeRandomResizedCrop(BatchTransform):
         "heights": int32 [B], "widths": int32 [B]}``. See
         :class:`~slipstream.transforms.CollectParams` to put them in the batch.
     """
+
+    #: output may live in pinned memory when ToTorchImage(<cuda>) follows (set by the loader, 0.18.0)
+    pinned_output_ok = True
 
     def __init__(
         self,
@@ -222,6 +228,9 @@ class DecodeDirectRandomResizedCrop(BatchTransform):
         by ToTorchImage, which transfers contiguous HWC to GPU then permutes.
     """
 
+    #: output may live in pinned memory when ToTorchImage(<cuda>) follows (set by the loader, 0.18.0)
+    pinned_output_ok = True
+
     def __init__(
         self,
         size: int = 224,
@@ -303,6 +312,9 @@ class DecodeResizeCrop(BatchTransform):
         Default output (numpy HWC) is optimal for GPU pipelines when followed
         by ToTorchImage, which transfers contiguous HWC to GPU then permutes.
     """
+
+    #: output may live in pinned memory when ToTorchImage(<cuda>) follows (set by the loader, 0.18.0)
+    pinned_output_ok = True
 
     def __init__(
         self,

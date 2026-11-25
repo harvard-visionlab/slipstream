@@ -1,0 +1,77 @@
+"""Pinned output buffers for decoders followed by ``ToTorchImage`` on CUDA (0.18.0).
+
+A decoder whose next pipeline stage is ``ToTorchImage(<cuda>)`` writes its output into pinned host memory
+(the loader enables this; raw decoder output never reaches user code then). ``to_torch_image`` copies such
+a buffer to the GPU asynchronously on a side stream and records an event; the decoder calls :func:`fence`
+before writing its output buffers again, so a buffer is never overwritten while a copy still reads it.
+Only memory allocated here takes the async path: user tensors, pinned or not, keep the synchronous copy.
+"""
+
+from __future__ import annotations
+
+import threading
+import weakref
+
+import numpy as np
+import torch
+
+_lock = threading.Lock()
+_ranges: list[tuple[int, int]] = []           # (start, end) of every pinned buffer allocated here
+_pending: list = []                           # events of async copies that may still read those buffers
+_streams: dict[int, torch.cuda.Stream] = {}   # side stream per CUDA device
+
+
+def zeros(shape) -> np.ndarray:
+    """A zeroed uint8 numpy array in pinned host memory (registered as slipstream-owned)."""
+    t = torch.zeros(shape, dtype=torch.uint8, pin_memory=True)
+    r = (t.data_ptr(), t.data_ptr() + t.numel())
+    with _lock:
+        _ranges.append(r)
+    a = t.numpy()                              # its .base keeps the pinned storage alive
+    weakref.finalize(a.base, _forget, r)       # freed buffer: its address range is no longer ours
+    return a
+
+
+def _forget(r) -> None:
+    with _lock:
+        if r in _ranges:
+            _ranges.remove(r)
+
+
+def owned(t: torch.Tensor) -> bool:
+    """Whether `t` lies in a pinned buffer allocated by :func:`zeros`."""
+    if t.device.type != "cpu":
+        return False
+    p, n = t.data_ptr(), t.numel() * t.element_size()
+    with _lock:
+        return any(s <= p and p + n <= e for s, e in _ranges)
+
+
+def fence() -> None:
+    """Block until every async copy out of slipstream's pinned buffers has finished."""
+    with _lock:
+        evs, _pending[:] = list(_pending), []
+    for ev in evs:
+        ev.synchronize()
+
+
+def to_device_async(t: torch.Tensor, device) -> torch.Tensor:
+    """Copy a slipstream-owned pinned tensor to `device` on a side stream; the caller's current stream
+    waits for it (GPU-side) and the allocator learns that stream uses the result."""
+    device = torch.device(device)
+    if device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    with _lock:
+        s = _streams.get(device.index)
+        if s is None:
+            s = _streams[device.index] = torch.cuda.Stream(device)
+    with torch.cuda.stream(s):
+        out = t.to(device, non_blocking=True)
+        ev = torch.cuda.Event()
+        ev.record(s)
+    with _lock:
+        _pending.append(ev)
+    cur = torch.cuda.current_stream(device)
+    cur.wait_event(ev)
+    out.record_stream(cur)
+    return out

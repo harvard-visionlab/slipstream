@@ -145,6 +145,14 @@ def to_torch_image(b, device="cpu", dtype=torch.float32, **kwargs):
     # transferring non-contiguous data to GPU is very slow (can't use DMA).
     is_gpu = device != "cpu" and device is not None and str(device) != "cpu"
 
+    if is_gpu and b.device.type == "cpu" and b.is_contiguous():
+        from slipstream import _pinned
+        if _pinned.owned(b):                  # a decoder's pinned output buffer: async copy, side stream
+            b = _pinned.to_device_async(b, device)
+            if needs_permute:                 # same arithmetic as the synchronous paths below
+                return (to_channels_first(b) / max_val).to(dtype=dtype)
+            return b.to(dtype=dtype) / max_val
+
     if is_gpu and needs_permute:
         # GPU + HWC: transfer contiguous HWC first, permute on GPU
         b = b.to(device=device)

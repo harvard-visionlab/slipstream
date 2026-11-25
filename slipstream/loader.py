@@ -770,6 +770,8 @@ class SlipstreamLoader:
                     if hasattr(transform, 'set_image_format'):
                         transform.set_image_format(field_format)
 
+        self._enable_pinned_outputs()
+
         # Async decode stage: the primary field's pipeline may start with an object exposing
         # submit()/collect() (e.g. DecodeVideoWindow). The prefetch thread then calls submit()
         # as soon as a batch's bytes are in the bank and the main thread collect()s, so
@@ -954,6 +956,28 @@ class SlipstreamLoader:
             if id(obj) not in seen:
                 seen.add(id(obj))
                 reseed(obj, key)
+
+    def _enable_pinned_outputs(self) -> None:
+        """A decoder immediately followed by ToTorchImage on CUDA writes into pinned host memory, so that
+        copy runs async on a side stream (slipstream._pinned). Its raw output never reaches user code."""
+        if not torch.cuda.is_available():
+            return
+        from slipstream.transforms.conversion import ToTorchImage
+        lists = []
+        for field_name, pipeline in self.pipelines.items():
+            if field_name in self._multi_pipeline_fields:
+                lists.extend(pipeline)
+            else:
+                lists.append(pipeline)
+        for pl in lists:
+            if not isinstance(pl, (list, tuple)):
+                continue
+            for stage, nxt in zip(pl, pl[1:]):
+                dec = getattr(stage, "_decoder", None)
+                if (getattr(stage, "pinned_output_ok", False) and hasattr(dec, "set_pin_output")
+                        and isinstance(nxt, ToTorchImage) and nxt.device is not None
+                        and torch.device(nxt.device).type == "cuda"):
+                    dec.set_pin_output(True)
 
     def _propagate_seed_repeat(self, T: int) -> None:
         """Tell every decoder / augmentation in the pipelines to share random params across T rows."""

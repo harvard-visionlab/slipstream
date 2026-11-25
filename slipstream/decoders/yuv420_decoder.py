@@ -501,19 +501,21 @@ class YUV420NumbaBatchDecoder:
         return self._temp_buffer
 
     def _ensure_dest_buffer(self, batch_size: int, target_h: int, target_w: int) -> np.ndarray:
+        self._fence_output()
         if (self._dest_buffer is None or
             self._dest_buffer.shape[0] < batch_size or
             self._dest_buffer.shape[1] != target_h or
             self._dest_buffer.shape[2] != target_w):
-            self._dest_buffer = np.zeros((batch_size, target_h, target_w, 3), dtype=np.uint8)
+            self._dest_buffer = self._out_zeros((batch_size, target_h, target_w, 3))
         return self._dest_buffer
 
     def _ensure_yuv_dest_buffer(self, batch_size: int, target_h: int, target_w: int) -> np.ndarray:
+        self._fence_output()
         if (self._yuv_dest_buffer is None or
             self._yuv_dest_buffer.shape[0] < batch_size or
             self._yuv_dest_buffer.shape[1] != target_h or
             self._yuv_dest_buffer.shape[2] != target_w):
-            self._yuv_dest_buffer = np.zeros((batch_size, target_h, target_w, 3), dtype=np.uint8)
+            self._yuv_dest_buffer = self._out_zeros((batch_size, target_h, target_w, 3))
         return self._yuv_dest_buffer
 
     def decode_batch_to_buffer(
@@ -869,12 +871,35 @@ class YUV420NumbaBatchDecoder:
             results.append(buf[:B])
         return results
 
+    pin_output = False      # set by the loader when ToTorchImage(<cuda>) follows (slipstream._pinned)
+
+    def set_pin_output(self, on: bool) -> None:
+        """Allocate the output buffers in pinned memory (async HtoD in ToTorchImage); resets them."""
+        if bool(on) != self.pin_output:
+            self._fence_output()
+            self.pin_output = bool(on)
+            self._dest_buffer = self._chw_buffer = None
+            if hasattr(self, "_yuv_dest_buffer"):
+                self._yuv_dest_buffer = None
+
+    def _out_zeros(self, shape):
+        if self.pin_output:
+            from slipstream import _pinned
+            return _pinned.zeros(shape)
+        return np.zeros(shape, dtype=np.uint8)
+
+    def _fence_output(self) -> None:
+        if self.pin_output:
+            from slipstream import _pinned
+            _pinned.fence()
+
     def _ensure_chw_buffer(self, batch_size: int, target_h: int, target_w: int) -> np.ndarray:
+        self._fence_output()
         if (self._chw_buffer is None or
             self._chw_buffer.shape[0] < batch_size or
             self._chw_buffer.shape[2] != target_h or
             self._chw_buffer.shape[3] != target_w):
-            self._chw_buffer = np.zeros((batch_size, 3, target_h, target_w), dtype=np.uint8)
+            self._chw_buffer = self._out_zeros((batch_size, 3, target_h, target_w))
         return self._chw_buffer
 
     def hwc_to_chw(
