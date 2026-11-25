@@ -374,8 +374,6 @@ class DecodeVideoWindow(BatchTransform):
         """Worker: decode record i into the batch buffers; the last worker to finish starts the HtoD copy."""
         try:
             self._decode_record(pend, i, raw, t0_given, seed_i)
-            if self._stage_host:
-                self._copy_record_h2d(pend, i)
         except BaseException:
             pend.failed = True
             raise
@@ -384,7 +382,7 @@ class DecodeVideoWindow(BatchTransform):
                 pend.remaining -= 1
                 last = pend.remaining == 0
             if last and self._stage_host and not pend.failed and pend.out is not None:
-                self._finish_batch_h2d(pend)
+                self._start_h2d(pend)
 
     def _decode_record(self, pend: _PendingBatch, i: int, raw: bytes, t0_given: float | None, seed_i: int) -> None:
         data, pts, t0 = self._decode_one(raw, t0_given, seed_i)     # [T, 3, H, W]: torchcodec's CHW view of HWC memory
@@ -436,33 +434,21 @@ class DecodeVideoWindow(BatchTransform):
                 self._ring[(self._ring_pos - 1) % self.ring_size] = buf
             return buf
 
-    def _side_stream(self):
-        if self._h2d_stream is None:
-            with self._ring_lock:
-                if self._h2d_stream is None:
-                    self._h2d_stream = torch.cuda.Stream(self.output_device)
-        return self._h2d_stream
-
-    def _copy_record_h2d(self, pend: _PendingBatch, i: int) -> None:
-        """Worker: async copy of record i (pinned host slot -> the batch's CUDA tensor) on the side stream, as
-        soon as it is decoded, so copies overlap the other records' decoding. Enqueued before this worker
-        counts itself done, so the last worker's event follows every copy of the batch."""
-        s = self._side_stream()
-        with torch.cuda.device(self.output_device), torch.cuda.stream(s):
-            with pend.lock:
-                if pend.dev_out is None:                 # allocated on the side stream (record_stream on use)
-                    pend.dev_out = torch.empty(pend.out.shape, dtype=pend.out.dtype, device=self.output_device)
-            pend.dev_out[i].copy_(pend.out[i], non_blocking=True)
-
-    def _finish_batch_h2d(self, pend: _PendingBatch) -> None:
-        """Worker (last of the batch): event after all the batch's copies; fences the host slot until then."""
-        s = self._side_stream()
+    def _start_h2d(self, pend: _PendingBatch) -> None:
+        """Worker (last of the batch): one async copy of the pinned host batch on the side stream, so it
+        overlaps the consumer; the host slot stays fenced by the event until the copy has read it."""
         with torch.cuda.device(self.output_device):
-            ev = torch.cuda.Event()
-            ev.record(s)
+            if self._h2d_stream is None:
+                with self._ring_lock:
+                    if self._h2d_stream is None:
+                        self._h2d_stream = torch.cuda.Stream()
+            with torch.cuda.stream(self._h2d_stream):
+                out = pend.out.to(self.output_device, non_blocking=True)
+                ev = torch.cuda.Event()
+                ev.record(self._h2d_stream)
         with self._ring_lock:
             self._slot_events[pend.out.data_ptr()] = ev
-        pend.dev_event = ev
+        pend.dev_out, pend.dev_event = out, ev
 
     def _finish_h2d(self, pend: _PendingBatch) -> torch.Tensor:
         """Consumer thread: its current stream waits for the copy (GPU-side, the CPU does not block), and the
