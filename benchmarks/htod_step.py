@@ -3,7 +3,8 @@
 The release gate runs on an idle GPU, so it cannot show whether a CPU->GPU batch copy stalls training. This
 bench mimics a trainer: per step it takes a batch and queues `--compute-ms` of GPU work (bf16 matmuls) that
 reads the batch, and it waits for the previous step's work (one step in flight, like a lagged loss log).
-Prints one line: median ms/step with the spread, plus the GPU-busy reference (compute alone).
+Prints one line: mean and median ms/step with the spread. `none` runs the compute alone: the reference (on an
+A6000 the calibrated "100 ms" runs ~112 ms under sustained load).
 
 Video (DecodeVideoWindow, CPU decode, output on cuda), needs torchcodec::
 
@@ -72,7 +73,7 @@ def main() -> None:
     warnings.simplefilter("ignore")
     import torch
     ap = argparse.ArgumentParser()
-    ap.add_argument("kind", choices=["video", "image"])
+    ap.add_argument("kind", choices=["video", "image", "none"], help="none: compute only (the reference)")
     ap.add_argument("--compute-ms", type=float, default=100.0)
     ap.add_argument("--steps", type=int, default=60)
     ap.add_argument("--warmup", type=int, default=10)
@@ -90,7 +91,12 @@ def main() -> None:
     torch.set_num_threads(1) if a.kind == "video" else None
 
     work, est = _matmul_work(a.compute_ms)
-    loader, key = (_video_loader if a.kind == "video" else _image_loader)(a)
+    if a.kind == "none":
+        x = torch.zeros(8, dtype=torch.uint8, device="cuda")
+        loader, key = type("L", (), {"__iter__": lambda self: iter(lambda: {"x": x}, None),
+                                     "shutdown": lambda self: None})(), "x"
+    else:
+        loader, key = (_video_loader if a.kind == "video" else _image_loader)(a)
     times, prev = [], None
     it = iter(loader)
     try:
@@ -113,8 +119,8 @@ def main() -> None:
     del out
     q = statistics.quantiles(times, n=10)
     shape = tuple(b[key].shape)
-    print(f"{a.kind} {shape} compute {est:.0f} ms: step median {statistics.median(times):.1f} ms "
-          f"(p10 {q[0]:.1f}, p90 {q[-1]:.1f}, n={len(times)})", flush=True)
+    print(f"{a.kind} {shape} compute {est:.0f} ms: step mean {statistics.fmean(times):.1f}, median "
+          f"{statistics.median(times):.1f} ms (p10 {q[0]:.1f}, p90 {q[-1]:.1f}, n={len(times)})", flush=True)
 
 
 if __name__ == "__main__":
