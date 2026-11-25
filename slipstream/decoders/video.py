@@ -77,7 +77,8 @@ def _load_torchcodec():
 class _PendingBatch:
     """One submitted batch: decode futures plus the output buffers the workers fill."""
 
-    __slots__ = ("B", "T", "field", "indices", "futures", "out", "t_sec", "t0", "lock")
+    __slots__ = ("B", "T", "field", "indices", "futures", "out", "t_sec", "t0", "lock", "remaining", "failed",
+                 "dev_out", "dev_event")
 
     def __init__(self, B: int, T: int, field: str, indices):
         self.B, self.T, self.field, self.indices = B, T, field, indices
@@ -86,6 +87,10 @@ class _PendingBatch:
         self.t_sec = torch.empty(B, T, dtype=torch.float32)
         self.t0 = torch.empty(B, dtype=torch.float32)
         self.lock = threading.Lock()
+        self.remaining = B                               # workers still running (the last one starts the HtoD copy)
+        self.failed = False
+        self.dev_out: torch.Tensor | None = None         # staged CUDA copy of `out`, and its completion event
+        self.dev_event = None
 
 
 class DecodeVideoWindow(BatchTransform):
@@ -213,6 +218,7 @@ class DecodeVideoWindow(BatchTransform):
         self._stage_host = (self.output_device.type == "cuda" and all(d.type == "cpu" for d in self.devices)
                             and torch.cuda.is_available())
         self._slot_events: dict[int, Any] = {}      # host slot data_ptr -> event after its last HtoD copy
+        self._h2d_stream = None                     # side stream for those copies (created on first use)
         if num_workers is None:
             n_cuda = sum(d.type == "cuda" for d in self.devices)
             n_cpu = len(self.devices) - n_cuda
@@ -365,7 +371,20 @@ class DecodeVideoWindow(BatchTransform):
         return fb.data, fb.pts_seconds.to(torch.float32), t0
 
     def _decode_into(self, pend: _PendingBatch, i: int, raw: bytes, t0_given: float | None, seed_i: int) -> None:
-        """Worker: decode record i of the batch and write it into the batch buffers."""
+        """Worker: decode record i into the batch buffers; the last worker to finish starts the HtoD copy."""
+        try:
+            self._decode_record(pend, i, raw, t0_given, seed_i)
+        except BaseException:
+            pend.failed = True
+            raise
+        finally:
+            with pend.lock:
+                pend.remaining -= 1
+                last = pend.remaining == 0
+            if last and self._stage_host and not pend.failed and pend.out is not None:
+                self._start_h2d(pend)
+
+    def _decode_record(self, pend: _PendingBatch, i: int, raw: bytes, t0_given: float | None, seed_i: int) -> None:
         data, pts, t0 = self._decode_one(raw, t0_given, seed_i)     # [T, 3, H, W]: torchcodec's CHW view of HWC memory
         hwc = data.permute(0, 2, 3, 1)                                 # back to the native, contiguous layout
         with pend.lock:
@@ -415,15 +434,29 @@ class DecodeVideoWindow(BatchTransform):
                 self._ring[(self._ring_pos - 1) % self.ring_size] = buf
             return buf
 
-    def _to_output_device(self, host: torch.Tensor) -> torch.Tensor:
-        """One async HtoD copy of a pinned host batch on the current stream; its slot is fenced until done."""
+    def _start_h2d(self, pend: _PendingBatch) -> None:
+        """Worker (last of the batch): one async copy of the pinned host batch on the side stream, so it
+        overlaps the consumer; the host slot stays fenced by the event until the copy has read it."""
         with torch.cuda.device(self.output_device):
-            out = host.to(self.output_device, non_blocking=True)
-            ev = torch.cuda.Event()
-            ev.record()
+            if self._h2d_stream is None:
+                with self._ring_lock:
+                    if self._h2d_stream is None:
+                        self._h2d_stream = torch.cuda.Stream()
+            with torch.cuda.stream(self._h2d_stream):
+                out = pend.out.to(self.output_device, non_blocking=True)
+                ev = torch.cuda.Event()
+                ev.record(self._h2d_stream)
         with self._ring_lock:
-            self._slot_events[host.data_ptr()] = ev
-        return out
+            self._slot_events[pend.out.data_ptr()] = ev
+        pend.dev_out, pend.dev_event = out, ev
+
+    def _finish_h2d(self, pend: _PendingBatch) -> torch.Tensor:
+        """Consumer thread: its current stream waits for the copy (GPU-side, the CPU does not block), and the
+        allocator learns that stream uses the tensor."""
+        cur = torch.cuda.current_stream(self.output_device)
+        cur.wait_event(pend.dev_event)
+        pend.dev_out.record_stream(cur)
+        return pend.dev_out
 
     # ------------------------------------------------------------- async API
     def submit(self, batch_data: dict[str, Any]) -> _PendingBatch:
@@ -460,7 +493,7 @@ class DecodeVideoWindow(BatchTransform):
         if frames is None:                                            # B == 0
             frames = torch.empty((0, self.T, 0, 0, 3), dtype=torch.uint8, device=self.output_device)
         elif self._stage_host:
-            frames = self._to_output_device(frames)                   # fresh CUDA tensor per batch
+            frames = self._finish_h2d(pend)                           # fresh CUDA tensor per batch
         frames = frames.permute(0, 1, 4, 2, 3)                        # [B, T, 3, H, W] view over HWC memory
 
         if self.transforms and pend.B:
