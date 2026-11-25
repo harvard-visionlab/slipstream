@@ -28,7 +28,8 @@ All notable changes to slipstream are documented here. Versions follow
     pageable copy per record from the workers on the default stream, serialized with training. The CUDA frames are
     now a fresh tensor per batch.
     - machina, A6000, SpatialVID 16x32x168x224 with 100 ms GPU compute per step: overhead 4.3 -> 0.6 ms, no more
-      3-220 ms per-step swings. Decode-only time unchanged.
+      3-220 ms per-step swings. With no GPU work at all (decode-bound), ~0.4 ms/step (1.5%) slower: the copy
+      starts after the batch's last record (per-record copies were tried and were slower, 3.7%).
   - Image decoders (`DecodeCenterCrop`, `DecodeRandomResizedCrop`, `DecodeDirectRandomResizedCrop`,
     `DecodeResizeCrop`) followed directly by `ToTorchImage(<cuda>)` write into pinned buffers (`slipstream._pinned`).
     `to_torch_image` copies them async. A decoder fences in-flight copies before it rewrites its buffers. Raw
