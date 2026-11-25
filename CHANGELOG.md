@@ -19,6 +19,25 @@ All notable changes to slipstream are documented here. Versions follow
     video decode; pipelines ending in `ToTorchImage` do not need it.
   - Tests: `tests/test_loader_clone.py` and `test_loader_clone_keeps_video_batches`.
 
+### Performance
+
+- CPU-to-GPU batch copies are now pinned and async, on a side stream (reported by model-rearing: a pageable HtoD
+  copy took ~16 ms of a 257 ms H100 step). Automatic, no API change; output byte-identical.
+  - `DecodeVideoWindow` with CPU decode and a CUDA `output_device`: workers decode into a pinned host ring. The
+    batch's last worker issues one async copy, and the consumer's stream waits on an event. Before, there was one
+    pageable copy per record from the workers on the default stream, serialized with training. The CUDA frames are
+    now a fresh tensor per batch.
+    - machina, A6000, SpatialVID 16x32x168x224 with 100 ms GPU compute per step: overhead 4.3 -> 0.6 ms, no more
+      3-220 ms per-step swings. Decode-only time unchanged.
+  - Image decoders (`DecodeCenterCrop`, `DecodeRandomResizedCrop`, `DecodeDirectRandomResizedCrop`,
+    `DecodeResizeCrop`) followed directly by `ToTorchImage(<cuda>)` write into pinned buffers (`slipstream._pinned`).
+    `to_torch_image` copies them async. A decoder fences in-flight copies before it rewrites its buffers. Raw
+    decoder output that reaches user code is never pinned.
+    - machina, batch 512: loader alone 19.4 -> 14.4 ms/step; with 100 ms compute, 120.2 -> 115.2 ms.
+    - Release gate, warm: steps D-G up 13-33% (jpeg and yuv420); other steps unchanged.
+  - Bench: `benchmarks/htod_step.py` (step time under a busy GPU; `none` = compute-only reference).
+  - Tests: `tests/test_pinned_htod.py`, `test_cuda_output_staged_matches_cpu_output` (CUDA, machina).
+
 ### Documentation
 
 - README and `SlipstreamLoader` docstring: buffer lifetime ("batches are borrowed, not owned").
