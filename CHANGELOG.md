@@ -14,6 +14,9 @@ All notable changes to slipstream are documented here. Versions follow
     `DecodeVideoWindow`'s ring wraps after about `batches_ahead` + 2 batches. Code that kept batches therefore got
     other batches' data silently: tjepa-redux, 6,016 of 6,400 windows.
   - Default False: training loops are unchanged and pay nothing.
+  - Cost when on, measured on machina (imagenet1k val, raw uint8 RRC 224, batch 512): jpeg 40.8k -> 21.4k img/s
+    (0.53x), yuv420 39.6k -> 24.3k (0.61x). Copying a batch into fresh memory takes about 9 ms. Negligible next to
+    video decode; pipelines ending in `ToTorchImage` do not need it.
   - Tests: `tests/test_loader_clone.py` and `test_loader_clone_keeps_video_batches`.
 
 ### Documentation
