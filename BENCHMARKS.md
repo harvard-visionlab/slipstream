@@ -758,3 +758,39 @@ DecodeVideoWindow aug_mode, RRC224(0.2,1) + flip + ToFloatDiv + HSV jitter p=0.8
 | --- | --- | ---: | ---: | ---: |
 | cuda | 32 x 16 | 8,444 | 8,456 | 1.001 |
 | cpu | 32 x 16 | 264 | 266 | 1.007 |
+
+### v0.18.0 (bc82da8), machina, 2026-11-24
+
+64 CPUs, numba 0.67.0, torch 2.14.0+cu126, NVIDIA RTX A6000; before: load1=1.7 gpu%=[0, 0], after: load1=19.9 gpu%=[0, 0]
+
+| fmt | step | pipeline | cold v0.17.0 | cold v0.18.0 | ratio | warm v0.17.0 | warm v0.18.0 | ratio |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| jpeg | A | RRC only, uint8 CPU, sequential, simple | 14,281 | 15,223 | 1.07x | 38,865 | 39,015 | 1.00x |
+| jpeg | B | + threaded prefetch | 21,324 | 21,837 | 1.02x | 41,410 | 41,254 | 1.00x |
+| jpeg | C | + shuffle | 15,646 | 15,482 | 0.99x | 42,065 | 41,628 | 0.99x |
+| jpeg | D | + ToTorchImage fp32 | 13,364 | 14,758 | 1.10x | 27,801 | 35,067 | 1.26x |
+| jpeg | E | + Normalize fp32 | 13,528 | 14,721 | 1.09x | 27,459 | 35,006 | 1.27x |
+| jpeg | F | ToTorchImage/Normalize bf16 | 13,625 | 14,749 | 1.08x | 27,566 | 35,090 | 1.27x |
+| jpeg | G | + RandomHorizontalFlip | 12,754 | 13,463 | 1.06x | 24,225 | 28,024 | 1.16x |
+| jpeg | G@160 | + RandomHorizontalFlip @ 160px | 14,392 | 14,768 | 1.03x | 30,499 | 34,214 | 1.12x |
+| jpeg | G@192 | + RandomHorizontalFlip @ 192px | 13,514 | 14,056 | 1.04x | 26,340 | 31,372 | 1.19x |
+| jpeg | M | multicrop 2x224 + 4x98, uint8 CPU | 12,169 | 12,257 | 1.01x | 21,942 | 22,134 | 1.01x |
+| jpeg | Mf | multicrop, crop_mode='ffcv' | 12,345 | 12,273 | 0.99x | 21,444 | 22,164 | 1.03x |
+| yuv420 | A | RRC only, uint8 CPU, sequential, simple | 16,036 | 15,499 | 0.97x | 46,483 | 45,898 | 0.99x |
+| yuv420 | B | + threaded prefetch | 14,056 | 14,104 | 1.00x | 54,147 | 54,242 | 1.00x |
+| yuv420 | C | + shuffle | 10,470 | 10,517 | 1.00x | 54,127 | 54,408 | 1.01x |
+| yuv420 | D | + ToTorchImage fp32 | 10,230 | 10,468 | 1.02x | 32,946 | 43,798 | 1.33x |
+| yuv420 | E | + Normalize fp32 | 10,247 | 10,480 | 1.02x | 32,692 | 43,623 | 1.33x |
+| yuv420 | F | ToTorchImage/Normalize bf16 | 10,175 | 10,438 | 1.03x | 32,154 | 43,574 | 1.36x |
+| yuv420 | G | + RandomHorizontalFlip | 9,959 | 10,247 | 1.03x | 27,356 | 33,242 | 1.22x |
+| yuv420 | G@160 | + RandomHorizontalFlip @ 160px | 10,495 | 10,601 | 1.01x | 37,575 | 42,864 | 1.14x |
+| yuv420 | G@192 | + RandomHorizontalFlip @ 192px | 10,285 | 10,517 | 1.02x | 32,039 | 37,834 | 1.18x |
+| yuv420 | M | multicrop 2x224 + 4x98, uint8 CPU | 9,536 | 9,528 | 1.00x | 25,484 | 25,106 | 0.99x |
+| yuv420 | Mf | multicrop, crop_mode='ffcv' | 9,630 | 9,546 | 0.99x | 25,241 | 25,170 | 1.00x |
+
+DecodeVideoWindow aug_mode, RRC224(0.2,1) + flip + ToFloatDiv + HSV jitter p=0.8 + grayscale p=0.2 (frames/s, transforms only):
+
+| device | B x T | clip | frame | frame/clip |
+| --- | --- | ---: | ---: | ---: |
+| cuda | 32 x 16 | 8,440 | 8,452 | 1.001 |
+| cpu | 32 x 16 | 281 | 283 | 1.005 |
