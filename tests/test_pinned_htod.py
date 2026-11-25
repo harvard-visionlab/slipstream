@@ -14,7 +14,7 @@ from tests.test_ssl_params import _cache
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 
-def _run(fmt, make, pinned, dtype=torch.float32):
+def _run(fmt, make, pinned, dtype=torch.float32, check_count=True):
     from slipstream import SlipstreamDataset
     path = _cache(fmt)
     if path is None:
@@ -43,7 +43,8 @@ def _run(fmt, make, pinned, dtype=torch.float32):
     finally:
         loader.shutdown()
     n_async = _pinned.async_copies - n0
-    assert n_async == (len(out) if pinned else 0), (n_async, len(out))   # the async path really ran
+    if check_count:                                  # the async path really ran (counter is process-wide)
+        assert n_async == (len(out) if pinned else 0), (n_async, len(out))
     return out, dec.pin_output
 
 
@@ -89,7 +90,7 @@ def test_two_loaders_two_threads():
 
     def work(k):
         try:
-            results[k], _ = _run("jpeg", make, pinned=True)
+            results[k], _ = _run("jpeg", make, pinned=True, check_count=False)
         except BaseException as e:  # noqa: BLE001
             errors.append(e)
     ts = [threading.Thread(target=work, args=(k,)) for k in range(2)]
