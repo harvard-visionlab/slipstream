@@ -4,7 +4,7 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
-## [0.18.0] - unreleased
+## [0.18.0] - 2026-11-24
 
 ### Added
 
@@ -36,6 +36,8 @@ All notable changes to slipstream are documented here. Versions follow
     decoder output that reaches user code is never pinned.
     - machina, batch 512: loader alone 19.4 -> 14.4 ms/step; with 100 ms compute, 120.2 -> 115.2 ms.
     - Release gate, warm: steps D-G up 13-33% (jpeg and yuv420); other steps unchanged.
+  - H100 (model-rearing, 4x H100, warm epochs, vs 0.17.0): video tjepa_wm_v3a_bnlat 171.0 -> 140.2 ms/step (-18%);
+    image alexnet_pregn32 batch 512/GPU 66.6 -> 63.9 ms/step (-4.1%).
   - Bench: `benchmarks/htod_step.py` (step time under a busy GPU; `none` = compute-only reference).
   - Tests: `tests/test_pinned_htod.py`, `test_cuda_output_staged_matches_cpu_output` (CUDA, machina).
 
