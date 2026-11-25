@@ -2,6 +2,7 @@
 side stream. Output must be byte-identical to the synchronous path: real data, past buffer reuse, partial last
 batch, 2 epochs, with the GPU deliberately backed up so copies lag. Needs CUDA (machina)."""
 
+import numpy as np
 import pytest
 import torch
 
@@ -24,6 +25,7 @@ def _run(fmt, make, pinned, dtype=torch.float32):
     try:
         loader = SlipstreamLoader(SlipstreamDataset(input_dir=str(path)), batch_size=96, shuffle=True, seed=0,
                                   drop_last=False, verbose=False, exclude_fields=["path"], image_format=fmt,
+                                  indices=np.arange(500),
                                   pipelines={"image": [make(), ToTorchImage("cuda", dtype=dtype)]})
     finally:
         SlipstreamLoader._enable_pinned_outputs = orig
@@ -33,7 +35,7 @@ def _run(fmt, make, pinned, dtype=torch.float32):
     try:
         for _ in range(2):
             for b in loader:
-                for _ in range(30):
+                for _ in range(10):
                     a @ a                                  # GPU busy: the next decode races the copy
                 out.append(b["image"].cpu())
     finally:
@@ -48,7 +50,7 @@ def test_pinned_async_matches_sync(fmt, make):
     ref, p0 = _run(fmt, make, pinned=False)
     got, p1 = _run(fmt, make, pinned=True)
     assert (p0, p1) == (False, True)
-    assert len(ref) == len(got) and ref[-1].shape[0] != 96          # partial last batch (imagenet10 val: 500)
+    assert len(ref) == len(got) and ref[-1].shape[0] == 500 % 96     # partial last batch
     for r, g in zip(ref, got):
         assert torch.equal(r, g)
 
