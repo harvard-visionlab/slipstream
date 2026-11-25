@@ -233,6 +233,36 @@ class TestDecodeVideoWindow:
             intact = all(torch.equal(v, s) for v, s in kept)
             assert intact == clone, (clone, intact)
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+    def test_cuda_output_staged_matches_cpu_output(self, tmp_path):
+        """0.18.0: CPU decode + CUDA output goes through a pinned host ring and one async copy. Byte-identical
+        to CPU output, past ring wraps, partial last batch, 2 epochs, with the GPU backed up so copies lag."""
+        ds = MockVideoStore(cache_path=tmp_path / "cache")
+        a = torch.randn(2048, 2048, device="cuda")
+
+        def run(out_dev, busy):
+            stage = DecodeVideoWindow(T=4, rate_hz=10.0, seed=3, num_workers=2, ring_size=2, output_device=out_dev)
+            loader = SlipstreamLoader(ds, batch_size=2, shuffle=True, seed=0, drop_last=False, verbose=False,
+                                      batches_ahead=1, pipelines={"video": [stage]})
+            got = []
+            try:
+                for _ in range(2):
+                    for b in loader:
+                        if busy:
+                            for _ in range(20):
+                                a @ a                      # queue GPU work ahead of the copies
+                        got.append(b["video"].to("cpu", copy=True))
+            finally:
+                loader.shutdown()
+            assert stage._stage_host == (out_dev == "cuda")
+            return got
+
+        ref = run("cpu", False)
+        got = run("cuda", True)
+        assert len(ref) == len(got) == 6 and ref[-1].shape[0] == 1          # 5 records: 2 epochs x (2, 2, 1)
+        for r, g in zip(ref, got):
+            assert torch.equal(r, g)
+
     def test_aug_mode_required_with_transforms(self):
         with pytest.raises(ValueError, match="aug_mode"):
             DecodeVideoWindow(T=4, rate_hz=10.0, transforms=[RandomHorizontalFlip(seed=1)])

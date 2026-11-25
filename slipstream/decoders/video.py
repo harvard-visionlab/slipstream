@@ -128,7 +128,10 @@ class DecodeVideoWindow(BatchTransform):
             +3 %). A batch's frames are then overwritten ``ring_size`` batches
             later, like the loader's own JPEG banks: do not keep references
             across batches without ``.clone()``. The loader sizes the ring to its
-            ``batches_ahead`` automatically (``set_batches_ahead``).
+            ``batches_ahead`` automatically (``set_batches_ahead``). With CPU
+            decoding and a CUDA ``output_device`` (0.18.0) the ring is pinned host
+            memory that stages one async copy per batch, and the CUDA frames
+            returned are a fresh tensor each batch.
         ring_size: Minimum buffers in the ring (default 6).
         name: Output key prefix when the batch does not carry the field name.
 
@@ -205,6 +208,11 @@ class DecodeVideoWindow(BatchTransform):
         self.device = self.devices[0]
         self.is_cuda = any(d.type == "cuda" for d in self.devices)      # any CUDA worker present
         self.output_device = torch.device(output_device) if output_device is not None else self.device
+        # CPU decode, CUDA output: decode into a pinned host ring and move each batch with one async copy
+        # (per-record pageable copies from the workers serialized with training on the default stream)
+        self._stage_host = (self.output_device.type == "cuda" and all(d.type == "cpu" for d in self.devices)
+                            and torch.cuda.is_available())
+        self._slot_events: dict[int, Any] = {}      # host slot data_ptr -> event after its last HtoD copy
         if num_workers is None:
             n_cuda = sum(d.type == "cuda" for d in self.devices)
             n_cpu = len(self.devices) - n_cuda
@@ -377,23 +385,45 @@ class DecodeVideoWindow(BatchTransform):
         pend.t_sec[i] = pts
         pend.t0[i] = float(t0)
 
+    def _alloc(self, shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+        if self._stage_host:
+            return torch.empty(shape, dtype=dtype, pin_memory=True)
+        return torch.empty(shape, dtype=dtype, device=self.output_device)
+
     def _output_buffer(self, shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
-        """A [B, T, H, W, 3] output tensor (native HWC memory): fresh, or the next slot of the reuse ring."""
-        if not self.reuse_output:
-            return torch.empty(shape, dtype=dtype, device=self.output_device)
+        """A [B, T, H, W, 3] buffer the workers fill (native HWC memory): fresh, or the next slot of the ring.
+
+        With host staging (CPU decode, CUDA output) the ring is pinned host memory, used even with
+        ``reuse_output=False`` (the CUDA output is then fresh per batch anyway), and a recycled slot is
+        handed out only after the async copy that last read it has finished."""
+        if not self.reuse_output and not self._stage_host:
+            return self._alloc(shape, dtype)
         with self._ring_lock:
             if len(self._ring) < self.ring_size:
-                buf = torch.empty(shape, dtype=dtype, device=self.output_device)
+                buf = self._alloc(shape, dtype)
                 self._ring.append(buf)
                 return buf
             buf = self._ring[self._ring_pos]
             self._ring_pos = (self._ring_pos + 1) % self.ring_size
+            ev = self._slot_events.pop(buf.data_ptr(), None)
+            if ev is not None:
+                ev.synchronize()                                       # never overwrite a slot mid-copy
             if tuple(buf.shape) != tuple(shape) or buf.dtype != dtype:      # last partial batch etc.
                 if buf.numel() >= int(np.prod(shape)) and buf.dtype == dtype:
                     return buf.flatten()[: int(np.prod(shape))].view(shape)
-                buf = torch.empty(shape, dtype=dtype, device=self.output_device)
+                buf = self._alloc(shape, dtype)
                 self._ring[(self._ring_pos - 1) % self.ring_size] = buf
             return buf
+
+    def _to_output_device(self, host: torch.Tensor) -> torch.Tensor:
+        """One async HtoD copy of a pinned host batch on the current stream; its slot is fenced until done."""
+        with torch.cuda.device(self.output_device):
+            out = host.to(self.output_device, non_blocking=True)
+            ev = torch.cuda.Event()
+            ev.record()
+        with self._ring_lock:
+            self._slot_events[host.data_ptr()] = ev
+        return out
 
     # ------------------------------------------------------------- async API
     def submit(self, batch_data: dict[str, Any]) -> _PendingBatch:
@@ -429,6 +459,8 @@ class DecodeVideoWindow(BatchTransform):
         frames = pend.out
         if frames is None:                                            # B == 0
             frames = torch.empty((0, self.T, 0, 0, 3), dtype=torch.uint8, device=self.output_device)
+        elif self._stage_host:
+            frames = self._to_output_device(frames)                   # fresh CUDA tensor per batch
         frames = frames.permute(0, 1, 4, 2, 3)                        # [B, T, 3, H, W] view over HWC memory
 
         if self.transforms and pend.B:
