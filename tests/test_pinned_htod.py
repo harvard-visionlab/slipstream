@@ -29,6 +29,8 @@ def _run(fmt, make, pinned, dtype=torch.float32):
                                   pipelines={"image": [make(), ToTorchImage("cuda", dtype=dtype)]})
     finally:
         SlipstreamLoader._enable_pinned_outputs = orig
+    from slipstream import _pinned
+    n0 = _pinned.async_copies
     dec = loader.pipelines["image"][0]._decoder
     a = torch.randn(2048, 2048, device="cuda")
     out = []
@@ -40,6 +42,8 @@ def _run(fmt, make, pinned, dtype=torch.float32):
                 out.append(b["image"].cpu())
     finally:
         loader.shutdown()
+    n_async = _pinned.async_copies - n0
+    assert n_async == (len(out) if pinned else 0), (n_async, len(out))   # the async path really ran
     return out, dec.pin_output
 
 
@@ -73,4 +77,42 @@ def test_not_pinned_without_cuda_consumer():
         loader = SlipstreamLoader(SlipstreamDataset(input_dir=str(path)), batch_size=64, verbose=False,
                                   exclude_fields=["path"], pipelines={"image": pipe})
         assert not pipe[0]._decoder.pin_output
+        loader.shutdown()
+
+
+def test_two_loaders_two_threads():
+    """fence() is global: two pinned loaders iterated concurrently must not drop each other's in-flight copies."""
+    import threading
+    make = lambda: DecodeRandomResizedCrop(size=64, seed=1)  # noqa: E731
+    ref, _ = _run("jpeg", make, pinned=False)
+    results, errors = {}, []
+
+    def work(k):
+        try:
+            results[k], _ = _run("jpeg", make, pinned=True)
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+    ts = [threading.Thread(target=work, args=(k,)) for k in range(2)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert not errors, errors
+    for k in range(2):
+        assert all(torch.equal(r, g) for r, g in zip(ref, results[k]))
+
+
+def test_presets_get_pinned():
+    """The shipped pipelines (decoder then ToTorchImage on CUDA) take the async path."""
+    from slipstream import SlipstreamDataset
+    from slipstream.pipelines import supervised_train
+    path = _cache("jpeg")
+    if path is None:
+        pytest.skip("no real jpeg val cache")
+    pipes = supervised_train(64, device="cuda")
+    loader = SlipstreamLoader(SlipstreamDataset(input_dir=str(path)), batch_size=64, verbose=False,
+                              exclude_fields=["path"], pipelines=pipes)
+    try:
+        decs = [getattr(s, "_decoder", None) for pl in loader.pipelines.values() if isinstance(pl, list) for s in pl]
+        assert any(getattr(d, "pin_output", False) for d in decs), [type(s).__name__ for pl in
+                                                                     loader.pipelines.values() for s in pl]
+    finally:
         loader.shutdown()

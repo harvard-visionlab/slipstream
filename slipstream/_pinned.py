@@ -15,10 +15,11 @@ import weakref
 import numpy as np
 import torch
 
-_lock = threading.Lock()
+_lock = threading.RLock()                     # re-entrant: _forget can run from a GC pass inside a locked region
 _ranges: list[tuple[int, int]] = []           # (start, end) of every pinned buffer allocated here
 _pending: list = []                           # events of async copies that may still read those buffers
 _streams: dict[int, torch.cuda.Stream] = {}   # side stream per CUDA device
+async_copies = 0                              # count of async copies issued (tests check the path was taken)
 
 
 def zeros(shape) -> np.ndarray:
@@ -50,9 +51,15 @@ def owned(t: torch.Tensor) -> bool:
 def fence() -> None:
     """Block until every async copy out of slipstream's pinned buffers has finished."""
     with _lock:
-        evs, _pending[:] = list(_pending), []
-    for ev in evs:
-        ev.synchronize()
+        evs = list(_pending)
+    for ev in evs:                            # wait first, remove after: a concurrent fence() in another thread
+        ev.synchronize()                      # must never find the list empty while a copy still runs
+    with _lock:
+        for ev in evs:
+            try:
+                _pending.remove(ev)
+            except ValueError:                # another thread's fence() already removed it
+                pass
 
 
 def to_device_async(t: torch.Tensor, device) -> torch.Tensor:
@@ -69,8 +76,10 @@ def to_device_async(t: torch.Tensor, device) -> torch.Tensor:
         out = t.to(device, non_blocking=True)
         ev = torch.cuda.Event()
         ev.record(s)
+    global async_copies
     with _lock:
         _pending.append(ev)
+        async_copies += 1
     cur = torch.cuda.current_stream(device)
     cur.wait_event(ev)
     out.record_stream(cur)
