@@ -824,6 +824,7 @@ class SlipstreamLoader:
         # Track worker thread + stop event for cleanup between iterations
         self._worker_thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
+        self._output_queue: queue.Queue | None = None
 
     def _generate_indices(self, epoch: int) -> np.ndarray:
         """Generate sample indices for an epoch.
@@ -972,12 +973,18 @@ class SlipstreamLoader:
         for pl in lists:
             if not isinstance(pl, (list, tuple)):
                 continue
+            for stage in pl:
+                if getattr(stage, "_stage_host", False):     # video ring in pinned memory: release at exit
+                    from slipstream import _pinned
+                    _pinned.register_loader(self)
             for stage, nxt in zip(pl, pl[1:]):
                 dec = getattr(stage, "_decoder", None)
                 if (getattr(stage, "pinned_output_ok", False) and hasattr(dec, "set_pin_output")
                         and isinstance(nxt, ToTorchImage) and nxt.device is not None
                         and torch.device(nxt.device).type == "cuda"):
                     dec.set_pin_output(True)
+                    from slipstream import _pinned
+                    _pinned.register_loader(self)
 
     def _propagate_seed_repeat(self, T: int) -> None:
         """Tell every decoder / augmentation in the pipelines to share random params across T rows."""
@@ -1247,11 +1254,19 @@ class SlipstreamLoader:
         ev = getattr(self, '_stop_event', None)
         if ev is not None:
             ev.set()
+        q = getattr(self, '_output_queue', None)
+        if q is not None:                         # unblock a worker stuck on put(); drop queued batches (and
+            while True:                           # the pinned ring slots they reference)
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
         th = getattr(self, '_worker_thread', None)
         if th is not None and th.is_alive():
             th.join(timeout=5.0)
         self._worker_thread = None
         self._stop_event = None
+        self._output_queue = None
 
     def _iter_threaded(self):
         """Threaded iteration with async prefetching."""
@@ -1272,6 +1287,7 @@ class SlipstreamLoader:
         output_queue: queue.Queue = queue.Queue(maxsize=self.batches_ahead)
         stop_event = threading.Event()
         self._stop_event = stop_event
+        self._output_queue = output_queue
         num_slots = len(self._data_banks) if self._data_banks else 1
 
         # Get the image field storage for direct access
@@ -1445,18 +1461,18 @@ class SlipstreamLoader:
         return (per_rank + self.batch_size - 1) // self.batch_size
 
     def shutdown(self) -> None:
-        """Release resources."""
+        """Release resources: stop the prefetch worker, shut the stages down and drop their pinned host
+        buffers (the loader can still be iterated again; buffers are reallocated on demand)."""
         self._stop_worker()
         for field_name, pipeline in getattr(self, 'pipelines', {}).items():
-            if field_name in self._multi_pipeline_fields:
-                for sub_pipeline in pipeline:
-                    for transform in sub_pipeline:
-                        if hasattr(transform, 'shutdown'):
-                            transform.shutdown()
-            else:
-                for transform in pipeline:
-                    if hasattr(transform, 'shutdown'):
-                        transform.shutdown()
+            stages = ([t for sub in pipeline for t in sub] if field_name in self._multi_pipeline_fields
+                      else list(pipeline))
+            for transform in stages:
+                if hasattr(transform, 'shutdown'):
+                    transform.shutdown()
+                for obj in (transform, getattr(transform, '_decoder', None)):
+                    if hasattr(obj, 'release_pinned'):
+                        obj.release_pinned()
 
     def sync_remote_cache(self) -> tuple[int, int]:
         """Manually sync local cache with remote S3 cache.

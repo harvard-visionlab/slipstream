@@ -882,6 +882,14 @@ class YUV420NumbaBatchDecoder:
             if hasattr(self, "_yuv_dest_buffer"):
                 self._yuv_dest_buffer = None
 
+    def release_pinned(self) -> None:
+        """Drop the pinned output buffers (after their copies finished); reallocated on the next batch."""
+        if self.pin_output:
+            self._fence_output()
+            self._dest_buffer = self._chw_buffer = None
+            if hasattr(self, "_yuv_dest_buffer"):
+                self._yuv_dest_buffer = None
+
     def _out_zeros(self, shape):
         if self.pin_output:
             from slipstream import _pinned

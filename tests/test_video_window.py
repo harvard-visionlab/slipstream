@@ -255,6 +255,7 @@ class TestDecodeVideoWindow:
             finally:
                 loader.shutdown()
             assert stage._stage_host == (out_dev == "cuda")
+            assert not stage._ring and not stage._slot_events      # 0.18.1: shutdown drops the pinned ring
             return got
 
         ref = run("cpu", False)

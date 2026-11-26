@@ -5,11 +5,20 @@ A decoder whose next pipeline stage is ``ToTorchImage(<cuda>)`` writes its outpu
 a buffer to the GPU asynchronously on a side stream and records an event; the decoder calls :func:`fence`
 before writing its output buffers again, so a buffer is never overwritten while a copy still reads it.
 Only memory allocated here takes the async path: user tensors, pinned or not, keep the synchronous copy.
+
+Exit (0.18.1): torch's host allocator caches freed pinned blocks and never returns them before the process
+ends, leaving gigabytes (a video ring) to driver teardown at exit. An atexit hook stops the loaders that use
+pinned buffers, drops every holder's buffers, and returns the cached blocks with cudaFreeHost while the
+process is still healthy; it prints one line (bytes released, seconds) to stderr.
 """
 
 from __future__ import annotations
 
+import atexit
+import gc
+import sys
 import threading
+import time
 import weakref
 
 import numpy as np
@@ -20,6 +29,74 @@ _ranges: list[tuple[int, int]] = []           # (start, end) of every pinned buf
 _pending: list = []                           # events of async copies that may still read those buffers
 _streams: dict[int, torch.cuda.Stream] = {}   # side stream per CUDA device
 async_copies = 0                              # count of async copies issued (tests check the path was taken)
+_holders: weakref.WeakSet = weakref.WeakSet()   # objects with release_pinned() (video stages)
+_loaders: weakref.WeakSet = weakref.WeakSet()   # loaders whose decoders write pinned buffers
+
+
+def register_holder(obj) -> None:
+    """`obj.release_pinned()` drops its pinned buffers; called at interpreter exit."""
+    _holders.add(obj)
+
+
+def register_loader(loader) -> None:
+    """`loader.shutdown()` (stops prefetching, releases its stages' pinned buffers) runs at interpreter exit."""
+    _loaders.add(loader)
+
+
+def _rss_mb() -> float:
+    """Resident set size in MB (Linux; pinned pages count, VmPin does not), or nan."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS"):
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        pass
+    return float("nan")
+
+
+def empty_host_cache() -> None:
+    """Return torch's cached (free) pinned host blocks to the driver."""
+    fn = (getattr(getattr(torch, "accelerator", None), "empty_host_cache", None)
+          or getattr(torch._C, "_host_emptyCache", None))
+    if fn is not None:
+        fn()
+
+
+def release_all() -> None:
+    """Stop registered loaders, drop all pinned buffers, wait for the GPU, free the cached pinned blocks."""
+    if not (_loaders or _holders) or not torch.cuda.is_initialized():
+        return
+    t, rss = time.perf_counter(), _rss_mb()
+    for ld in list(_loaders):
+        try:
+            ld.shutdown()
+        except Exception:
+            pass
+    for h in list(_holders):
+        try:
+            h.release_pinned()
+        except Exception:
+            pass
+    torch.cuda.synchronize()
+    with _lock:
+        _pending.clear()
+        _streams.clear()
+    gc.collect()
+    empty_host_cache()
+    print(f"slipstream: released pinned host memory at exit (RSS {rss:.0f} -> {_rss_mb():.0f} MB) in "
+          f"{time.perf_counter() - t:.2f} s",
+          file=sys.stderr, flush=True)
+
+
+def _release_at_exit() -> None:
+    try:
+        release_all()
+    except BaseException:                     # never block or fail interpreter exit
+        pass
+
+
+atexit.register(_release_at_exit)
 
 
 def zeros(shape) -> np.ndarray:

@@ -117,3 +117,52 @@ def test_presets_get_pinned():
                                                                      loader.pipelines.values() for s in pl]
     finally:
         loader.shutdown()
+
+
+def test_shutdown_drops_pinned_buffers_and_loader_still_iterates():
+    """0.18.1: shutdown() releases the decoders' pinned buffers; the next epoch reallocates them."""
+    from slipstream import SlipstreamDataset
+    path = _cache("jpeg")
+    if path is None:
+        pytest.skip("no real jpeg val cache")
+    loader = SlipstreamLoader(SlipstreamDataset(input_dir=str(path)), batch_size=64, shuffle=False, seed=0,
+                              verbose=False, exclude_fields=["path"], image_format="jpeg", indices=np.arange(128),
+                              pipelines={"image": [DecodeCenterCrop(64), ToTorchImage("cuda")]})
+    dec = loader.pipelines["image"][0]._decoder
+    first = [b["image"].cpu() for b in loader]
+    it = iter(loader)
+    next(it)                                         # abandoned mid-epoch: worker + queued batches alive
+    loader.shutdown()
+    assert dec.pin_output and dec._dest_buffer is None and dec._chw_buffer is None
+    second = [b["image"].cpu() for b in loader]
+    loader.shutdown()
+    assert all(torch.equal(a, b) for a, b in zip(first, second, strict=True))
+
+
+def test_exit_hook_releases_pinned_memory(tmp_path):
+    """0.18.1: a process that leaves a pinned loader mid-epoch (no shutdown) frees its pinned memory in the
+    atexit hook, prints one line, and exits cleanly."""
+    import subprocess
+    import sys
+    if _cache("jpeg") is None:
+        pytest.skip("no real jpeg val cache")
+    script = tmp_path / "exit_pinned.py"
+    script.write_text(
+        "import numpy as np\n"
+        "from slipstream import SlipstreamDataset, SlipstreamLoader\n"
+        "from slipstream.decoders import DecodeRandomResizedCrop\n"
+        "from slipstream.transforms import ToTorchImage\n"
+        "from tests.test_ssl_params import _cache\n"
+        "ds = SlipstreamDataset(input_dir=str(_cache('jpeg')))\n"
+        "loader = SlipstreamLoader(ds, batch_size=256, verbose=False, exclude_fields=['path'],\n"
+        "    image_format='jpeg', indices=np.arange(2048),\n"
+        "    pipelines={'image': [DecodeRandomResizedCrop(size=224, seed=1), ToTorchImage('cuda')]})\n"
+        "it = iter(loader)\n"
+        "for _ in range(3):\n"
+        "    b = next(it)\n"
+        "print('done', b['image'].shape, flush=True)\n")
+    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=120,
+                       cwd=str(__import__("pathlib").Path(__file__).parents[1]))
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert "done" in r.stdout
+    assert "slipstream: released pinned host memory at exit" in r.stderr, r.stderr[-2000:]

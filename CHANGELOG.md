@@ -4,6 +4,23 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.18.1] - unreleased
+
+### Fixed
+
+- Pinned host memory (0.18.0) is now released before the process exits instead of being left to CUDA
+  driver teardown. This matters most for the video ring: (batches_ahead+2) x B x T x 3 x H x W bytes,
+  about 2.5 GB per rank at B=64, T=61, 168x224. Suspected, not yet confirmed, as the cause of 4-GPU
+  Kempner jobs staying alive about 21 min after training (tjepa-redux, 4 of 10 jobs on 0.18.0, 0 of 16 on
+  0.17.0).
+  - An atexit hook does the release (`slipstream._pinned`). It stops the loaders that use pinned buffers,
+    drops the buffers, waits for the GPU, and returns torch's cached pinned blocks with cudaFreeHost. It
+    prints one line to stderr: `slipstream: released pinned host memory at exit (RSS a -> b MB) in t s`.
+    On machina, freeing 2 GB took 0.5 s.
+  - `SlipstreamLoader.shutdown()` also drops its stages' pinned buffers: the video ring and the image
+    decoders' output buffers. The loader can be iterated again; the buffers are reallocated. It also drains
+    the prefetch queue, so a worker blocked on `put()` no longer waits out the 5 s join timeout.
+
 ## [0.18.0] - 2026-11-24
 
 ### Added

@@ -406,6 +406,8 @@ class DecodeVideoWindow(BatchTransform):
 
     def _alloc(self, shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
         if self._stage_host:
+            from slipstream import _pinned
+            _pinned.register_holder(self)                # released at interpreter exit (release_pinned)
             return torch.empty(shape, dtype=dtype, pin_memory=True)
         return torch.empty(shape, dtype=dtype, device=self.output_device)
 
@@ -526,6 +528,20 @@ class DecodeVideoWindow(BatchTransform):
         for t in self.transforms:
             if hasattr(t, "shutdown"):
                 t.shutdown()
+        self.release_pinned()
+
+    def release_pinned(self) -> None:
+        """Drop the pinned host ring once its async copies have finished (reallocated on the next batch).
+        Batches still being decoded keep their own slot alive until collected."""
+        if not self._stage_host:
+            return
+        with self._ring_lock:
+            for ev in self._slot_events.values():
+                ev.synchronize()
+            self._slot_events.clear()
+            self._ring.clear()
+            self._ring_pos = 0
+            self._h2d_stream = None
 
     def __repr__(self) -> str:
         tr = ", ".join(type(t).__name__ for t in self.transforms)
