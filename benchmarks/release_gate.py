@@ -15,7 +15,9 @@ Run on the reference machine (machina) from a clean checkout of the commit to be
    regression. (``benchmarks/results/gate/`` holds the older warm-only, partial-epoch results.)
 4. Times DecodeVideoWindow augmentation, aug_mode="frame" vs "clip" (benchmarks/video_aug_modes.py), on
    each device: FAIL if frame mode is more than --tolerance slower than clip mode (George 2026-11-10).
-5. ``--append-md`` appends the table to BENCHMARKS.md ("Release gate" section).
+5. Times a CombinedDataset loader against a single-dataset loader on the same records
+   (benchmarks/combined_overhead.py, warm): FAIL if combined is more than --tolerance slower (0.19.0).
+6. ``--append-md`` appends the table to BENCHMARKS.md ("Release gate" section).
 
 Commit the results file (and BENCHMARKS.md) with the release.
 """
@@ -34,6 +36,7 @@ import warnings
 from datetime import date
 from pathlib import Path
 
+from benchmarks.combined_overhead import run as run_combined
 from benchmarks.loader_ablation import MULTICROP_STEPS, STEPS, run_epochs
 from benchmarks.video_aug_modes import CHAIN as VIDEO_CHAIN
 from benchmarks.video_aug_modes import run as run_video_aug
@@ -145,10 +148,11 @@ def main() -> int:
     results = {f: run_epochs(a.cache_root, f, epochs=a.epochs) for f in ("jpeg", "yuv420")}
     import torch
     video = {d: run_video_aug(a.cache_root, d, iters=100 if d == "cuda" else 30) for d in (["cuda"] if torch.cuda.is_available() else []) + ["cpu"]}
+    combined = {f: run_combined(a.cache_root, f, epochs=a.epochs) for f in ("jpeg", "yuv420")}
     meta["load_after"] = _quiet(a.max_load)[1]
     meta["forced_busy"] = not ok
     res = {"meta": meta, "params": {"epochs": a.epochs, "batch_size": 512, "samples": "imagenet1k val, full"},
-           "results": results, "video_aug": video}
+           "results": results, "video_aug": video, "combined": combined}
 
     host_dir = RESULTS / meta["host"]
     base = _baseline(host_dir, meta["version"])
@@ -165,6 +169,14 @@ def main() -> int:
             fails.append(f"video aug {dev}: frame {r['frame']:,.0f} vs clip {r['clip']:,.0f} frames/s ({r['ratio']:.2f}x)")
         vlines.append(f"| {dev} | {r['B']} x {r['T']} | {r['clip']:,.0f} | {r['frame']:,.0f} | {r['ratio']:.3f}"
                       + (" ✗" if bad else "") + " |")
+    clines = ["CombinedDataset vs single dataset, same records (step C, warm img/s):", "",
+              "| fmt | single | combined | combined/single |", "| --- | ---: | ---: | ---: |"]
+    for fmt, r in combined.items():
+        bad = r["ratio"] < 1 - a.tolerance
+        if bad:
+            fails.append(f"combined {fmt}: {r['combined']:,.0f} vs single {r['single']:,.0f} img/s ({r['ratio']:.2f}x)")
+        clines.append(f"| {fmt} | {r['single']:,.0f} | {r['combined']:,.0f} | {r['ratio']:.3f}" + (" ✗" if bad else "") + " |")
+    vlines += [""] + clines
     print("\n".join(header + lines + [""] + vlines))
     if not a.no_save:
         host_dir.mkdir(parents=True, exist_ok=True)

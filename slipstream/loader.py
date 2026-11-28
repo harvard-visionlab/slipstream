@@ -284,6 +284,8 @@ class SlipstreamLoader:
         raw_loader = SlipstreamLoader(dataset, batch_size=256)
     """
 
+    _combined = None          # CombinedDataset, when the loader mixes several datasets (set in __init__)
+
     def __init__(
         self,
         dataset: Any,
@@ -523,7 +525,19 @@ class SlipstreamLoader:
                         presync_s3_endpoint_url=presync_s3_endpoint_url, remote_cache=remote_cache,
                         remote_cache_endpoint_url=remote_cache_endpoint_url, force_rebuild=force_rebuild,
                         on_invalid_cache=on_invalid_cache, verbose=verbose)
-        self.cache, self._remote_cache_full = self._open_cache(dataset, **cache_kw)
+        from slipstream.combined import CombinedCache, CombinedDataset
+        self._combined: CombinedDataset | None = dataset if isinstance(dataset, CombinedDataset) else None
+        if self._combined is not None:
+            unsupported = [name for name, used in (("window", self.window_size > 1), ("group", self.group > 1),
+                                                   ("indices", self.indices is not None),
+                                                   ("sample_data", bool(self.sample_data))) if used]
+            if unsupported:
+                raise NotImplementedError(f"CombinedDataset does not support {', '.join(unsupported)} yet")
+            caches = [self._open_cache(d, **cache_kw)[0] for d in self._combined.datasets]
+            self.cache = CombinedCache(self._combined, caches, verbose=verbose)
+            self._remote_cache_full = None
+        else:
+            self.cache, self._remote_cache_full = self._open_cache(dataset, **cache_kw)
 
         # Auto-detect image fields from cache field types
         # TODO: Future enhancement - generalize prefetch banks to handle multiple
@@ -569,8 +583,18 @@ class SlipstreamLoader:
         # must never trigger YUV420 detection or conversion.
         primary_is_image = self.image_field in self._image_fields
 
-        # Check if cache stores non-JPEG images as YUV420 (auto-converted during build)
-        stored_format = self.cache.get_image_format(self.image_field) if primary_is_image else "jpeg"
+        if self._combined is not None:
+            if not primary_is_image:
+                raise NotImplementedError("CombinedDataset: the primary field must be an image field "
+                                          "(raw bytes / video sources are not supported yet)")
+            self._image_storage, fmt = self.cache.primary_storage(self.image_field, image_format, verbose)
+            if fmt != image_format and verbose:
+                print(f"CombinedDataset: a source stores YUV420 only, using YUV420 for all sources")
+            image_format = self.image_format = fmt
+            stored_format = image_format                 # the combined storage is already in it
+        else:
+            # Check if cache stores non-JPEG images as YUV420 (auto-converted during build)
+            stored_format = self.cache.get_image_format(self.image_field) if primary_is_image else "jpeg"
         if primary_is_image and stored_format == "yuv420" and image_format == "jpeg":
             # Non-JPEG images were converted to YUV420 during cache build
             # Override user's image_format to use the stored format
@@ -594,7 +618,7 @@ class SlipstreamLoader:
             elif verbose:
                 print(f"Loaded YUV420 cache ({yuv_storage.num_samples:,} samples)")
             self._image_storage = yuv_storage
-        else:
+        elif self._combined is None:
             self._image_storage = self.cache.fields.get(self.image_field)
 
         # Configure pipelines for image fields based on the effective format
@@ -862,10 +886,17 @@ class SlipstreamLoader:
         Returns:
             Array of sample indices for this rank to process.
         """
-        n = self._num_anchors()
-        pos = np.arange(n, dtype=np.int64)          # positions into self.indices (or the anchor range)
+        combined = getattr(self, "_combined", None)  # (tests call this on namespaces)
+        if combined is not None:                     # mixed, shuffled order of all sources (pure f(seed, epoch))
+            order = combined.epoch_order(self.cache.sizes, self.seed, epoch, self.shuffle)
+            n = len(order)
+            pos = np.arange(n, dtype=np.int64)
+        else:
+            order = None
+            n = self._num_anchors()
+            pos = np.arange(n, dtype=np.int64)          # positions into self.indices (or the anchor range)
 
-        if self.shuffle:
+        if self.shuffle and order is None:
             rng = epoch_rng(self.seed, epoch)
             rng.shuffle(pos)
 
@@ -880,6 +911,8 @@ class SlipstreamLoader:
             pos = pos[self.rank::self.world_size]
 
         self._epoch_positions = pos                  # lets the iterators pick up sample_data per batch
+        if order is not None:
+            return order[pos]
         return self.indices[pos] if self.indices is not None else pos
 
     def _batch_sample_data(self, start: int, end: int) -> dict[str, np.ndarray]:
@@ -891,6 +924,8 @@ class SlipstreamLoader:
 
     def _num_anchors(self) -> int:
         """Number of samples (anchors when windowed) before sharding."""
+        if getattr(self, "_combined", None) is not None:
+            return self._combined.epoch_size(self.cache.sizes)
         if self.indices is not None:
             return len(self.indices)
         return len(self.cache) - (self.window_size - 1) * self.window_stride
@@ -1508,6 +1543,8 @@ class SlipstreamLoader:
         Raises:
             RuntimeError: If s5cmd is not installed
         """
+        if self._combined is not None:
+            raise NotImplementedError("CombinedDataset: sync each source's cache with its own loader")
         if self._remote_cache is None or self._remote_cache_full is None:
             if self.verbose:
                 print("No remote_cache configured, skipping sync")
@@ -1585,7 +1622,14 @@ class SlipstreamLoader:
 
         from tqdm.auto import tqdm
 
-        cache_dir = Path(self.cache.cache_dir)
+        if self._combined is not None:
+            if indices is not None:
+                raise NotImplementedError("CombinedDataset: warmup_cache reads whole caches only (indices=None)")
+            cache_dirs = [Path(d) for d in self.cache.cache_dirs]
+            cache_dir = cache_dirs[0]
+        else:
+            cache_dir = Path(self.cache.cache_dir)
+            cache_dirs = [cache_dir]
 
         if indices is None:
             indices = self.indices
@@ -1598,8 +1642,8 @@ class SlipstreamLoader:
             indices = np.arange(len(self.cache), dtype=np.int64)   # windows over all anchors cover the whole cache
 
         if indices is None:
-            # Full read: every data file in the cache dir
-            data_files = sorted(cache_dir.glob("*.bin")) + sorted(cache_dir.glob("*.npy"))
+            # Full read: every data file in the cache dir (every source's, combined)
+            data_files = [f for d in cache_dirs for f in sorted(d.glob("*.bin")) + sorted(d.glob("*.npy"))]
             plan = [(f, None) for f in data_files]
             num_records = len(self.cache)
         else:

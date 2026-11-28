@@ -140,6 +140,33 @@ Fixed window starts come from per-sample side data aligned with `indices`:
 `DecodeVideoWindow(..., t0_key="t0")`. Repeating a record index with different `t0` gives
 several windows per clip. Needs `torchcodec` with loadable FFmpeg libraries.
 
+## Mixing datasets (`CombinedDataset`)
+
+Several datasets in one loader, mixed by weight. Each keeps its own cache (built, verified and synced as
+usual); nothing is merged on disk, so the mix can change from run to run.
+
+```python
+from slipstream import CombinedDataset, SlipstreamDataset, SlipstreamLoader
+
+combined = CombinedDataset(
+    [in10, in100],                     # SlipstreamDatasets
+    weights=[0.5, 0.5],                # share of each epoch (default: proportional to size)
+    epoch_length="longest",            # "shortest" (no repeats), "longest" (small sources cycle) or an int
+    labels="disjoint", num_classes=[10, 100],   # or labels="shared" when the class ids mean the same thing
+    rename_fields=[None, {"cls": "label"}],     # per source {stored: standard}
+)
+loader = SlipstreamLoader(combined, batch_size=256, seed=0, pipelines={"image": [...]})
+```
+
+- Every epoch, source `i` contributes exactly `round(w_i * N)` samples; each source walks its own shuffle
+  (a new one per pass) and the selection is shuffled together, so every batch is mixed. The order is a pure
+  function of `(seed, epoch)` and is sharded across ranks like any other.
+- Batches have the fields all sources share (after renaming), plus `source_id`, `source_label` (as stored)
+  and `label` (offset by the earlier sources' `num_classes` with `"disjoint"`, unchanged with `"shared"`).
+  `loader.cache.locate(batch["_indices"])` gives `(source, record)` pairs.
+- Image fields must decode in one format: if any source stores only YUV420, every source uses YUV420.
+- Not yet: video / raw `bytes` sources, `window=`, `group=`, `indices=`, `sample_data=`.
+
 ## Live sources: simulators and replay buffers (`SourceLoader`)
 
 `SourceLoader` runs slipstream's GPU augmentations and seeding on batches from any object with

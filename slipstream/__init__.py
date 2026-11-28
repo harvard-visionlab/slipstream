@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 from slipstream.version import __version__
 
 if TYPE_CHECKING:  # eager imports for type checkers / IDEs
+    from slipstream.combined import CombinedDataset
     from slipstream.backends.ffcv_file import (
         FFCVFileDataset,
         FFCVFilePrefetchingDataLoader,
@@ -202,6 +203,7 @@ _LAZY: dict[str, str] = {
     'ToDevice': 'slipstream.transforms',
     'ToTorchImage': 'slipstream.transforms',
     'SlipstreamLoader': 'slipstream.loader',
+    'CombinedDataset': 'slipstream.combined',
     'make_train_pipeline': 'slipstream.pipelines',
     'make_val_pipeline': 'slipstream.pipelines',
     'supervised_train': 'slipstream.pipelines',
@@ -236,6 +238,7 @@ __all__ = [
     "__version__",
     # Core dataset
     "SlipstreamDataset",
+    "CombinedDataset",
     "decode_image",
     "is_hf_image_dict",
     "is_image_bytes",

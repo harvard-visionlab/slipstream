@@ -147,6 +147,46 @@ def _load_variable_batch_sequential(
         sizes[i] = data_size
 
 
+@njit(nogil=True, parallel=True, cache=True, fastmath=True, error_model='numpy')
+def _load_variable_rows_parallel(
+    batch_indices: np.ndarray,
+    rows: np.ndarray,
+    metadata: np.ndarray,
+    data_region: np.ndarray,
+    destination: np.ndarray,
+    sizes: np.ndarray,
+) -> None:
+    """Like _load_variable_batch_parallel, but sample i goes to row rows[i] (CombinedDataset: one call per source)."""
+    for i in prange(len(batch_indices)):
+        sample_id = batch_indices[i]
+        r = rows[i]
+        data_ptr = metadata[sample_id]['data_ptr']
+        data_size = metadata[sample_id]['data_size']
+        for j in range(data_size):              # explicit byte loop: see _load_variable_batch_parallel
+            destination[r, j] = data_region[data_ptr + j]
+        sizes[r] = data_size
+
+
+@njit(nogil=True, cache=True, fastmath=True, error_model='numpy')
+def _load_variable_rows_sequential(
+    batch_indices: np.ndarray,
+    rows: np.ndarray,
+    metadata: np.ndarray,
+    data_region: np.ndarray,
+    destination: np.ndarray,
+    sizes: np.ndarray,
+) -> None:
+    """Sequential _load_variable_rows_parallel (the prefetch thread must not use numba's parallel layer)."""
+    for i in range(len(batch_indices)):
+        sample_id = batch_indices[i]
+        r = rows[i]
+        data_ptr = metadata[sample_id]['data_ptr']
+        data_size = metadata[sample_id]['data_size']
+        for j in range(data_size):
+            destination[r, j] = data_region[data_ptr + j]
+        sizes[r] = data_size
+
+
 # =============================================================================
 # Image Format Detection
 # =============================================================================
@@ -782,6 +822,24 @@ class ImageBytesStorage(FieldStorage):
         widths[:batch_size] = self._widths[indices]
 
         return batch_size
+
+    def load_rows_into(
+        self,
+        indices: NDArray[np.int64],
+        rows: NDArray[np.int64],
+        dest: np.ndarray,
+        sizes: np.ndarray,
+        heights: np.ndarray,
+        widths: np.ndarray,
+        parallel: bool = True,
+    ) -> None:
+        """Load sample ``indices[i]`` into row ``rows[i]`` of the given buffers (CombinedDataset)."""
+        indices = np.ascontiguousarray(indices, dtype=np.int64)
+        rows = np.ascontiguousarray(rows, dtype=np.int64)
+        fn = _load_variable_rows_parallel if parallel else _load_variable_rows_sequential
+        fn(indices, rows, self._metadata, self._data_array, dest, sizes)
+        heights[rows] = self._heights[indices]
+        widths[rows] = self._widths[indices]
 
     @classmethod
     def build(

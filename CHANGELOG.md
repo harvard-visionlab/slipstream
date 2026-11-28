@@ -4,6 +4,32 @@ All notable changes to slipstream are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the version lives in
 `slipstream/version.py`.
 
+## [0.19.0] - unreleased
+
+### Added
+
+- `CombinedDataset`: several datasets mixed by weight in one `SlipstreamLoader` (George 2026-11-27).
+  - Combined at load time: each source keeps its own slipcache; the loader reads every batch from all of
+    them through `CombinedCache`, which routes each record to its source (`ImageBytesStorage.load_rows_into`,
+    a row-targeted copy kernel, so the prefetch bank is filled without an extra copy).
+  - `weights` (default proportional to size), `epoch_length="shortest" | "longest" | int`: source `i` gives
+    exactly `round(w_i * N)` samples per epoch (largest remainder); "longest" cycles smaller sources, a new
+    shuffle per pass. Order is a pure function of `(seed, epoch)` (`seeds.STREAM_COMBINE`), sharded as usual.
+  - `rename_fields` per source; only fields every source shares are loaded. `labels="disjoint"` (with
+    `num_classes`, label = source label + offset) or `"shared"`; batches add `source_id` and `source_label`.
+  - One image format for all sources (YUV420 siblings built per source when needed).
+  - Not yet: video / raw bytes primaries, `window`, `group`, `indices`, `sample_data`; `warmup_cache` reads
+    whole caches only; `sync_remote_cache` raises (sync per source).
+  - Single-dataset loading is unchanged. The release gate adds a combined-vs-single line
+    (`benchmarks/combined_overhead.py`, FAIL below 90 %).
+  - Tests: `tests/test_combined.py` (imagenet10 + imagenet100 val, every sample checked against
+    single-source reads).
+
+### Changed
+
+- `SlipstreamLoader._open_cache`: the per-dataset cache opening (download, verify, build, sync) moved out of
+  `__init__` unchanged, so it can run once per source.
+
 ## [0.18.1] - 2026-11-26
 
 ### Fixed
