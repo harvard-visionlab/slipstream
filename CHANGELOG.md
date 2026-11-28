@@ -18,7 +18,9 @@ All notable changes to slipstream are documented here. Versions follow
   - `rename_fields` per source; only fields every source shares are loaded. `labels="disjoint"` (with
     `num_classes`, label = source label + offset) or `"shared"`; batches add `source_id` and `source_label`.
   - One image format for all sources (YUV420 siblings built per source when needed).
-  - Not yet: video / raw bytes primaries, `window`, `group`, `indices`, `sample_data`; `warmup_cache` reads
+  - Raw `bytes` primaries (video) are routed as-is, e.g. into `DecodeVideoWindow`
+    (`tests/test_combined_video.py`: procthor-routes objects + empty val, bytes checked against single-source reads).
+  - Not yet: `window`, `group`, `indices`, `sample_data`; `warmup_cache` reads
     whole caches only; `sync_remote_cache` raises (sync per source).
   - Single-dataset loading is unchanged. The release gate adds a combined-vs-single line
     (`benchmarks/combined_overhead.py`, FAIL below 90 %).

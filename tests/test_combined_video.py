@@ -56,6 +56,11 @@ def test_video_bytes_match_single_source_reads():
 
 
 def test_video_decode_through_combined_loader():
+    pytest.importorskip("torchcodec")
+    try:
+        from torchcodec.decoders import VideoDecoder  # noqa: F401  (libtorchcodec must load)
+    except Exception as exc:
+        pytest.skip(f"torchcodec not usable here: {str(exc)[:120]}")
     from slipstream.decoders import DecodeVideoWindow
 
     def run():
