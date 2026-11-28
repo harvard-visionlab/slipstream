@@ -65,8 +65,8 @@ class CombinedDataset:
                                    num_classes=[10, 100], epoch_length="longest")
         loader = SlipstreamLoader(combined, batch_size=256, seed=0, pipelines=...)
 
-    Not supported yet (raise in the loader): ``window=``, ``group=``, ``indices=``, ``sample_data=``,
-    raw ``bytes`` primary fields (video).
+    Raw ``bytes`` primaries (video, e.g. with ``DecodeVideoWindow``) are routed like images, without format
+    handling. Not supported yet (raise in the loader): ``window=``, ``group=``, ``indices=``, ``sample_data=``.
     """
 
     def __init__(

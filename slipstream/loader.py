@@ -583,10 +583,11 @@ class SlipstreamLoader:
         # must never trigger YUV420 detection or conversion.
         primary_is_image = self.image_field in self._image_fields
 
-        if self._combined is not None:
-            if not primary_is_image:
-                raise NotImplementedError("CombinedDataset: the primary field must be an image field "
-                                          "(raw bytes / video sources are not supported yet)")
+        if self._combined is not None and not primary_is_image:
+            # raw bytes primary (video): routed as-is, no format handling
+            self._image_storage = self.cache.fields.get(self.image_field)
+            stored_format = "jpeg"
+        elif self._combined is not None:
             self._image_storage, fmt = self.cache.primary_storage(self.image_field, image_format, verbose)
             if fmt != image_format and verbose:
                 print(f"CombinedDataset: a source stores YUV420 only, using YUV420 for all sources")
