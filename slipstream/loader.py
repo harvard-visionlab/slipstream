@@ -519,164 +519,11 @@ class SlipstreamLoader:
                 else:
                     self.pipelines[field_name] = [pipeline]
 
-        # Pre-sync S3 data to local disk if requested
-        if presync_s3:
-            remote = getattr(dataset, 'remote_dir', None)
-            if remote is not None:
-                from slipstream.s3_sync import sync_s3_dataset
-                sync_s3_dataset(
-                    remote,
-                    cache_dir=dataset.cache_path,
-                    endpoint_url=presync_s3_endpoint_url,
-                    numworkers=presync_s3_workers,
-                    verbose=verbose,
-                )
-            elif verbose:
-                print("presync_s3=True but dataset has no remote_dir, skipping sync")
-
-        # Build or load optimized cache
-        cache_dir = dataset.cache_path
-        if cache_dir is None:
-            raise ValueError(
-                "Cannot determine cache directory from dataset. "
-                "Ensure the dataset has a valid cache_dir."
-            )
-
-        # Remote cache discovery and download
-        if on_invalid_cache not in ("rebuild", "raise"):
-            raise ValueError(f"on_invalid_cache must be 'rebuild' or 'raise', got {on_invalid_cache!r}")
-        from slipstream.cache import CacheIntegrityError, _looks_like_slipcache
-        from slipstream.dataset import _PrebuiltCacheReader
-        reads_cache_directly = isinstance(getattr(dataset, "_reader", None), _PrebuiltCacheReader)
-        if reads_cache_directly and force_rebuild:
-            raise ValueError(f"force_rebuild=True on {cache_dir}: the dataset reads this cache directly, "
-                             "so there is no source to rebuild it from")
-        may_rebuild = on_invalid_cache == "rebuild" and not reads_cache_directly
-
-        def invalid(problems: list[str] | str, cause: Exception | None = None):
-            why = "the dataset reads this cache directly (no other source)" if reads_cache_directly \
-                else "on_invalid_cache='raise'"
-            msg = (f"slipcache at {cache_dir} is invalid: {problems}. Not deleting or rebuilding it ({why}). "
-                   "Restore it from a trusted copy, verify with OptimizedCache.check_integrity(deep=True).")
-            raise CacheIntegrityError(msg) from cause
-
-        cache_downloaded = False
-        remote_cache_full: str | None = None
-        if remote_cache is not None:
-            from slipstream.s3_sync import (
-                download_s3_cache,
-                s3_path_exists,
-                upload_s3_cache,
-            )
-
-            dataset_hash = dataset.dataset_hash
-            remote_cache_full = f"{remote_cache.rstrip('/')}/slipcache-{dataset_hash}"
-            self._remote_cache_full = remote_cache_full
-            remote_manifest = f"{remote_cache_full}/{MANIFEST_FILE}"
-
-            if s3_path_exists(remote_manifest, endpoint_url=remote_cache_endpoint_url):
-                if verbose:
-                    print(f"Found remote cache: {remote_cache_full}")
-
-                # Download if local cache doesn't exist or force_rebuild
-                if force_rebuild or not OptimizedCache.exists(cache_dir):
-                    success = download_s3_cache(
-                        remote_cache_full,
-                        cache_dir,
-                        endpoint_url=remote_cache_endpoint_url,
-                        verbose=verbose,
-                    )
-                    if success:
-                        cache_downloaded = True
-                        # Verify downloaded cache integrity
-                        is_valid, problems = OptimizedCache.check_integrity(cache_dir)
-                        if not is_valid:
-                            if verbose:
-                                print(f"  Downloaded cache is incomplete: {problems}")
-                            if not may_rebuild:
-                                invalid(problems)
-                            OptimizedCache._wipe_cache(cache_dir, "; ".join(problems))
-                            cache_downloaded = False
-                    elif verbose:
-                        print("  Download failed, will build locally")
-                else:
-                    if verbose:
-                        print("  Local cache exists, skipping download")
-            elif verbose:
-                print(f"Remote cache not found, will build and upload: {remote_cache_full}")
-
-        # Check integrity of existing local cache
-        needs_build = force_rebuild and not cache_downloaded
-        if not needs_build and not cache_downloaded:
-            if OptimizedCache.exists(cache_dir):
-                is_valid, problems = OptimizedCache.check_integrity(cache_dir)
-                if not is_valid:
-                    if verbose:
-                        print(f"Cache integrity check failed: {problems}")
-                    if not may_rebuild:
-                        invalid(problems)
-                    OptimizedCache._wipe_cache(cache_dir, "; ".join(problems))
-                    needs_build = True
-                else:
-                    needs_build = False
-            elif _looks_like_slipcache(cache_dir):
-                # Data files without a manifest (e.g. scratch purge removed it): never build over
-                # them -- another job may be reading them.
-                invalid(["manifest.json missing but slipcache data files are present"])
-            else:
-                needs_build = True
-
-        if needs_build:
-            if verbose:
-                print("Building optimized cache (this only happens once)...")
-            self.cache = OptimizedCache.build(dataset, cache_dir, verbose=verbose)
-
-            # Upload to remote if requested and we just built it
-            if remote_cache is not None:
-                from slipstream.s3_sync import upload_s3_cache
-                try:
-                    upload_s3_cache(
-                        cache_dir,
-                        remote_cache_full,
-                        endpoint_url=remote_cache_endpoint_url,
-                        verbose=verbose,
-                    )
-                except Exception as e:
-                    if verbose:
-                        print(f"  Warning: Failed to upload cache to S3: {e}")
-                        print("  Continuing with local cache")
-        else:
-            try:
-                self.cache = OptimizedCache.load(cache_dir, verbose=verbose)
-            except Exception as e:
-                # Safety net: if load fails despite integrity check passing
-                # (e.g., race condition, corrupt mmap), wipe and rebuild
-                if not may_rebuild:
-                    invalid(f"load failed: {e}", e)
-                if verbose:
-                    print(f"Cache load failed ({e}), rebuilding...")
-                OptimizedCache._wipe_cache(cache_dir, str(e))
-                self.cache = OptimizedCache.build(dataset, cache_dir, verbose=verbose)
-
-        # Bidirectional sync: ensure local and remote have same derived files
-        # (indexes, stats, YUV420 cache, etc.)
-        if remote_cache is not None:
-            from slipstream.s3_sync import sync_s3_cache
-            try:
-                downloaded, uploaded = sync_s3_cache(
-                    cache_dir,
-                    remote_cache_full,
-                    endpoint_url=remote_cache_endpoint_url,
-                    verbose=verbose,
-                )
-                # If files were downloaded, reload indexes to pick them up
-                if downloaded > 0:
-                    self.cache._discover_indexes()
-                    if verbose and self.cache._indexes:
-                        print(f"  Loaded indexes: {list(self.cache._indexes.keys())}")
-            except Exception as e:
-                if verbose:
-                    print(f"  Warning: Bidirectional sync failed: {e}")
+        cache_kw = dict(presync_s3=presync_s3, presync_s3_workers=presync_s3_workers,
+                        presync_s3_endpoint_url=presync_s3_endpoint_url, remote_cache=remote_cache,
+                        remote_cache_endpoint_url=remote_cache_endpoint_url, force_rebuild=force_rebuild,
+                        on_invalid_cache=on_invalid_cache, verbose=verbose)
+        self.cache, self._remote_cache_full = self._open_cache(dataset, **cache_kw)
 
         # Auto-detect image fields from cache field types
         # TODO: Future enhancement - generalize prefetch banks to handle multiple
@@ -825,6 +672,180 @@ class SlipstreamLoader:
         self._worker_thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
         self._output_queue: queue.Queue | None = None
+
+    @staticmethod
+    def _open_cache(
+        dataset: Any,
+        *,
+        presync_s3: bool,
+        presync_s3_workers: int,
+        presync_s3_endpoint_url: str | None,
+        remote_cache: str | None,
+        remote_cache_endpoint_url: str | None,
+        force_rebuild: bool,
+        on_invalid_cache: str,
+        verbose: bool,
+    ) -> tuple[OptimizedCache, str | None]:
+        """Open (download / verify / build) the slipcache of one dataset; returns it and its remote path."""
+        # Pre-sync S3 data to local disk if requested
+        if presync_s3:
+            remote = getattr(dataset, 'remote_dir', None)
+            if remote is not None:
+                from slipstream.s3_sync import sync_s3_dataset
+                sync_s3_dataset(
+                    remote,
+                    cache_dir=dataset.cache_path,
+                    endpoint_url=presync_s3_endpoint_url,
+                    numworkers=presync_s3_workers,
+                    verbose=verbose,
+                )
+            elif verbose:
+                print("presync_s3=True but dataset has no remote_dir, skipping sync")
+
+        # Build or load optimized cache
+        cache_dir = dataset.cache_path
+        if cache_dir is None:
+            raise ValueError(
+                "Cannot determine cache directory from dataset. "
+                "Ensure the dataset has a valid cache_dir."
+            )
+
+        # Remote cache discovery and download
+        if on_invalid_cache not in ("rebuild", "raise"):
+            raise ValueError(f"on_invalid_cache must be 'rebuild' or 'raise', got {on_invalid_cache!r}")
+        from slipstream.cache import CacheIntegrityError, _looks_like_slipcache
+        from slipstream.dataset import _PrebuiltCacheReader
+        reads_cache_directly = isinstance(getattr(dataset, "_reader", None), _PrebuiltCacheReader)
+        if reads_cache_directly and force_rebuild:
+            raise ValueError(f"force_rebuild=True on {cache_dir}: the dataset reads this cache directly, "
+                             "so there is no source to rebuild it from")
+        may_rebuild = on_invalid_cache == "rebuild" and not reads_cache_directly
+
+        def invalid(problems: list[str] | str, cause: Exception | None = None):
+            why = "the dataset reads this cache directly (no other source)" if reads_cache_directly \
+                else "on_invalid_cache='raise'"
+            msg = (f"slipcache at {cache_dir} is invalid: {problems}. Not deleting or rebuilding it ({why}). "
+                   "Restore it from a trusted copy, verify with OptimizedCache.check_integrity(deep=True).")
+            raise CacheIntegrityError(msg) from cause
+
+        cache_downloaded = False
+        remote_cache_full: str | None = None
+        if remote_cache is not None:
+            from slipstream.s3_sync import (
+                download_s3_cache,
+                s3_path_exists,
+                upload_s3_cache,
+            )
+
+            dataset_hash = dataset.dataset_hash
+            remote_cache_full = f"{remote_cache.rstrip('/')}/slipcache-{dataset_hash}"
+            remote_manifest = f"{remote_cache_full}/{MANIFEST_FILE}"
+
+            if s3_path_exists(remote_manifest, endpoint_url=remote_cache_endpoint_url):
+                if verbose:
+                    print(f"Found remote cache: {remote_cache_full}")
+
+                # Download if local cache doesn't exist or force_rebuild
+                if force_rebuild or not OptimizedCache.exists(cache_dir):
+                    success = download_s3_cache(
+                        remote_cache_full,
+                        cache_dir,
+                        endpoint_url=remote_cache_endpoint_url,
+                        verbose=verbose,
+                    )
+                    if success:
+                        cache_downloaded = True
+                        # Verify downloaded cache integrity
+                        is_valid, problems = OptimizedCache.check_integrity(cache_dir)
+                        if not is_valid:
+                            if verbose:
+                                print(f"  Downloaded cache is incomplete: {problems}")
+                            if not may_rebuild:
+                                invalid(problems)
+                            OptimizedCache._wipe_cache(cache_dir, "; ".join(problems))
+                            cache_downloaded = False
+                    elif verbose:
+                        print("  Download failed, will build locally")
+                else:
+                    if verbose:
+                        print("  Local cache exists, skipping download")
+            elif verbose:
+                print(f"Remote cache not found, will build and upload: {remote_cache_full}")
+
+        # Check integrity of existing local cache
+        needs_build = force_rebuild and not cache_downloaded
+        if not needs_build and not cache_downloaded:
+            if OptimizedCache.exists(cache_dir):
+                is_valid, problems = OptimizedCache.check_integrity(cache_dir)
+                if not is_valid:
+                    if verbose:
+                        print(f"Cache integrity check failed: {problems}")
+                    if not may_rebuild:
+                        invalid(problems)
+                    OptimizedCache._wipe_cache(cache_dir, "; ".join(problems))
+                    needs_build = True
+                else:
+                    needs_build = False
+            elif _looks_like_slipcache(cache_dir):
+                # Data files without a manifest (e.g. scratch purge removed it): never build over
+                # them -- another job may be reading them.
+                invalid(["manifest.json missing but slipcache data files are present"])
+            else:
+                needs_build = True
+
+        if needs_build:
+            if verbose:
+                print("Building optimized cache (this only happens once)...")
+            cache = OptimizedCache.build(dataset, cache_dir, verbose=verbose)
+
+            # Upload to remote if requested and we just built it
+            if remote_cache is not None:
+                from slipstream.s3_sync import upload_s3_cache
+                try:
+                    upload_s3_cache(
+                        cache_dir,
+                        remote_cache_full,
+                        endpoint_url=remote_cache_endpoint_url,
+                        verbose=verbose,
+                    )
+                except Exception as e:
+                    if verbose:
+                        print(f"  Warning: Failed to upload cache to S3: {e}")
+                        print("  Continuing with local cache")
+        else:
+            try:
+                cache = OptimizedCache.load(cache_dir, verbose=verbose)
+            except Exception as e:
+                # Safety net: if load fails despite integrity check passing
+                # (e.g., race condition, corrupt mmap), wipe and rebuild
+                if not may_rebuild:
+                    invalid(f"load failed: {e}", e)
+                if verbose:
+                    print(f"Cache load failed ({e}), rebuilding...")
+                OptimizedCache._wipe_cache(cache_dir, str(e))
+                cache = OptimizedCache.build(dataset, cache_dir, verbose=verbose)
+
+        # Bidirectional sync: ensure local and remote have same derived files
+        # (indexes, stats, YUV420 cache, etc.)
+        if remote_cache is not None:
+            from slipstream.s3_sync import sync_s3_cache
+            try:
+                downloaded, uploaded = sync_s3_cache(
+                    cache_dir,
+                    remote_cache_full,
+                    endpoint_url=remote_cache_endpoint_url,
+                    verbose=verbose,
+                )
+                # If files were downloaded, reload indexes to pick them up
+                if downloaded > 0:
+                    cache._discover_indexes()
+                    if verbose and cache._indexes:
+                        print(f"  Loaded indexes: {list(cache._indexes.keys())}")
+            except Exception as e:
+                if verbose:
+                    print(f"  Warning: Bidirectional sync failed: {e}")
+
+        return cache, remote_cache_full
 
     def _generate_indices(self, epoch: int) -> np.ndarray:
         """Generate sample indices for an epoch.
